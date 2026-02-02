@@ -39,6 +39,7 @@ Usage:
  vpnctl export csv --config <path> --out <file>
  vpnctl up --config <path> [--wg-config <path>] [--dry-run]
  vpnctl down --config <path> [--wg-config <path>]
+ vpnctl status --config <path> [--iface <name>]
 
 Planned:
  vpnctl node add
@@ -74,6 +75,8 @@ func main() {
 		handleUp(os.Args[2:])
 	case "down":
 		handleDown(os.Args[2:])
+	case "status":
+		handleStatus(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usage)
@@ -188,7 +191,10 @@ func nodeJoin(args []string) {
 		fatal(err)
 	}
 
-	fmt.Fprintf(os.Stdout, "registered node_id=%s peers=%d\n", resp.NodeID, len(resp.Peers))
+	if cfg.Node.VPNIP == "" && resp.VPNIP != "" {
+		cfg.Node.VPNIP = resp.VPNIP
+	}
+	fmt.Fprintf(os.Stdout, "registered node_id=%s peers=%d vpn_ip=%s\n", resp.NodeID, len(resp.Peers), cfg.Node.VPNIP)
 
 	if cfg.Node.DirectMode != "off" && len(cfg.Node.STUNServers) > 0 {
 		publicAddr, natType, err := stunutil.Probe(ctx, cfg.Node.STUNServers, 5*time.Second)
@@ -581,6 +587,25 @@ func handleUp(args []string) {
 	if *wgConfig != "" {
 		cfg.Node.WGConfigPath = *wgConfig
 	}
+	if err := fillServerConfig(cfg.Node); err != nil {
+		fatal(err)
+	}
+	if cfg.Node.VPNIP == "" && cfg.Node.Controller != "" {
+		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		resp, err := client.Register(context.Background(), api.RegisterRequest{
+			Name:       cfg.Node.Name,
+			PubKey:     cfg.Node.WGPublicKey,
+			VPNIP:      cfg.Node.VPNIP,
+			Endpoint:   "",
+			PublicAddr: "",
+			NATType:    "",
+			DirectMode: cfg.Node.DirectMode,
+		})
+		if err != nil {
+			fatal(err)
+		}
+		cfg.Node.VPNIP = resp.VPNIP
+	}
 
 	conf, err := wireguard.RenderNode(*cfg.Node)
 	if err != nil {
@@ -593,7 +618,11 @@ func handleUp(args []string) {
 	if err := wireguard.WriteConfig(cfg.Node.WGConfigPath, conf); err != nil {
 		fatal(err)
 	}
-	fatal(wireguard.Up(cfg.Node.WGConfigPath))
+	setConf, err := wireguard.RenderSetConf(*cfg.Node, nil)
+	if err != nil {
+		fatal(err)
+	}
+	fatal(wireguard.Up(*cfg.Node, setConf))
 }
 
 func handleDown(args []string) {
@@ -617,7 +646,35 @@ func handleDown(args []string) {
 		cfg.Node.WGConfigPath = *wgConfig
 	}
 
-	fatal(wireguard.Down(cfg.Node.WGConfigPath))
+	fatal(wireguard.Down(*cfg.Node))
+}
+
+func handleStatus(args []string) {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	iface := fs.String("iface", "", "wireguard interface name")
+	_ = fs.Parse(args)
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fatal(err)
+	}
+	if cfg.Node != nil {
+		config.ApplyDefaults(&cfg)
+	}
+
+	if *iface == "" {
+		if cfg.Node == nil {
+			fatal(errors.New("--iface required when node config is missing"))
+		}
+		*iface = cfg.Node.WGInterface
+	}
+
+	out, err := wireguard.Status(*iface)
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Fprintln(os.Stdout, out)
 }
 
 func loadConfig(path string) (config.Config, error) {
@@ -793,6 +850,28 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Sync()
+}
+
+func fillServerConfig(node *config.NodeConfig) error {
+	if node == nil {
+		return errors.New("node config required")
+	}
+	if node.ServerPublicKey != "" && node.ServerEndpoint != "" && len(node.ServerAllowedIPs) > 0 {
+		return nil
+	}
+	if node.Controller == "" {
+		return errors.New("node.controller required to fetch server config")
+	}
+	client := api.NewClient(normalizeBaseURL(node.Controller))
+	resp, err := client.WGConfig(context.Background(), node.Name)
+	if err != nil {
+		return err
+	}
+	node.ServerPublicKey = resp.ServerPublicKey
+	node.ServerEndpoint = resp.ServerEndpoint
+	node.ServerAllowedIPs = resp.ServerAllowedIPs
+	node.ServerKeepaliveSec = resp.ServerKeepaliveSec
+	return nil
 }
 
 func waitForSignal() {

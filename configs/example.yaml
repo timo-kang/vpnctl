@@ -11,6 +11,12 @@ controller:
   stun_servers:
     - "stun.l.google.com:19302"
   metrics_path: "/var/lib/vpnctl/metrics.csv"
+  server_public_key: "<server-public-key>"
+  server_endpoint: "<server-ip:port>"
+  server_allowed_ips:
+    - "10.7.0.0/24"
+  server_keepalive_sec: 25
+  vpn_cidr: "10.7.0.0/24"
 
 node:
   name: "modem-a"
@@ -24,11 +30,9 @@ node:
   mtu: 1280
   direct_mode: "auto" # auto|off
   keepalive_sec: 25
-  server_public_key: "<server-public-key>"
-  server_endpoint: "<server-ip:port>"
-  server_allowed_ips:
-    - "10.7.0.0/24"
-  server_keepalive_sec: 25
+  policy_routing_enabled: true
+  policy_routing_table: 51820
+  policy_routing_priority: 1000
   keepalive_interval_sec: 30
   stun_interval_sec: 60
   candidates_interval_sec: 30

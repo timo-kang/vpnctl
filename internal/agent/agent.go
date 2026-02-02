@@ -13,15 +13,19 @@ import (
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
 	"vpnctl/internal/stunutil"
+	"vpnctl/internal/wireguard"
 )
 
 // Run starts the long-running node agent loop.
 func Run(ctx context.Context, cfg config.NodeConfig) error {
 	client := api.NewClient(normalizeBaseURL(cfg.Controller))
 
-	nodeID, err := register(ctx, client, cfg)
+	nodeID, vpnIP, err := register(ctx, client, cfg)
 	if err != nil {
 		return err
+	}
+	if cfg.VPNIP == "" && vpnIP != "" {
+		cfg.VPNIP = vpnIP
 	}
 
 	var shared *direct.Shared
@@ -46,13 +50,17 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 	var candidates []api.PeerCandidate
 	var publicAddr string
 	var natType string
+	activePeers := map[string]wireguard.Peer{}
+	if err := fillServerConfig(ctx, client, &cfg); err != nil {
+		log.Printf("server config fetch failed: %v", err)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-keepaliveTicker.C:
-			_, err := register(ctx, client, cfg)
+			_, _, err := register(ctx, client, cfg)
 			if err != nil {
 				log.Printf("keepalive register failed: %v", err)
 			}
@@ -88,18 +96,18 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 			if cfg.DirectMode == "off" {
 				break
 			}
+			if shared == nil {
+				break
+			}
+			desired := map[string]wireguard.Peer{}
 			for _, peer := range candidates {
-				peerAddr := peer.PublicAddr
-				path := "direct"
-				if peerAddr == "" {
-					peerAddr = peer.Endpoint
-					path = "relay"
-				}
-				if peerAddr == "" {
+				if peer.PublicAddr == "" {
 					continue
 				}
+				peerAddr := peer.PublicAddr
+				path := "direct"
 
-				rtt, err := direct.ProbePeer(ctx, ":0", peerAddr, 2*time.Second)
+				rtt, err := shared.ProbePeer(ctx, peerAddr, 2*time.Second)
 				success := err == nil
 				if !success {
 					_ = client.SubmitDirectResult(ctx, api.DirectResultRequest{
@@ -134,6 +142,16 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 					PublicAddr: publicAddr,
 				}
 
+				allowedIP := normalizeHostIP(peer.VPNIP)
+				if allowedIP != "" && peer.PubKey != "" && peer.PublicAddr != "" {
+					desired[peer.ID] = wireguard.Peer{
+						PublicKey:    peer.PubKey,
+						Endpoint:     peer.PublicAddr,
+						AllowedIPs:   []string{allowedIP},
+						KeepaliveSec: cfg.KeepaliveSec,
+					}
+				}
+
 				if cfg.MetricsPath != "" {
 					if err := metrics.AppendCSV(cfg.MetricsPath, []model.Metric{sample}); err != nil {
 						log.Printf("append metrics failed: %v", err)
@@ -141,6 +159,17 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 				}
 				if err := client.SubmitMetrics(ctx, api.MetricsRequest{NodeID: nodeID, Samples: []model.Metric{sample}}); err != nil {
 					log.Printf("submit metrics failed: %v", err)
+				}
+			}
+
+			if cfg.ServerPublicKey != "" && cfg.ServerEndpoint != "" && len(cfg.ServerAllowedIPs) > 0 {
+				if !peersEqual(activePeers, desired) {
+					peerList := peersFromMap(desired)
+					if err := wireguard.ApplyPeers(cfg, peerList); err != nil {
+						log.Printf("apply peers failed: %v", err)
+					} else {
+						activePeers = desired
+					}
 				}
 			}
 		}
@@ -167,7 +196,7 @@ func probeShared(ctx context.Context, shared *direct.Shared, servers []string, t
 	return results[0], stunutil.Classify(results), nil
 }
 
-func register(ctx context.Context, client *api.Client, cfg config.NodeConfig) (string, error) {
+func register(ctx context.Context, client *api.Client, cfg config.NodeConfig) (string, string, error) {
 	resp, err := client.Register(ctx, api.RegisterRequest{
 		Name:       cfg.Name,
 		PubKey:     cfg.WGPublicKey,
@@ -178,9 +207,9 @@ func register(ctx context.Context, client *api.Client, cfg config.NodeConfig) (s
 		DirectMode: cfg.DirectMode,
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return resp.NodeID, nil
+	return resp.NodeID, resp.VPNIP, nil
 }
 
 func normalizeBaseURL(addr string) string {
@@ -188,4 +217,74 @@ func normalizeBaseURL(addr string) string {
 		return addr
 	}
 	return "http://" + addr
+}
+
+func fillServerConfig(ctx context.Context, client *api.Client, cfg *config.NodeConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("node config required")
+	}
+	if cfg.ServerPublicKey != "" && cfg.ServerEndpoint != "" && len(cfg.ServerAllowedIPs) > 0 {
+		return nil
+	}
+	if cfg.Controller == "" {
+		return fmt.Errorf("node.controller required to fetch server config")
+	}
+	resp, err := client.WGConfig(ctx, cfg.Name)
+	if err != nil {
+		return err
+	}
+	cfg.ServerPublicKey = resp.ServerPublicKey
+	cfg.ServerEndpoint = resp.ServerEndpoint
+	cfg.ServerAllowedIPs = resp.ServerAllowedIPs
+	cfg.ServerKeepaliveSec = resp.ServerKeepaliveSec
+	return nil
+}
+
+func normalizeHostIP(value string) string {
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "/") {
+		return value
+	}
+	return value + "/32"
+}
+
+func peersEqual(a, b map[string]wireguard.Peer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		other, ok := b[k]
+		if !ok {
+			return false
+		}
+		if v.PublicKey != other.PublicKey || v.Endpoint != other.Endpoint || v.KeepaliveSec != other.KeepaliveSec {
+			return false
+		}
+		if !stringSlicesEqual(v.AllowedIPs, other.AllowedIPs) {
+			return false
+		}
+	}
+	return true
+}
+
+func peersFromMap(m map[string]wireguard.Peer) []wireguard.Peer {
+	peers := make([]wireguard.Peer, 0, len(m))
+	for _, peer := range m {
+		peers = append(peers, peer)
+	}
+	return peers
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

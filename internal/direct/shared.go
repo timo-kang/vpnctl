@@ -17,6 +17,7 @@ type Shared struct {
 	conn       *net.UDPConn
 	mu         sync.Mutex
 	stunWriter io.Writer
+	pending    map[string]chan struct{}
 }
 
 // ListenShared creates a shared UDP socket and starts the read loop.
@@ -164,6 +165,69 @@ func (s *Shared) readLoop() {
 			continue
 		}
 
+		msg := string(buf[:n])
+		if strings.HasPrefix(msg, ackPrefix) {
+			nonce := strings.TrimPrefix(msg, ackPrefix)
+			s.mu.Lock()
+			ch := s.pending[nonce]
+			if ch != nil {
+				delete(s.pending, nonce)
+				close(ch)
+			}
+			s.mu.Unlock()
+			continue
+		}
+
 		handlePacket(s.conn, addr, buf[:n])
+	}
+}
+
+// ProbePeer sends a probe using the shared socket and waits for an ack.
+func (s *Shared) ProbePeer(ctx context.Context, peerAddr string, timeout time.Duration) (time.Duration, error) {
+	if s == nil || s.conn == nil {
+		return 0, fmt.Errorf("shared socket not initialized")
+	}
+	peerUDP, err := net.ResolveUDPAddr("udp", peerAddr)
+	if err != nil {
+		return 0, err
+	}
+
+	nonce, err := randomNonce(8)
+	if err != nil {
+		return 0, err
+	}
+	payload := []byte(probePrefix + nonce)
+
+	start := time.Now()
+	ch := make(chan struct{})
+	s.mu.Lock()
+	if s.pending == nil {
+		s.pending = make(map[string]chan struct{})
+	}
+	s.pending[nonce] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if pending := s.pending[nonce]; pending == ch {
+			delete(s.pending, nonce)
+		}
+		s.mu.Unlock()
+	}()
+	if _, err := s.conn.WriteToUDP(payload, peerUDP); err != nil {
+		return 0, err
+	}
+
+	var timer <-chan time.Time
+	if timeout > 0 {
+		timer = time.After(timeout)
+	}
+
+	select {
+	case <-ch:
+		return time.Since(start), nil
+	case <-timer:
+		return 0, fmt.Errorf("probe timeout")
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
 }

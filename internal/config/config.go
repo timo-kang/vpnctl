@@ -19,6 +19,8 @@ const (
 	DefaultSTUNIntervalSec       = 60
 	DefaultCandidatesIntervalSec = 30
 	DefaultDirectIntervalSec     = 60
+	DefaultPolicyRoutingTable    = 51820
+	DefaultPolicyRoutingPriority = 1000
 )
 
 // Config holds both controller and node settings.
@@ -29,15 +31,20 @@ type Config struct {
 
 // ControllerConfig is used by the controller/server process.
 type ControllerConfig struct {
-	Listen       string   `yaml:"listen"`
-	DataDir      string   `yaml:"data_dir"`
-	WGInterface  string   `yaml:"wg_interface"`
-	WGPort       int      `yaml:"wg_port"`
-	MTU          int      `yaml:"mtu"`
-	DirectMode   string   `yaml:"direct_mode"`
-	KeepaliveSec int      `yaml:"keepalive_sec"`
-	STUNServers  []string `yaml:"stun_servers"`
-	MetricsPath  string   `yaml:"metrics_path"`
+	Listen             string   `yaml:"listen"`
+	DataDir            string   `yaml:"data_dir"`
+	WGInterface        string   `yaml:"wg_interface"`
+	WGPort             int      `yaml:"wg_port"`
+	MTU                int      `yaml:"mtu"`
+	DirectMode         string   `yaml:"direct_mode"`
+	KeepaliveSec       int      `yaml:"keepalive_sec"`
+	STUNServers        []string `yaml:"stun_servers"`
+	MetricsPath        string   `yaml:"metrics_path"`
+	ServerPublicKey    string   `yaml:"server_public_key"`
+	ServerEndpoint     string   `yaml:"server_endpoint"`
+	ServerAllowedIPs   []string `yaml:"server_allowed_ips"`
+	ServerKeepaliveSec int      `yaml:"server_keepalive_sec"`
+	VPNCIDR            string   `yaml:"vpn_cidr"`
 }
 
 // NodeConfig is used by the agent process running on a device.
@@ -59,6 +66,9 @@ type NodeConfig struct {
 	ServerEndpoint        string   `yaml:"server_endpoint"`
 	ServerAllowedIPs      []string `yaml:"server_allowed_ips"`
 	ServerKeepaliveSec    int      `yaml:"server_keepalive_sec"`
+	PolicyRoutingEnabled  bool     `yaml:"policy_routing_enabled"`
+	PolicyRoutingTable    int      `yaml:"policy_routing_table"`
+	PolicyRoutingPriority int      `yaml:"policy_routing_priority"`
 	KeepaliveIntervalSec  int      `yaml:"keepalive_interval_sec"`
 	STUNIntervalSec       int      `yaml:"stun_interval_sec"`
 	CandidatesIntervalSec int      `yaml:"candidates_interval_sec"`
@@ -107,8 +117,10 @@ func Validate(cfg Config) error {
 	if cfg.Node != nil && cfg.Node.Name == "" {
 		return fmt.Errorf("node.name is required")
 	}
-	if cfg.Node != nil && cfg.Node.Controller == "" {
-		return fmt.Errorf("node.controller is required")
+	if cfg.Node != nil {
+		if cfg.Node.Controller == "" && (cfg.Node.ServerPublicKey == "" || cfg.Node.ServerEndpoint == "" || len(cfg.Node.ServerAllowedIPs) == 0) {
+			return fmt.Errorf("node.controller is required unless server fields are set")
+		}
 	}
 	return nil
 }
@@ -139,6 +151,12 @@ func ApplyDefaults(cfg *Config) {
 		}
 		if cfg.Node.WGConfigPath == "" {
 			cfg.Node.WGConfigPath = fmt.Sprintf("/etc/wireguard/%s.conf", cfg.Node.WGInterface)
+		}
+		if cfg.Node.PolicyRoutingTable == 0 {
+			cfg.Node.PolicyRoutingTable = DefaultPolicyRoutingTable
+		}
+		if cfg.Node.PolicyRoutingPriority == 0 {
+			cfg.Node.PolicyRoutingPriority = DefaultPolicyRoutingPriority
 		}
 		if cfg.Node.MTU == 0 {
 			cfg.Node.MTU = DefaultMTU

@@ -60,6 +60,16 @@ func (c *Client) SubmitDirectResult(ctx context.Context, req DirectResultRequest
 	return c.postJSON(ctx, "/direct-result", req, nil)
 }
 
+// WGConfig fetches controller-provided server peer settings.
+func (c *Client) WGConfig(ctx context.Context, nodeID string) (WGConfigResponse, error) {
+	var resp WGConfigResponse
+	endpoint := "/wg-config?node_id=" + url.QueryEscape(nodeID)
+	if err := c.getJSON(ctx, endpoint, &resp); err != nil {
+		return resp, err
+	}
+	return resp, nil
+}
+
 func (c *Client) postJSON(ctx context.Context, path string, body any, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {

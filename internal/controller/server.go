@@ -2,8 +2,10 @@ package controller
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -41,6 +43,7 @@ func (s *Server) ListenAndServe() error {
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/nat-probe", s.handleNATProbe)
 	mux.HandleFunc("/direct-result", s.handleDirectResult)
+	mux.HandleFunc("/wg-config", s.handleWGConfig)
 
 	server := &http.Server{
 		Addr:              s.cfg.Listen,
@@ -69,16 +72,26 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	assignedVPNIP := req.VPNIP
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if assignedVPNIP == "" {
+		var err error
+		assignedVPNIP, err = allocateVPNIP(s.cfg.VPNCIDR, s.reg)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	var nodeID string
 	updated := false
 	for i := range s.reg.Nodes {
 		if s.reg.Nodes[i].Name == req.Name {
 			s.reg.Nodes[i].PubKey = req.PubKey
-			s.reg.Nodes[i].VPNIP = req.VPNIP
+			s.reg.Nodes[i].VPNIP = assignedVPNIP
 			s.reg.Nodes[i].Endpoint = req.Endpoint
 			s.reg.Nodes[i].PublicAddr = req.PublicAddr
 			s.reg.Nodes[i].NATType = req.NATType
@@ -96,7 +109,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			ID:         nodeID,
 			Name:       req.Name,
 			PubKey:     req.PubKey,
-			VPNIP:      req.VPNIP,
+			VPNIP:      assignedVPNIP,
 			Endpoint:   req.Endpoint,
 			PublicAddr: req.PublicAddr,
 			NATType:    req.NATType,
@@ -113,6 +126,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	resp := api.RegisterResponse{
 		NodeID: nodeID,
 		Peers:  s.peersLocked(nodeID),
+		VPNIP:  assignedVPNIP,
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -223,6 +237,25 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleWGConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.cfg.ServerPublicKey == "" || s.cfg.ServerEndpoint == "" || len(s.cfg.ServerAllowedIPs) == 0 {
+		writeJSONError(w, http.StatusInternalServerError, "server config not set")
+		return
+	}
+
+	resp := api.WGConfigResponse{
+		ServerPublicKey:    s.cfg.ServerPublicKey,
+		ServerEndpoint:     s.cfg.ServerEndpoint,
+		ServerAllowedIPs:   s.cfg.ServerAllowedIPs,
+		ServerKeepaliveSec: s.cfg.ServerKeepaliveSec,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) peersLocked(nodeID string) []api.PeerCandidate {
 	peers := make([]api.PeerCandidate, 0, len(s.reg.Nodes))
 	for _, node := range s.reg.Nodes {
@@ -257,4 +290,51 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func allocateVPNIP(cidr string, reg *store.Registry) (string, error) {
+	if cidr == "" {
+		return "", fmt.Errorf("vpn_cidr is required for allocation")
+	}
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return "", err
+	}
+	if !prefix.Addr().Is4() {
+		return "", fmt.Errorf("vpn_cidr must be IPv4")
+	}
+
+	used := map[netip.Addr]bool{}
+	for _, node := range reg.Nodes {
+		if node.VPNIP == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(node.VPNIP)
+		if err == nil {
+			used[p.Addr()] = true
+			continue
+		}
+		addr, err := netip.ParseAddr(node.VPNIP)
+		if err == nil {
+			used[addr] = true
+		}
+	}
+
+	base := prefix.Masked().Addr()
+	ones, bits := prefix.Bits(), 32
+	size := 1 << uint(bits-ones)
+	for i := 1; i < size-1; i++ { // skip network/broadcast
+		addr := addIPv4(base, uint32(i))
+		if !used[addr] {
+			return addr.String() + "/32", nil
+		}
+	}
+	return "", fmt.Errorf("no available vpn_ip in %s", cidr)
+}
+
+func addIPv4(base netip.Addr, offset uint32) netip.Addr {
+	v := base.As4()
+	val := uint32(v[0])<<24 | uint32(v[1])<<16 | uint32(v[2])<<8 | uint32(v[3])
+	val += offset
+	return netip.AddrFrom4([4]byte{byte(val >> 24), byte(val >> 16), byte(val >> 8), byte(val)})
 }

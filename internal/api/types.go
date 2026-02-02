@@ -28,6 +28,7 @@ type PeerCandidate struct {
 type RegisterResponse struct {
 	NodeID string          `json:"node_id"`
 	Peers  []PeerCandidate `json:"peers"`
+	VPNIP  string          `json:"vpn_ip"`
 }
 
 // CandidatesResponse returns peer candidates for a node.
@@ -55,4 +56,12 @@ type DirectResultRequest struct {
 	Success bool    `json:"success"`
 	RTTMs   float64 `json:"rtt_ms"`
 	Reason  string  `json:"reason"`
+}
+
+// WGConfigResponse supplies server peer information for nodes.
+type WGConfigResponse struct {
+	ServerPublicKey    string   `json:"server_public_key"`
+	ServerEndpoint     string   `json:"server_endpoint"`
+	ServerAllowedIPs   []string `json:"server_allowed_ips"`
+	ServerKeepaliveSec int      `json:"server_keepalive_sec"`
 }
