@@ -195,6 +195,9 @@ func nodeJoin(args []string) {
 		cfg.Node.VPNIP = resp.VPNIP
 	}
 	fmt.Fprintf(os.Stdout, "registered node_id=%s peers=%d vpn_ip=%s\n", resp.NodeID, len(resp.Peers), cfg.Node.VPNIP)
+	if err := writeBackVPNIP(*configPath, &cfg, cfg.Node.VPNIP); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to persist vpn_ip: %v\n", err)
+	}
 
 	if cfg.Node.DirectMode != "off" && len(cfg.Node.STUNServers) > 0 {
 		publicAddr, natType, err := stunutil.Probe(ctx, cfg.Node.STUNServers, 5*time.Second)
@@ -237,6 +240,26 @@ func nodeRun(args []string) {
 
 	ctx, cancel := signalContext()
 	defer cancel()
+
+	if cfg.Node.VPNIP == "" && cfg.Node.Controller != "" {
+		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		resp, err := client.Register(ctx, api.RegisterRequest{
+			Name:       cfg.Node.Name,
+			PubKey:     cfg.Node.WGPublicKey,
+			VPNIP:      cfg.Node.VPNIP,
+			Endpoint:   "",
+			PublicAddr: "",
+			NATType:    "",
+			DirectMode: cfg.Node.DirectMode,
+		})
+		if err != nil {
+			fatal(err)
+		}
+		cfg.Node.VPNIP = resp.VPNIP
+		if err := writeBackVPNIP(*configPath, &cfg, cfg.Node.VPNIP); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to persist vpn_ip: %v\n", err)
+		}
+	}
 
 	fatal(agent.Run(ctx, *cfg.Node))
 }
@@ -605,6 +628,9 @@ func handleUp(args []string) {
 			fatal(err)
 		}
 		cfg.Node.VPNIP = resp.VPNIP
+		if err := writeBackVPNIP(*configPath, &cfg, cfg.Node.VPNIP); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to persist vpn_ip: %v\n", err)
+		}
 	}
 
 	conf, err := wireguard.RenderNode(*cfg.Node)
@@ -850,6 +876,17 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Sync()
+}
+
+func writeBackVPNIP(path string, cfg *config.Config, vpnIP string) error {
+	if path == "" || cfg == nil || cfg.Node == nil || vpnIP == "" {
+		return nil
+	}
+	if cfg.Node.VPNIP == vpnIP {
+		return nil
+	}
+	cfg.Node.VPNIP = vpnIP
+	return config.Save(path, *cfg)
 }
 
 func fillServerConfig(node *config.NodeConfig) error {

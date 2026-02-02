@@ -24,6 +24,7 @@ Configuration is YAML. See `configs/example.yaml`. For `vpnctl up/down`, the nod
 Policy routing is enabled by default; override with `policy_routing_enabled: false` if needed.
 Direct keepalive tuning can be set with `direct_keepalive_*` fields on nodes.
 If `vpn_ip` is omitted, the controller can allocate it from `controller.vpn_cidr`.
+When using `node join`, `node run`, or `up` with a config path, the assigned `vpn_ip` is written back into the YAML.
 
 ## High-level architecture
 - Controller (server): node registry, peer distribution, metrics ingest.
