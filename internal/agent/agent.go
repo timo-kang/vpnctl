@@ -148,7 +148,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 						PublicKey:    peer.PubKey,
 						Endpoint:     peer.PublicAddr,
 						AllowedIPs:   []string{allowedIP},
-						KeepaliveSec: cfg.KeepaliveSec,
+						KeepaliveSec: directKeepalive(cfg, peer.NATType),
 					}
 				}
 
@@ -248,6 +248,29 @@ func normalizeHostIP(value string) string {
 		return value
 	}
 	return value + "/32"
+}
+
+func directKeepalive(cfg config.NodeConfig, natType string) int {
+	switch natType {
+	case "":
+		fallthrough
+	case stunutil.NATTypeSymmetric:
+		if cfg.DirectKeepaliveSymmetricSec > 0 {
+			return cfg.DirectKeepaliveSymmetricSec
+		}
+	case stunutil.NATTypeUnknown:
+		if cfg.DirectKeepaliveUnknownSec > 0 {
+			return cfg.DirectKeepaliveUnknownSec
+		}
+	default:
+		if cfg.DirectKeepaliveSec > 0 {
+			return cfg.DirectKeepaliveSec
+		}
+	}
+	if cfg.DirectKeepaliveSec > 0 {
+		return cfg.DirectKeepaliveSec
+	}
+	return cfg.KeepaliveSec
 }
 
 func peersEqual(a, b map[string]wireguard.Peer) bool {

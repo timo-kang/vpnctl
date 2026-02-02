@@ -9,18 +9,21 @@ import (
 )
 
 const (
-	DefaultMTU                   = 1280
-	DefaultWGInterface           = "wg0"
-	DefaultWGPort                = 51820
-	DefaultKeepaliveSec          = 25
-	DefaultDirectMode            = "auto"
-	DefaultMetricsWindow         = "5m"
-	DefaultKeepaliveIntervalSec  = 30
-	DefaultSTUNIntervalSec       = 60
-	DefaultCandidatesIntervalSec = 30
-	DefaultDirectIntervalSec     = 60
-	DefaultPolicyRoutingTable    = 51820
-	DefaultPolicyRoutingPriority = 1000
+	DefaultMTU                         = 1280
+	DefaultWGInterface                 = "wg0"
+	DefaultWGPort                      = 51820
+	DefaultKeepaliveSec                = 25
+	DefaultDirectMode                  = "auto"
+	DefaultMetricsWindow               = "5m"
+	DefaultKeepaliveIntervalSec        = 30
+	DefaultSTUNIntervalSec             = 60
+	DefaultCandidatesIntervalSec       = 30
+	DefaultDirectIntervalSec           = 60
+	DefaultPolicyRoutingTable          = 51820
+	DefaultPolicyRoutingPriority       = 1000
+	DefaultDirectKeepaliveSec          = 25
+	DefaultDirectKeepaliveSymmetricSec = 15
+	DefaultDirectKeepaliveUnknownSec   = 20
 )
 
 // Config holds both controller and node settings.
@@ -49,30 +52,33 @@ type ControllerConfig struct {
 
 // NodeConfig is used by the agent process running on a device.
 type NodeConfig struct {
-	Name                  string   `yaml:"name"`
-	Controller            string   `yaml:"controller"`
-	WGInterface           string   `yaml:"wg_interface"`
-	WGConfigPath          string   `yaml:"wg_config_path"`
-	WGPrivateKey          string   `yaml:"wg_private_key"`
-	WGPublicKey           string   `yaml:"wg_public_key"`
-	WGListenPort          int      `yaml:"wg_listen_port"`
-	VPNIP                 string   `yaml:"vpn_ip"`
-	MTU                   int      `yaml:"mtu"`
-	DirectMode            string   `yaml:"direct_mode"`
-	KeepaliveSec          int      `yaml:"keepalive_sec"`
-	STUNServers           []string `yaml:"stun_servers"`
-	MetricsPath           string   `yaml:"metrics_path"`
-	ServerPublicKey       string   `yaml:"server_public_key"`
-	ServerEndpoint        string   `yaml:"server_endpoint"`
-	ServerAllowedIPs      []string `yaml:"server_allowed_ips"`
-	ServerKeepaliveSec    int      `yaml:"server_keepalive_sec"`
-	PolicyRoutingEnabled  bool     `yaml:"policy_routing_enabled"`
-	PolicyRoutingTable    int      `yaml:"policy_routing_table"`
-	PolicyRoutingPriority int      `yaml:"policy_routing_priority"`
-	KeepaliveIntervalSec  int      `yaml:"keepalive_interval_sec"`
-	STUNIntervalSec       int      `yaml:"stun_interval_sec"`
-	CandidatesIntervalSec int      `yaml:"candidates_interval_sec"`
-	DirectIntervalSec     int      `yaml:"direct_interval_sec"`
+	Name                        string   `yaml:"name"`
+	Controller                  string   `yaml:"controller"`
+	WGInterface                 string   `yaml:"wg_interface"`
+	WGConfigPath                string   `yaml:"wg_config_path"`
+	WGPrivateKey                string   `yaml:"wg_private_key"`
+	WGPublicKey                 string   `yaml:"wg_public_key"`
+	WGListenPort                int      `yaml:"wg_listen_port"`
+	VPNIP                       string   `yaml:"vpn_ip"`
+	MTU                         int      `yaml:"mtu"`
+	DirectMode                  string   `yaml:"direct_mode"`
+	KeepaliveSec                int      `yaml:"keepalive_sec"`
+	STUNServers                 []string `yaml:"stun_servers"`
+	MetricsPath                 string   `yaml:"metrics_path"`
+	ServerPublicKey             string   `yaml:"server_public_key"`
+	ServerEndpoint              string   `yaml:"server_endpoint"`
+	ServerAllowedIPs            []string `yaml:"server_allowed_ips"`
+	ServerKeepaliveSec          int      `yaml:"server_keepalive_sec"`
+	PolicyRoutingEnabled        *bool    `yaml:"policy_routing_enabled"`
+	PolicyRoutingTable          int      `yaml:"policy_routing_table"`
+	PolicyRoutingPriority       int      `yaml:"policy_routing_priority"`
+	DirectKeepaliveSec          int      `yaml:"direct_keepalive_sec"`
+	DirectKeepaliveSymmetricSec int      `yaml:"direct_keepalive_symmetric_sec"`
+	DirectKeepaliveUnknownSec   int      `yaml:"direct_keepalive_unknown_sec"`
+	KeepaliveIntervalSec        int      `yaml:"keepalive_interval_sec"`
+	STUNIntervalSec             int      `yaml:"stun_interval_sec"`
+	CandidatesIntervalSec       int      `yaml:"candidates_interval_sec"`
+	DirectIntervalSec           int      `yaml:"direct_interval_sec"`
 }
 
 // Load reads and parses a YAML config file.
@@ -152,11 +158,24 @@ func ApplyDefaults(cfg *Config) {
 		if cfg.Node.WGConfigPath == "" {
 			cfg.Node.WGConfigPath = fmt.Sprintf("/etc/wireguard/%s.conf", cfg.Node.WGInterface)
 		}
+		if cfg.Node.PolicyRoutingEnabled == nil {
+			enabled := true
+			cfg.Node.PolicyRoutingEnabled = &enabled
+		}
 		if cfg.Node.PolicyRoutingTable == 0 {
 			cfg.Node.PolicyRoutingTable = DefaultPolicyRoutingTable
 		}
 		if cfg.Node.PolicyRoutingPriority == 0 {
 			cfg.Node.PolicyRoutingPriority = DefaultPolicyRoutingPriority
+		}
+		if cfg.Node.DirectKeepaliveSec == 0 {
+			cfg.Node.DirectKeepaliveSec = DefaultDirectKeepaliveSec
+		}
+		if cfg.Node.DirectKeepaliveSymmetricSec == 0 {
+			cfg.Node.DirectKeepaliveSymmetricSec = DefaultDirectKeepaliveSymmetricSec
+		}
+		if cfg.Node.DirectKeepaliveUnknownSec == 0 {
+			cfg.Node.DirectKeepaliveUnknownSec = DefaultDirectKeepaliveUnknownSec
 		}
 		if cfg.Node.MTU == 0 {
 			cfg.Node.MTU = DefaultMTU
@@ -180,4 +199,15 @@ func ApplyDefaults(cfg *Config) {
 			cfg.Node.DirectIntervalSec = DefaultDirectIntervalSec
 		}
 	}
+}
+
+// PolicyRoutingEnabled returns true when policy routing should be active.
+func PolicyRoutingEnabled(cfg *NodeConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.PolicyRoutingEnabled == nil {
+		return true
+	}
+	return *cfg.PolicyRoutingEnabled
 }

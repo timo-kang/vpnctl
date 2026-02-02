@@ -21,7 +21,8 @@ Configuration is YAML. See `configs/example.yaml`. For `vpnctl up/down`, the nod
 - `wg_private_key`, `vpn_ip`
 - Either `controller` (to fetch server fields) or manual `server_*` fields
 - `wg_config_path` (or use `--wg-config`)
-For direct routing, enable `policy_routing_enabled` and set `policy_routing_table`/`policy_routing_priority` on nodes.
+Policy routing is enabled by default; override with `policy_routing_enabled: false` if needed.
+Direct keepalive tuning can be set with `direct_keepalive_*` fields on nodes.
 If `vpn_ip` is omitted, the controller can allocate it from `controller.vpn_cidr`.
 
 ## High-level architecture

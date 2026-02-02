@@ -170,7 +170,7 @@ func Up(cfg config.NodeConfig, setConf string) error {
 			return err
 		}
 	}
-	if cfg.PolicyRoutingEnabled {
+	if config.PolicyRoutingEnabled(&cfg) {
 		if err := ensurePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable); err != nil {
 			return err
 		}
@@ -180,7 +180,7 @@ func Up(cfg config.NodeConfig, setConf string) error {
 
 // Down removes the WireGuard interface.
 func Down(cfg config.NodeConfig) error {
-	if cfg.PolicyRoutingEnabled {
+	if config.PolicyRoutingEnabled(&cfg) {
 		_ = flushPolicyTable(cfg.PolicyRoutingTable)
 		_ = deletePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable)
 	}
@@ -224,7 +224,7 @@ func ApplyPeers(cfg config.NodeConfig, peers []Peer) error {
 	if err := syncConf(cfg.WGInterface, setConf); err != nil {
 		return err
 	}
-	if cfg.PolicyRoutingEnabled {
+	if config.PolicyRoutingEnabled(&cfg) {
 		if err := ensurePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable); err != nil {
 			return err
 		}

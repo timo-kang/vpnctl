@@ -33,6 +33,9 @@ node:
   policy_routing_enabled: true
   policy_routing_table: 51820
   policy_routing_priority: 1000
+  direct_keepalive_sec: 25
+  direct_keepalive_symmetric_sec: 15
+  direct_keepalive_unknown_sec: 20
   keepalive_interval_sec: 30
   stun_interval_sec: 60
   candidates_interval_sec: 30
