@@ -30,6 +30,7 @@ Usage:
   vpnctl controller init --config <path>
   vpnctl node join --config <path>
   vpnctl node run --config <path>
+  vpnctl node sync-config --config <path>
   vpnctl direct serve --config <path> [--listen :0]
   vpnctl direct test --config <path> --peer <name>
   vpnctl discover --config <path>
@@ -138,6 +139,8 @@ func handleNode(args []string) {
 		nodeJoin(args[1:])
 	case "run":
 		nodeRun(args[1:])
+	case "sync-config":
+		nodeSyncConfig(args[1:])
 	case "add":
 		fmt.Fprintln(os.Stderr, "node add not implemented yet")
 		os.Exit(2)
@@ -262,6 +265,83 @@ func nodeRun(args []string) {
 	}
 
 	fatal(agent.Run(ctx, *cfg.Node))
+}
+
+func nodeSyncConfig(args []string) {
+	fs := flag.NewFlagSet("node sync-config", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	_ = fs.Parse(args)
+
+	if *configPath == "" {
+		fatal(errors.New("--config is required"))
+	}
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fatal(err)
+	}
+	if cfg.Node == nil {
+		fatal(errors.New("node config required"))
+	}
+	config.ApplyDefaults(&cfg)
+	if cfg.Node.Controller == "" {
+		fatal(errors.New("node.controller is required"))
+	}
+
+	client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+	ctx := context.Background()
+
+	updated := false
+	if cfg.Node.WGPublicKey != "" {
+		resp, err := client.Register(ctx, api.RegisterRequest{
+			Name:       cfg.Node.Name,
+			PubKey:     cfg.Node.WGPublicKey,
+			VPNIP:      cfg.Node.VPNIP,
+			Endpoint:   "",
+			PublicAddr: "",
+			NATType:    "",
+			DirectMode: cfg.Node.DirectMode,
+		})
+		if err != nil {
+			fatal(err)
+		}
+		if cfg.Node.VPNIP == "" && resp.VPNIP != "" {
+			cfg.Node.VPNIP = resp.VPNIP
+			updated = true
+		}
+	}
+
+	if cfg.Node.ServerPublicKey == "" || cfg.Node.ServerEndpoint == "" || len(cfg.Node.ServerAllowedIPs) == 0 {
+		resp, err := client.WGConfig(ctx, cfg.Node.Name)
+		if err != nil {
+			fatal(err)
+		}
+		if cfg.Node.ServerPublicKey == "" {
+			cfg.Node.ServerPublicKey = resp.ServerPublicKey
+			updated = true
+		}
+		if cfg.Node.ServerEndpoint == "" {
+			cfg.Node.ServerEndpoint = resp.ServerEndpoint
+			updated = true
+		}
+		if len(cfg.Node.ServerAllowedIPs) == 0 {
+			cfg.Node.ServerAllowedIPs = resp.ServerAllowedIPs
+			updated = true
+		}
+		if cfg.Node.ServerKeepaliveSec == 0 && resp.ServerKeepaliveSec > 0 {
+			cfg.Node.ServerKeepaliveSec = resp.ServerKeepaliveSec
+			updated = true
+		}
+	}
+
+	if updated {
+		if err := config.Save(*configPath, cfg); err != nil {
+			fatal(err)
+		}
+		fmt.Fprintln(os.Stdout, "config updated")
+		return
+	}
+	fmt.Fprintln(os.Stdout, "config already up to date")
 }
 
 func handleDirect(args []string) {

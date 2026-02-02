@@ -39,6 +39,7 @@ vpnctl controller init --config configs/example.yaml
 # On node
 vpnctl node join --config configs/example.yaml
 vpnctl node run --config configs/example.yaml
+vpnctl node sync-config --config configs/example.yaml
 
 # Discovery + metrics
 vpnctl discover
