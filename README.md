@@ -27,17 +27,26 @@ Configuration is YAML. See `configs/example.yaml`.
 ## Example usage (planned)
 ```bash
 # On server
-vpnctl controller init --listen 0.0.0.0:8443
+vpnctl controller init --config configs/example.yaml
 
 # On node
-vpnctl node join --controller 10.10.10.1:8443 --name modem-a --direct auto
-vpnctl up
+vpnctl node join --config configs/example.yaml
+vpnctl node run --config configs/example.yaml
 
 # Discovery + metrics
 vpnctl discover
 vpnctl ping --all
-vpnctl perf --duration 10s
+vpnctl perf --peer modem-b --count 200 --size 1200
 vpnctl export csv --out metrics.csv
+```
+
+## Direct probe (best-effort)
+```bash
+# On each node
+vpnctl direct serve --config configs/example.yaml
+
+# From another node
+vpnctl direct test --config configs/example.yaml --peer modem-b
 ```
 
 ## Direct path (best-effort)
@@ -48,4 +57,3 @@ vpnctl export csv --out metrics.csv
 
 ## Data plane note
 WireGuard is used for the tunnel; vpnctl is a control-plane + testing harness.
-

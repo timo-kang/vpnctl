@@ -17,17 +17,16 @@ type Node struct {
 
 // Metric is a single measurement sample.
 type Metric struct {
-	Timestamp       time.Time
-	NodeID          string
-	PeerID          string
-	Path            string // direct|relay
-	RTTMs           float64
-	JitterMs        float64
-	LossPct         float64
-	ThroughputMbps  float64
-	MTU             int
-	NATType         string
-	PublicAddr      string
-	RelayReason     string
+	Timestamp      time.Time
+	NodeID         string
+	PeerID         string
+	Path           string // direct|relay
+	RTTMs          float64
+	JitterMs       float64
+	LossPct        float64
+	ThroughputMbps float64
+	MTU            int
+	NATType        string
+	PublicAddr     string
+	RelayReason    string
 }
-

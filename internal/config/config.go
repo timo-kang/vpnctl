@@ -9,12 +9,16 @@ import (
 )
 
 const (
-	DefaultMTU           = 1280
-	DefaultWGInterface   = "wg0"
-	DefaultWGPort        = 51820
-	DefaultKeepaliveSec  = 25
-	DefaultDirectMode    = "auto"
-	DefaultMetricsWindow = "5m"
+	DefaultMTU                   = 1280
+	DefaultWGInterface           = "wg0"
+	DefaultWGPort                = 51820
+	DefaultKeepaliveSec          = 25
+	DefaultDirectMode            = "auto"
+	DefaultMetricsWindow         = "5m"
+	DefaultKeepaliveIntervalSec  = 30
+	DefaultSTUNIntervalSec       = 60
+	DefaultCandidatesIntervalSec = 30
+	DefaultDirectIntervalSec     = 60
 )
 
 // Config holds both controller and node settings.
@@ -38,17 +42,21 @@ type ControllerConfig struct {
 
 // NodeConfig is used by the agent process running on a device.
 type NodeConfig struct {
-	Name         string   `yaml:"name"`
-	Controller   string   `yaml:"controller"`
-	WGInterface  string   `yaml:"wg_interface"`
-	WGPrivateKey string   `yaml:"wg_private_key"`
-	WGPublicKey  string   `yaml:"wg_public_key"`
-	VPNIP        string   `yaml:"vpn_ip"`
-	MTU          int      `yaml:"mtu"`
-	DirectMode   string   `yaml:"direct_mode"`
-	KeepaliveSec int      `yaml:"keepalive_sec"`
-	STUNServers  []string `yaml:"stun_servers"`
-	MetricsPath  string   `yaml:"metrics_path"`
+	Name                  string   `yaml:"name"`
+	Controller            string   `yaml:"controller"`
+	WGInterface           string   `yaml:"wg_interface"`
+	WGPrivateKey          string   `yaml:"wg_private_key"`
+	WGPublicKey           string   `yaml:"wg_public_key"`
+	VPNIP                 string   `yaml:"vpn_ip"`
+	MTU                   int      `yaml:"mtu"`
+	DirectMode            string   `yaml:"direct_mode"`
+	KeepaliveSec          int      `yaml:"keepalive_sec"`
+	STUNServers           []string `yaml:"stun_servers"`
+	MetricsPath           string   `yaml:"metrics_path"`
+	KeepaliveIntervalSec  int      `yaml:"keepalive_interval_sec"`
+	STUNIntervalSec       int      `yaml:"stun_interval_sec"`
+	CandidatesIntervalSec int      `yaml:"candidates_interval_sec"`
+	DirectIntervalSec     int      `yaml:"direct_interval_sec"`
 }
 
 // Load reads and parses a YAML config file.
@@ -132,6 +140,17 @@ func ApplyDefaults(cfg *Config) {
 		if cfg.Node.KeepaliveSec == 0 {
 			cfg.Node.KeepaliveSec = DefaultKeepaliveSec
 		}
+		if cfg.Node.KeepaliveIntervalSec == 0 {
+			cfg.Node.KeepaliveIntervalSec = DefaultKeepaliveIntervalSec
+		}
+		if cfg.Node.STUNIntervalSec == 0 {
+			cfg.Node.STUNIntervalSec = DefaultSTUNIntervalSec
+		}
+		if cfg.Node.CandidatesIntervalSec == 0 {
+			cfg.Node.CandidatesIntervalSec = DefaultCandidatesIntervalSec
+		}
+		if cfg.Node.DirectIntervalSec == 0 {
+			cfg.Node.DirectIntervalSec = DefaultDirectIntervalSec
+		}
 	}
 }
-

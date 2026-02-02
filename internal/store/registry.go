@@ -62,4 +62,3 @@ func SaveRegistry(path string, reg *Registry) error {
 
 	return os.WriteFile(path, data, 0o644)
 }
-

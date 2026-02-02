@@ -22,6 +22,10 @@ node:
   mtu: 1280
   direct_mode: "auto" # auto|off
   keepalive_sec: 25
+  keepalive_interval_sec: 30
+  stun_interval_sec: 60
+  candidates_interval_sec: 30
+  direct_interval_sec: 60
   stun_servers:
     - "stun.l.google.com:19302"
   metrics_path: "/var/lib/vpnctl/metrics.csv"
