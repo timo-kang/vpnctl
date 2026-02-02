@@ -40,24 +40,27 @@ func Probe(ctx context.Context, servers []string, timeout time.Duration) (string
 		return "", NATTypeUnknown, lastErr
 	}
 
-	natType := NATTypeUnknown
-	if len(results) > 1 {
-		first := results[0]
-		symmetric := false
-		for _, addr := range results[1:] {
-			if addr != first {
-				symmetric = true
-				break
-			}
-		}
-		if symmetric {
-			natType = NATTypeSymmetric
-		} else {
-			natType = NATTypeConeOrRestricted
+	natType := Classify(results)
+	return results[0], natType, nil
+}
+
+// Classify infers NAT type by comparing mapped addresses from multiple servers.
+func Classify(addrs []string) string {
+	if len(addrs) < 2 {
+		return NATTypeUnknown
+	}
+	first := addrs[0]
+	symmetric := false
+	for _, addr := range addrs[1:] {
+		if addr != first {
+			symmetric = true
+			break
 		}
 	}
-
-	return results[0], natType, nil
+	if symmetric {
+		return NATTypeSymmetric
+	}
+	return NATTypeConeOrRestricted
 }
 
 func probeServer(ctx context.Context, server string, timeout time.Duration) (string, error) {

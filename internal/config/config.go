@@ -45,14 +45,20 @@ type NodeConfig struct {
 	Name                  string   `yaml:"name"`
 	Controller            string   `yaml:"controller"`
 	WGInterface           string   `yaml:"wg_interface"`
+	WGConfigPath          string   `yaml:"wg_config_path"`
 	WGPrivateKey          string   `yaml:"wg_private_key"`
 	WGPublicKey           string   `yaml:"wg_public_key"`
+	WGListenPort          int      `yaml:"wg_listen_port"`
 	VPNIP                 string   `yaml:"vpn_ip"`
 	MTU                   int      `yaml:"mtu"`
 	DirectMode            string   `yaml:"direct_mode"`
 	KeepaliveSec          int      `yaml:"keepalive_sec"`
 	STUNServers           []string `yaml:"stun_servers"`
 	MetricsPath           string   `yaml:"metrics_path"`
+	ServerPublicKey       string   `yaml:"server_public_key"`
+	ServerEndpoint        string   `yaml:"server_endpoint"`
+	ServerAllowedIPs      []string `yaml:"server_allowed_ips"`
+	ServerKeepaliveSec    int      `yaml:"server_keepalive_sec"`
 	KeepaliveIntervalSec  int      `yaml:"keepalive_interval_sec"`
 	STUNIntervalSec       int      `yaml:"stun_interval_sec"`
 	CandidatesIntervalSec int      `yaml:"candidates_interval_sec"`
@@ -130,6 +136,9 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.Node != nil {
 		if cfg.Node.WGInterface == "" {
 			cfg.Node.WGInterface = DefaultWGInterface
+		}
+		if cfg.Node.WGConfigPath == "" {
+			cfg.Node.WGConfigPath = fmt.Sprintf("/etc/wireguard/%s.conf", cfg.Node.WGInterface)
 		}
 		if cfg.Node.MTU == 0 {
 			cfg.Node.MTU = DefaultMTU

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -23,14 +24,14 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 		return err
 	}
 
-	var resp *direct.Responder
+	var shared *direct.Shared
 	if cfg.DirectMode != "off" {
-		resp, err = direct.StartResponder(":0")
+		shared, err = direct.ListenShared(":0")
 		if err != nil {
 			return err
 		}
-		defer resp.Close()
-		log.Printf("direct responder on %s", resp.LocalAddr())
+		defer shared.Close()
+		log.Printf("direct responder on %s", shared.LocalAddr())
 	}
 
 	keepaliveTicker := time.NewTicker(time.Duration(cfg.KeepaliveIntervalSec) * time.Second)
@@ -59,7 +60,10 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 			if cfg.DirectMode == "off" || len(cfg.STUNServers) == 0 {
 				break
 			}
-			addr, nat, err := stunutil.Probe(ctx, cfg.STUNServers, 5*time.Second)
+			if shared == nil {
+				break
+			}
+			addr, nat, err := probeShared(ctx, shared, cfg.STUNServers, 5*time.Second)
 			if err != nil {
 				log.Printf("STUN probe failed: %v", err)
 				break
@@ -141,6 +145,26 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 			}
 		}
 	}
+}
+
+func probeShared(ctx context.Context, shared *direct.Shared, servers []string, timeout time.Duration) (string, string, error) {
+	results := make([]string, 0, len(servers))
+	var lastErr error
+	for _, server := range servers {
+		addr, err := shared.ProbeSTUN(ctx, server, timeout)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		results = append(results, addr)
+	}
+	if len(results) == 0 {
+		if lastErr != nil {
+			return "", stunutil.NATTypeUnknown, lastErr
+		}
+		return "", stunutil.NATTypeUnknown, fmt.Errorf("stun probe failed")
+	}
+	return results[0], stunutil.Classify(results), nil
 }
 
 func register(ctx context.Context, client *api.Client, cfg config.NodeConfig) (string, error) {

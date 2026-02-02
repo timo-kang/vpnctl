@@ -61,16 +61,20 @@ func (r *Responder) serve() {
 		if err != nil {
 			return
 		}
-		msg := string(buf[:n])
-		if strings.HasPrefix(msg, probePrefix) {
-			nonce := strings.TrimPrefix(msg, probePrefix)
-			payload := []byte(ackPrefix + nonce)
-			_, _ = r.conn.WriteToUDP(payload, addr)
-			continue
-		}
-		if strings.HasPrefix(msg, echoPrefix) {
-			_, _ = r.conn.WriteToUDP(buf[:n], addr)
-		}
+		handlePacket(r.conn, addr, buf[:n])
+	}
+}
+
+func handlePacket(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
+	msg := string(data)
+	if strings.HasPrefix(msg, probePrefix) {
+		nonce := strings.TrimPrefix(msg, probePrefix)
+		payload := []byte(ackPrefix + nonce)
+		_, _ = conn.WriteToUDP(payload, addr)
+		return
+	}
+	if strings.HasPrefix(msg, echoPrefix) {
+		_, _ = conn.WriteToUDP(data, addr)
 	}
 }
 

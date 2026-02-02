@@ -17,7 +17,10 @@ Minimal VPN control-plane + metrics agent for cellular test fleets.
 - Raise later (1380/1420) after path-MTU testing.
 
 ## Config
-Configuration is YAML. See `configs/example.yaml`.
+Configuration is YAML. See `configs/example.yaml`. For `vpnctl up/down`, the node config must include:
+- `wg_private_key`, `vpn_ip`
+- `server_public_key`, `server_endpoint`, `server_allowed_ips`
+- `wg_config_path` (or use `--wg-config`)
 
 ## High-level architecture
 - Controller (server): node registry, peer distribution, metrics ingest.
@@ -38,6 +41,8 @@ vpnctl discover
 vpnctl ping --all
 vpnctl perf --peer modem-b --count 200 --size 1200
 vpnctl export csv --out metrics.csv
+vpnctl up --config configs/example.yaml
+vpnctl down --config configs/example.yaml
 ```
 
 ## Direct probe (best-effort)

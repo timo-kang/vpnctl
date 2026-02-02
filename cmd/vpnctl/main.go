@@ -21,6 +21,7 @@ import (
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
 	"vpnctl/internal/stunutil"
+	"vpnctl/internal/wireguard"
 )
 
 const usage = `vpnctl - minimal VPN control-plane + metrics (MVP)
@@ -32,15 +33,15 @@ Usage:
   vpnctl direct serve --config <path> [--listen :0]
   vpnctl direct test --config <path> --peer <name>
   vpnctl discover --config <path>
-  vpnctl ping --config <path> --peer <name>|--all
-  vpnctl perf --config <path> --peer <name>
-  vpnctl stats --config <path> [--window 5m]
-  vpnctl export csv --config <path> --out <file>
+ vpnctl ping --config <path> --peer <name>|--all
+ vpnctl perf --config <path> --peer <name>
+ vpnctl stats --config <path> [--window 5m]
+ vpnctl export csv --config <path> --out <file>
+ vpnctl up --config <path> [--wg-config <path>] [--dry-run]
+ vpnctl down --config <path> [--wg-config <path>]
 
 Planned:
-  vpnctl node add
-  vpnctl up
-  vpnctl down
+ vpnctl node add
 `
 
 func main() {
@@ -69,6 +70,10 @@ func main() {
 		handleStats(os.Args[2:])
 	case "export":
 		handleExport(os.Args[2:])
+	case "up":
+		handleUp(os.Args[2:])
+	case "down":
+		handleDown(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usage)
@@ -409,7 +414,7 @@ func handlePing(args []string) {
 			time.Sleep(*interval)
 		}
 
-		metric := summarizePing(cfg.Node.Name, p.ID, path, results, *count, cfg.MTU)
+		metric := summarizePing(cfg.Node.Name, p.ID, path, results, *count, cfg.Node.MTU)
 		if cfg.Node.MetricsPath != "" {
 			if err := metrics.AppendCSV(cfg.Node.MetricsPath, []model.Metric{metric}); err != nil {
 				fmt.Fprintf(os.Stderr, "append metrics failed: %v\n", err)
@@ -471,7 +476,7 @@ func handlePerf(args []string) {
 		JitterMs:       0,
 		LossPct:        lossPct,
 		ThroughputMbps: throughput,
-		MTU:            cfg.MTU,
+		MTU:            cfg.Node.MTU,
 	}
 	if cfg.Node.MetricsPath != "" {
 		if err := metrics.AppendCSV(cfg.Node.MetricsPath, []model.Metric{metric}); err != nil {
@@ -553,6 +558,66 @@ func handleExport(args []string) {
 		fatal(err)
 	}
 	fmt.Fprintf(os.Stdout, "exported %s\n", *out)
+}
+
+func handleUp(args []string) {
+	fs := flag.NewFlagSet("up", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	wgConfig := fs.String("wg-config", "", "wireguard config path override")
+	dryRun := fs.Bool("dry-run", false, "print config and exit")
+	_ = fs.Parse(args)
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fatal(err)
+	}
+	if cfg.Node == nil {
+		fatal(errors.New("node config required"))
+	}
+	config.ApplyDefaults(&cfg)
+	if err := config.Validate(cfg); err != nil {
+		fatal(err)
+	}
+	if *wgConfig != "" {
+		cfg.Node.WGConfigPath = *wgConfig
+	}
+
+	conf, err := wireguard.RenderNode(*cfg.Node)
+	if err != nil {
+		fatal(err)
+	}
+	if *dryRun {
+		fmt.Fprint(os.Stdout, conf)
+		return
+	}
+	if err := wireguard.WriteConfig(cfg.Node.WGConfigPath, conf); err != nil {
+		fatal(err)
+	}
+	fatal(wireguard.Up(cfg.Node.WGConfigPath))
+}
+
+func handleDown(args []string) {
+	fs := flag.NewFlagSet("down", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	wgConfig := fs.String("wg-config", "", "wireguard config path override")
+	_ = fs.Parse(args)
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fatal(err)
+	}
+	if cfg.Node == nil {
+		fatal(errors.New("node config required"))
+	}
+	config.ApplyDefaults(&cfg)
+	if err := config.Validate(cfg); err != nil {
+		fatal(err)
+	}
+	if *wgConfig != "" {
+		cfg.Node.WGConfigPath = *wgConfig
+	}
+
+	fatal(wireguard.Down(cfg.Node.WGConfigPath))
 }
 
 func loadConfig(path string) (config.Config, error) {
