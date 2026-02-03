@@ -1015,6 +1015,9 @@ func fillServerConfig(node *config.NodeConfig) error {
 		return errors.New("node config required")
 	}
 	if node.ServerPublicKey != "" && node.ServerEndpoint != "" && len(node.ServerAllowedIPs) > 0 {
+		if node.PolicyRoutingCIDR == "" {
+			node.PolicyRoutingCIDR = firstScopedCIDR(node.ServerAllowedIPs)
+		}
 		return nil
 	}
 	if node.Controller == "" {
@@ -1029,7 +1032,23 @@ func fillServerConfig(node *config.NodeConfig) error {
 	node.ServerEndpoint = resp.ServerEndpoint
 	node.ServerAllowedIPs = resp.ServerAllowedIPs
 	node.ServerKeepaliveSec = resp.ServerKeepaliveSec
+	if node.PolicyRoutingCIDR == "" {
+		node.PolicyRoutingCIDR = firstScopedCIDR(node.ServerAllowedIPs)
+	}
 	return nil
+}
+
+func firstScopedCIDR(values []string) string {
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if value == "0.0.0.0/0" || value == "::/0" {
+			continue
+		}
+		return value
+	}
+	return ""
 }
 
 func waitForSignal() {

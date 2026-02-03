@@ -171,7 +171,7 @@ func Up(cfg config.NodeConfig, setConf string) error {
 		}
 	}
 	if config.PolicyRoutingEnabled(&cfg) {
-		if err := ensurePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable); err != nil {
+		if err := ensurePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable, cfg.PolicyRoutingCIDR); err != nil {
 			return err
 		}
 	}
@@ -182,7 +182,7 @@ func Up(cfg config.NodeConfig, setConf string) error {
 func Down(cfg config.NodeConfig) error {
 	if config.PolicyRoutingEnabled(&cfg) {
 		_ = flushPolicyTable(cfg.PolicyRoutingTable)
-		_ = deletePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable)
+		_ = deletePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable, cfg.PolicyRoutingCIDR)
 	}
 	if cfg.WGInterface == "" {
 		return fmt.Errorf("wg_interface is required")
@@ -225,7 +225,7 @@ func ApplyPeers(cfg config.NodeConfig, peers []Peer) error {
 		return err
 	}
 	if config.PolicyRoutingEnabled(&cfg) {
-		if err := ensurePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable); err != nil {
+		if err := ensurePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable, cfg.PolicyRoutingCIDR); err != nil {
 			return err
 		}
 		if err := flushPolicyTable(cfg.PolicyRoutingTable); err != nil {
@@ -274,11 +274,14 @@ func syncConf(iface string, content string) error {
 	return run("wg", "syncconf", iface, tmp.Name())
 }
 
-func ensurePolicyRule(priority int, table int) error {
+func ensurePolicyRule(priority int, table int, cidr string) error {
 	if priority <= 0 || table <= 0 {
 		return fmt.Errorf("invalid policy routing settings")
 	}
-	err := run("ip", "rule", "add", "pref", strconv.Itoa(priority), "lookup", strconv.Itoa(table))
+	if cidr == "" || cidr == "0.0.0.0/0" || cidr == "::/0" {
+		return fmt.Errorf("policy_routing_cidr is required and must be scoped")
+	}
+	err := run("ip", "rule", "add", "pref", strconv.Itoa(priority), "to", cidr, "lookup", strconv.Itoa(table))
 	if err == nil {
 		return nil
 	}
@@ -288,11 +291,15 @@ func ensurePolicyRule(priority int, table int) error {
 	return err
 }
 
-func deletePolicyRule(priority int, table int) error {
+func deletePolicyRule(priority int, table int, cidr string) error {
 	if priority <= 0 || table <= 0 {
 		return nil
 	}
-	err := run("ip", "rule", "del", "pref", strconv.Itoa(priority), "lookup", strconv.Itoa(table))
+	args := []string{"rule", "del", "pref", strconv.Itoa(priority), "lookup", strconv.Itoa(table)}
+	if cidr != "" {
+		args = []string{"rule", "del", "pref", strconv.Itoa(priority), "to", cidr, "lookup", strconv.Itoa(table)}
+	}
+	err := run("ip", args...)
 	if err == nil {
 		return nil
 	}

@@ -225,6 +225,9 @@ func fillServerConfig(ctx context.Context, client *api.Client, cfg *config.NodeC
 		return fmt.Errorf("node config required")
 	}
 	if cfg.ServerPublicKey != "" && cfg.ServerEndpoint != "" && len(cfg.ServerAllowedIPs) > 0 {
+		if cfg.PolicyRoutingCIDR == "" {
+			cfg.PolicyRoutingCIDR = firstScopedCIDR(cfg.ServerAllowedIPs)
+		}
 		return nil
 	}
 	if cfg.Controller == "" {
@@ -238,6 +241,9 @@ func fillServerConfig(ctx context.Context, client *api.Client, cfg *config.NodeC
 	cfg.ServerEndpoint = resp.ServerEndpoint
 	cfg.ServerAllowedIPs = resp.ServerAllowedIPs
 	cfg.ServerKeepaliveSec = resp.ServerKeepaliveSec
+	if cfg.PolicyRoutingCIDR == "" {
+		cfg.PolicyRoutingCIDR = firstScopedCIDR(cfg.ServerAllowedIPs)
+	}
 	return nil
 }
 
@@ -311,4 +317,17 @@ func stringSlicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func firstScopedCIDR(values []string) string {
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if value == "0.0.0.0/0" || value == "::/0" {
+			continue
+		}
+		return value
+	}
+	return ""
 }

@@ -34,6 +34,7 @@ node:
   policy_routing_enabled: true
   policy_routing_table: 51820
   policy_routing_priority: 1000
+  policy_routing_cidr: "10.7.0.0/24"
   direct_keepalive_sec: 25
   direct_keepalive_symmetric_sec: 15
   direct_keepalive_unknown_sec: 20

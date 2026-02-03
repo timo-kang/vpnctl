@@ -74,6 +74,7 @@ type NodeConfig struct {
 	PolicyRoutingEnabled        *bool    `yaml:"policy_routing_enabled"`
 	PolicyRoutingTable          int      `yaml:"policy_routing_table"`
 	PolicyRoutingPriority       int      `yaml:"policy_routing_priority"`
+	PolicyRoutingCIDR           string   `yaml:"policy_routing_cidr"`
 	DirectKeepaliveSec          int      `yaml:"direct_keepalive_sec"`
 	DirectKeepaliveSymmetricSec int      `yaml:"direct_keepalive_symmetric_sec"`
 	DirectKeepaliveUnknownSec   int      `yaml:"direct_keepalive_unknown_sec"`
@@ -167,6 +168,9 @@ func ApplyDefaults(cfg *Config) {
 			enabled := true
 			cfg.Node.PolicyRoutingEnabled = &enabled
 		}
+		if cfg.Node.PolicyRoutingCIDR == "" {
+			cfg.Node.PolicyRoutingCIDR = firstScopedCIDR(cfg.Node.ServerAllowedIPs)
+		}
 		if cfg.Node.PolicyRoutingTable == 0 {
 			cfg.Node.PolicyRoutingTable = DefaultPolicyRoutingTable
 		}
@@ -215,4 +219,17 @@ func PolicyRoutingEnabled(cfg *NodeConfig) bool {
 		return true
 	}
 	return *cfg.PolicyRoutingEnabled
+}
+
+func firstScopedCIDR(values []string) string {
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if value == "0.0.0.0/0" || value == "::/0" {
+			continue
+		}
+		return value
+	}
+	return ""
 }
