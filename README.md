@@ -17,22 +17,33 @@ Minimal VPN control-plane + metrics agent for cellular test fleets.
 - Raise later (1380/1420) after path-MTU testing.
 
 ## Config
-Configuration is YAML. See `configs/example.yaml`. For `vpnctl up/down`, the node config must include:
-- `wg_private_key`, `vpn_ip`
+Configuration is YAML. See `configs/example.yaml`.
+
+Node requirements for `vpnctl up/down`:
+- `wg_private_key`, `vpn_ip` (or `controller.vpn_cidr` allocation)
 - Either `controller` (to fetch server fields) or manual `server_*` fields
 - `wg_config_path` (or use `--wg-config`)
-Policy routing is enabled by default; override with `policy_routing_enabled: false` if needed.
-Direct keepalive tuning can be set with `direct_keepalive_*` fields on nodes.
-If `vpn_ip` is omitted, the controller can allocate it from `controller.vpn_cidr`.
-For automatic server updates, set `controller.wg_apply: true` with `wg_private_key` and `wg_address`. Run controller as root.
-When using `node join`, `node run`, or `up` with a config path, the assigned `vpn_ip` is written back into the YAML.
+
+Routing defaults:
+- Policy routing is enabled by default; set `policy_routing_enabled: false` to disable.
+- `policy_routing_cidr` scopes the rule (default: first non-0/0 in `server_allowed_ips`).
+- `server_allowed_ips` should usually be the VPN subnet (e.g. `10.7.0.0/24`) to avoid full-tunnel routing.
+
+Direct/relay probing:
+- `probe_port` (default `51900`) is used for relay path probes over the VPN.
+- `direct_keepalive_*` controls per-peer keepalive tuning for NAT stability.
+
+Controller features:
+- If `vpn_ip` is omitted, the controller can allocate it from `controller.vpn_cidr`.
+- `controller.wg_apply: true` + `wg_private_key` + `wg_address` lets the controller auto-apply its `wg0` peers (requires root and `wg/ip`).
+- When using `node join`, `node run`, or `up` with a config path, the assigned `vpn_ip` is written back into the YAML.
 
 ## High-level architecture
 - Controller (server): node registry, peer distribution, metrics ingest.
 - Agent (node): registers, configures WireGuard, runs tests, reports metrics.
 - CLI: operator entrypoint for both controller and node actions.
 
-## Example usage (planned)
+## Example usage
 ```bash
 # On server
 vpnctl controller init --config configs/example.yaml
@@ -68,6 +79,11 @@ vpnctl direct test --config configs/example.yaml --peer modem-b
 - Controller exchanges candidates.
 - Nodes attempt direct UDP handshake.
 - If direct fails, traffic uses server relay.
+
+## Routing behavior
+- Hub peer keeps `AllowedIPs` for the full VPN subnet (e.g. `/24`).
+- Direct peers are injected with `/32` routes on success.
+- Most-specific route wins, so direct paths override hub for that peer.
 
 ## Data plane note
 WireGuard is used for the tunnel; vpnctl is a control-plane + testing harness.
