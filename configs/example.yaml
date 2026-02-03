@@ -6,6 +6,9 @@ controller:
   wg_interface: "wg0"
   wg_port: 51820
   mtu: 1280
+  wg_address: "10.7.0.1/24"
+  wg_private_key: "<server-private-key>"
+  wg_apply: true
   direct_mode: "auto" # auto|off
   keepalive_sec: 25
   stun_servers:

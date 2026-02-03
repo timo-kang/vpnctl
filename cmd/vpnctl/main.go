@@ -20,6 +20,7 @@ import (
 	"vpnctl/internal/direct"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
+	"vpnctl/internal/store"
 	"vpnctl/internal/stunutil"
 	"vpnctl/internal/wireguard"
 )
@@ -28,6 +29,7 @@ const usage = `vpnctl - minimal VPN control-plane + metrics (MVP)
 
 Usage:
   vpnctl controller init --config <path>
+  vpnctl controller status --config <path>
   vpnctl node join --config <path>
   vpnctl node run --config <path>
   vpnctl node sync-config --config <path>
@@ -93,6 +95,8 @@ func handleController(args []string) {
 	switch args[0] {
 	case "init":
 		controllerInit(args[1:])
+	case "status":
+		controllerStatus(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown controller subcommand %q\n", args[0])
 		os.Exit(2)
@@ -127,6 +131,45 @@ func controllerInit(args []string) {
 		fatal(err)
 	}
 	fatal(srv.ListenAndServe())
+}
+
+func controllerStatus(args []string) {
+	fs := flag.NewFlagSet("controller status", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	_ = fs.Parse(args)
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fatal(err)
+	}
+	if cfg.Controller == nil {
+		fatal(errors.New("controller config required"))
+	}
+	config.ApplyDefaults(&cfg)
+	if cfg.Controller.DataDir == "" {
+		fatal(errors.New("controller.data_dir is required"))
+	}
+
+	regPath := filepath.Join(cfg.Controller.DataDir, "registry.yaml")
+	reg, err := store.LoadRegistry(regPath)
+	if err != nil {
+		fatal(err)
+	}
+	if reg == nil || len(reg.Nodes) == 0 {
+		fmt.Fprintln(os.Stdout, "no registered nodes")
+		return
+	}
+
+	fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-10s  %-6s  %-20s  %-8s\n",
+		"NAME", "VPN_IP", "PUBLIC_ADDR", "NAT", "PORT", "LAST_SEEN", "STATUS")
+	for _, node := range reg.Nodes {
+		lastSeen := ""
+		if !node.LastSeenAt.IsZero() {
+			lastSeen = node.LastSeenAt.UTC().Format(time.RFC3339)
+		}
+		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-10s  %-6d  %-20s  %-8s\n",
+			node.Name, node.VPNIP, node.PublicAddr, node.NATType, node.ProbePort, lastSeen, node.Status)
+	}
 }
 
 func handleNode(args []string) {

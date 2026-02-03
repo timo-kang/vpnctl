@@ -40,6 +40,9 @@ type ControllerConfig struct {
 	WGInterface        string   `yaml:"wg_interface"`
 	WGPort             int      `yaml:"wg_port"`
 	MTU                int      `yaml:"mtu"`
+	WGAddress          string   `yaml:"wg_address"`
+	WGPrivateKey       string   `yaml:"wg_private_key"`
+	WGApply            bool     `yaml:"wg_apply"`
 	DirectMode         string   `yaml:"direct_mode"`
 	KeepaliveSec       int      `yaml:"keepalive_sec"`
 	STUNServers        []string `yaml:"stun_servers"`
@@ -122,6 +125,14 @@ func Validate(cfg Config) error {
 	}
 	if cfg.Controller != nil && cfg.Controller.Listen == "" {
 		return fmt.Errorf("controller.listen is required")
+	}
+	if cfg.Controller != nil && cfg.Controller.WGApply {
+		if cfg.Controller.WGPrivateKey == "" {
+			return fmt.Errorf("controller.wg_private_key is required when wg_apply is true")
+		}
+		if cfg.Controller.WGAddress == "" {
+			return fmt.Errorf("controller.wg_address is required when wg_apply is true")
+		}
 	}
 	if cfg.Node != nil && cfg.Node.Name == "" {
 		return fmt.Errorf("node.name is required")

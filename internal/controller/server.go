@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"vpnctl/internal/config"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/store"
+	"vpnctl/internal/wireguard"
 )
 
 // Server provides the controller HTTP API.
@@ -75,7 +77,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	assignedVPNIP := req.VPNIP
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if assignedVPNIP == "" {
 		var err error
@@ -121,16 +122,26 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := store.SaveRegistry(s.regPath, s.reg); err != nil {
+		s.mu.Unlock()
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	autoApply := s.cfg.WGApply
+	peers := s.peersForWGLocked()
 	resp := api.RegisterResponse{
 		NodeID: nodeID,
 		Peers:  s.peersLocked(nodeID),
 		VPNIP:  assignedVPNIP,
 	}
 
+	s.mu.Unlock()
+	if autoApply {
+		if err := applyWG(s.cfg, peers); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -295,6 +306,45 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func (s *Server) peersForWGLocked() []wireguard.Peer {
+	peers := make([]wireguard.Peer, 0, len(s.reg.Nodes))
+	for _, node := range s.reg.Nodes {
+		if node.PubKey == "" || node.VPNIP == "" {
+			continue
+		}
+		allowed := normalizeHostCIDR(node.VPNIP)
+		if allowed == "" {
+			continue
+		}
+		peers = append(peers, wireguard.Peer{
+			PublicKey:  node.PubKey,
+			AllowedIPs: []string{allowed},
+		})
+	}
+	return peers
+}
+
+func normalizeHostCIDR(value string) string {
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "/") {
+		return value
+	}
+	return value + "/32"
+}
+
+func applyWG(cfg config.ControllerConfig, peers []wireguard.Peer) error {
+	serverCfg := wireguard.ServerConfig{
+		Interface:  cfg.WGInterface,
+		PrivateKey: cfg.WGPrivateKey,
+		Address:    cfg.WGAddress,
+		ListenPort: cfg.WGPort,
+		MTU:        cfg.MTU,
+	}
+	return wireguard.ApplyServer(serverCfg, peers)
 }
 
 func allocateVPNIP(cidr string, reg *store.Registry) (string, error) {
