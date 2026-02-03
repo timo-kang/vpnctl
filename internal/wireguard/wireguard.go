@@ -243,14 +243,17 @@ func ApplyPeers(cfg config.NodeConfig, peers []Peer) error {
 }
 
 func ensureInterface(iface string) error {
-	err := run("ip", "link", "add", "dev", iface, "type", "wireguard")
-	if err == nil {
+	if interfaceExists(iface) {
 		return nil
 	}
-	if strings.Contains(err.Error(), "File exists") {
-		return nil
-	}
-	return err
+	return run("ip", "link", "add", "dev", iface, "type", "wireguard")
+}
+
+func interfaceExists(iface string) bool {
+	cmd := exec.Command("ip", "link", "show", "dev", iface)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run() == nil
 }
 
 func syncConf(iface string, content string) error {
@@ -309,8 +312,19 @@ func flushPolicyTable(table int) error {
 func run(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return fmt.Errorf("%s: %s", err.Error(), msg)
+		}
+		return err
+	}
+	if stderr.Len() > 0 {
+		fmt.Fprint(os.Stderr, stderr.String())
+	}
+	return nil
 }
 
 func output(name string, args ...string) (string, error) {

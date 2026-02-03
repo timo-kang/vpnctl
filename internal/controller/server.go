@@ -93,6 +93,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			s.reg.Nodes[i].PubKey = req.PubKey
 			s.reg.Nodes[i].VPNIP = assignedVPNIP
 			s.reg.Nodes[i].Endpoint = req.Endpoint
+			s.reg.Nodes[i].ProbePort = req.ProbePort
 			s.reg.Nodes[i].PublicAddr = req.PublicAddr
 			s.reg.Nodes[i].NATType = req.NATType
 			s.reg.Nodes[i].LastSeenAt = now
@@ -111,6 +112,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			PubKey:     req.PubKey,
 			VPNIP:      assignedVPNIP,
 			Endpoint:   req.Endpoint,
+			ProbePort:  req.ProbePort,
 			PublicAddr: req.PublicAddr,
 			NATType:    req.NATType,
 			LastSeenAt: now,
@@ -272,6 +274,7 @@ func (s *Server) peersLocked(nodeID string) []api.PeerCandidate {
 			Endpoint:   node.Endpoint,
 			PublicAddr: node.PublicAddr,
 			NATType:    node.NATType,
+			ProbePort:  node.ProbePort,
 		})
 	}
 	return peers

@@ -26,6 +26,7 @@ node:
   wg_private_key: "<private-key>"
   wg_public_key: "<public-key>"
   wg_listen_port: 51820
+  probe_port: 51900
   vpn_ip: "10.7.0.2/32"
   mtu: 1280
   direct_mode: "auto" # auto|off

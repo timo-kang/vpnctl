@@ -21,6 +21,7 @@ type NodeInfo struct {
 	PubKey     string    `yaml:"pub_key"`
 	VPNIP      string    `yaml:"vpn_ip"`
 	Endpoint   string    `yaml:"endpoint"`
+	ProbePort  int       `yaml:"probe_port"`
 	LastSeenAt time.Time `yaml:"last_seen_at"`
 	Status     string    `yaml:"status"`
 	NATType    string    `yaml:"nat_type"`

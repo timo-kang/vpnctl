@@ -30,7 +30,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 
 	var shared *direct.Shared
 	if cfg.DirectMode != "off" {
-		shared, err = direct.ListenShared(":0")
+		shared, err = direct.ListenShared(fmt.Sprintf(":%d", cfg.ProbePort))
 		if err != nil {
 			return err
 		}
@@ -205,6 +205,7 @@ func register(ctx context.Context, client *api.Client, cfg config.NodeConfig) (s
 		PublicAddr: "",
 		NATType:    "",
 		DirectMode: cfg.DirectMode,
+		ProbePort:  cfg.ProbePort,
 	})
 	if err != nil {
 		return "", "", err

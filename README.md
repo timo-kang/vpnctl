@@ -44,7 +44,8 @@ vpnctl node sync-config --config configs/example.yaml
 # Discovery + metrics
 vpnctl discover
 vpnctl ping --all
-vpnctl perf --peer modem-b --count 200 --size 1200
+vpnctl ping --all --path relay
+vpnctl perf --peer modem-b --count 200 --size 1200 --path direct
 vpnctl export csv --out metrics.csv
 vpnctl up --config configs/example.yaml
 vpnctl down --config configs/example.yaml

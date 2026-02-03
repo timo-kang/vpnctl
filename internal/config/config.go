@@ -24,6 +24,7 @@ const (
 	DefaultDirectKeepaliveSec          = 25
 	DefaultDirectKeepaliveSymmetricSec = 15
 	DefaultDirectKeepaliveUnknownSec   = 20
+	DefaultProbePort                   = 51900
 )
 
 // Config holds both controller and node settings.
@@ -59,6 +60,7 @@ type NodeConfig struct {
 	WGPrivateKey                string   `yaml:"wg_private_key"`
 	WGPublicKey                 string   `yaml:"wg_public_key"`
 	WGListenPort                int      `yaml:"wg_listen_port"`
+	ProbePort                   int      `yaml:"probe_port"`
 	VPNIP                       string   `yaml:"vpn_ip"`
 	MTU                         int      `yaml:"mtu"`
 	DirectMode                  string   `yaml:"direct_mode"`
@@ -157,6 +159,9 @@ func ApplyDefaults(cfg *Config) {
 		}
 		if cfg.Node.WGConfigPath == "" {
 			cfg.Node.WGConfigPath = fmt.Sprintf("/etc/wireguard/%s.conf", cfg.Node.WGInterface)
+		}
+		if cfg.Node.ProbePort == 0 {
+			cfg.Node.ProbePort = DefaultProbePort
 		}
 		if cfg.Node.PolicyRoutingEnabled == nil {
 			enabled := true

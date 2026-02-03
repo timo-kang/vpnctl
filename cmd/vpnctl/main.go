@@ -34,8 +34,8 @@ Usage:
   vpnctl direct serve --config <path> [--listen :0]
   vpnctl direct test --config <path> --peer <name>
   vpnctl discover --config <path>
- vpnctl ping --config <path> --peer <name>|--all
- vpnctl perf --config <path> --peer <name>
+  vpnctl ping --config <path> --peer <name>|--all [--path auto|direct|relay]
+  vpnctl perf --config <path> --peer <name> [--path auto|direct|relay]
  vpnctl stats --config <path> [--window 5m]
  vpnctl export csv --config <path> --out <file>
  vpnctl up --config <path> [--wg-config <path>] [--dry-run]
@@ -189,6 +189,7 @@ func nodeJoin(args []string) {
 		PublicAddr: "",
 		NATType:    "",
 		DirectMode: cfg.Node.DirectMode,
+		ProbePort:  cfg.Node.ProbePort,
 	})
 	if err != nil {
 		fatal(err)
@@ -254,6 +255,7 @@ func nodeRun(args []string) {
 			PublicAddr: "",
 			NATType:    "",
 			DirectMode: cfg.Node.DirectMode,
+			ProbePort:  cfg.Node.ProbePort,
 		})
 		if err != nil {
 			fatal(err)
@@ -301,6 +303,7 @@ func nodeSyncConfig(args []string) {
 			PublicAddr: "",
 			NATType:    "",
 			DirectMode: cfg.Node.DirectMode,
+			ProbePort:  cfg.Node.ProbePort,
 		})
 		if err != nil {
 			fatal(err)
@@ -472,6 +475,7 @@ func handlePing(args []string) {
 	interval := fs.Duration("interval", 500*time.Millisecond, "probe interval")
 	timeout := fs.Duration("timeout", 2*time.Second, "probe timeout")
 	submit := fs.Bool("submit", true, "submit metrics to controller")
+	path := fs.String("path", "auto", "path selection: auto|direct|relay")
 	_ = fs.Parse(args)
 
 	if !*all && *peer == "" {
@@ -500,12 +504,7 @@ func handlePing(args []string) {
 	}
 
 	for _, p := range peers {
-		path := "direct"
-		peerAddr := p.PublicAddr
-		if peerAddr == "" {
-			peerAddr = p.Endpoint
-			path = "relay"
-		}
+		peerAddr, pathLabel := selectProbeAddr(p, *path)
 		if peerAddr == "" {
 			fmt.Fprintf(os.Stdout, "peer %s missing address\n", p.Name)
 			continue
@@ -523,7 +522,7 @@ func handlePing(args []string) {
 			time.Sleep(*interval)
 		}
 
-		metric := summarizePing(cfg.Node.Name, p.ID, path, results, *count, cfg.Node.MTU)
+		metric := summarizePing(cfg.Node.Name, p.ID, pathLabel, results, *count, cfg.Node.MTU)
 		if cfg.Node.MetricsPath != "" {
 			if err := metrics.AppendCSV(cfg.Node.MetricsPath, []model.Metric{metric}); err != nil {
 				fmt.Fprintf(os.Stderr, "append metrics failed: %v\n", err)
@@ -544,6 +543,7 @@ func handlePerf(args []string) {
 	packetSize := fs.Int("size", 1200, "packet size in bytes")
 	timeout := fs.Duration("timeout", 5*time.Second, "probe timeout")
 	submit := fs.Bool("submit", true, "submit metrics to controller")
+	path := fs.String("path", "auto", "path selection: auto|direct|relay")
 	_ = fs.Parse(args)
 
 	if *peer == "" {
@@ -566,7 +566,7 @@ func handlePerf(args []string) {
 		fatal(err)
 	}
 
-	peerAddr, peerID := selectPeer(*peer, resp.Peers)
+	peerAddr, peerID, pathLabel := selectProbeAddrByName(*peer, resp.Peers, *path)
 	if peerAddr == "" {
 		fatal(fmt.Errorf("peer %q not found or missing address", *peer))
 	}
@@ -580,7 +580,7 @@ func handlePerf(args []string) {
 		Timestamp:      time.Now().UTC(),
 		NodeID:         cfg.Node.Name,
 		PeerID:         peerID,
-		Path:           "direct",
+		Path:           pathLabel,
 		RTTMs:          0,
 		JitterMs:       0,
 		LossPct:        lossPct,
@@ -703,6 +703,7 @@ func handleUp(args []string) {
 			PublicAddr: "",
 			NATType:    "",
 			DirectMode: cfg.Node.DirectMode,
+			ProbePort:  cfg.Node.ProbePort,
 		})
 		if err != nil {
 			fatal(err)
@@ -858,6 +859,46 @@ func selectPeer(peer string, candidates []api.PeerCandidate) (string, string) {
 		}
 	}
 	return "", ""
+}
+
+func selectProbeAddr(peer api.PeerCandidate, path string) (string, string) {
+	switch path {
+	case "direct":
+		if peer.PublicAddr != "" {
+			return peer.PublicAddr, "direct"
+		}
+		return "", "direct"
+	case "relay":
+		if peer.VPNIP != "" && peer.ProbePort > 0 {
+			return fmt.Sprintf("%s:%d", stripCIDR(peer.VPNIP), peer.ProbePort), "relay"
+		}
+		return "", "relay"
+	default:
+		if peer.PublicAddr != "" {
+			return peer.PublicAddr, "direct"
+		}
+		if peer.VPNIP != "" && peer.ProbePort > 0 {
+			return fmt.Sprintf("%s:%d", stripCIDR(peer.VPNIP), peer.ProbePort), "relay"
+		}
+	}
+	return "", path
+}
+
+func selectProbeAddrByName(name string, candidates []api.PeerCandidate, path string) (string, string, string) {
+	for _, cand := range candidates {
+		if cand.ID == name || cand.Name == name {
+			addr, pathLabel := selectProbeAddr(cand, path)
+			return addr, cand.ID, pathLabel
+		}
+	}
+	return "", "", path
+}
+
+func stripCIDR(value string) string {
+	if i := strings.IndexByte(value, '/'); i >= 0 {
+		return value[:i]
+	}
+	return value
 }
 
 func filterPeers(candidates []api.PeerCandidate, peer string, all bool) []api.PeerCandidate {

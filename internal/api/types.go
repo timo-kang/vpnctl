@@ -11,6 +11,7 @@ type RegisterRequest struct {
 	PublicAddr string `json:"public_addr"`
 	NATType    string `json:"nat_type"`
 	DirectMode string `json:"direct_mode"`
+	ProbePort  int    `json:"probe_port"`
 }
 
 // PeerCandidate describes a peer for direct/relay selection.
@@ -22,6 +23,7 @@ type PeerCandidate struct {
 	Endpoint   string `json:"endpoint"`
 	PublicAddr string `json:"public_addr"`
 	NATType    string `json:"nat_type"`
+	ProbePort  int    `json:"probe_port"`
 }
 
 // RegisterResponse returns the assigned node ID and peers list.
