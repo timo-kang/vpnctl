@@ -243,6 +243,8 @@ func (s *Server) handleWGConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.cfg.ServerPublicKey == "" || s.cfg.ServerEndpoint == "" || len(s.cfg.ServerAllowedIPs) == 0 {
+		log.Printf("wg-config error: server config not set (public_key=%t endpoint=%t allowed_ips=%d)",
+			s.cfg.ServerPublicKey != "", s.cfg.ServerEndpoint != "", len(s.cfg.ServerAllowedIPs))
 		writeJSONError(w, http.StatusInternalServerError, "server config not set")
 		return
 	}

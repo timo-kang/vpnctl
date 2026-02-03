@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -89,6 +91,11 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(res.Body)
+		msg := strings.TrimSpace(string(body))
+		if msg != "" {
+			return fmt.Errorf("request failed: %s: %s", res.Status, msg)
+		}
 		return fmt.Errorf("request failed: %s", res.Status)
 	}
 
@@ -113,6 +120,11 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(res.Body)
+		msg := strings.TrimSpace(string(body))
+		if msg != "" {
+			return fmt.Errorf("request failed: %s: %s", res.Status, msg)
+		}
 		return fmt.Errorf("request failed: %s", res.Status)
 	}
 
