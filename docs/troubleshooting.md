@@ -22,6 +22,15 @@ Checks:
 - Ensure responder is running on peer (agent or `direct serve`).
 - Ensure firewall allows UDP on `probe_port` (default 51900) on `wg0`.
 
+Firewall examples:
+```bash
+# iptables: allow probe traffic on wg0
+sudo iptables -I INPUT -i wg0 -p udp --dport 51900 -j ACCEPT
+
+# ufw: allow probe traffic on wg0
+sudo ufw allow in on wg0 to any port 51900 proto udp
+```
+
 Quick responder:
 ```bash
 go run ./cmd/vpnctl direct serve --listen :51900

@@ -109,3 +109,33 @@ Export CSV:
 ```bash
 go run ./cmd/vpnctl export csv --config configs/node-a.yaml --out /tmp/metrics.csv
 ```
+
+## iperf (throughput + latency)
+
+Throughput (TCP):
+```bash
+# Node B (server)
+iperf3 -s -B 10.7.0.12
+
+# Node A (client)
+iperf3 -c 10.7.0.12 -t 30 -P 4 -i 1
+```
+
+Reverse direction (Node B -> Node A):
+```bash
+iperf3 -c 10.7.0.12 -t 30 -P 4 -i 1 -R
+```
+
+Latency (RTT):
+```bash
+ping -c 50 -i 0.1 10.7.0.12
+```
+
+UDP loss/jitter (optional):
+```bash
+iperf3 -c 10.7.0.12 -u -b 20M -t 30 -i 1
+```
+
+Notes:
+- Binding to the VPN IP forces traffic over `wg0`.
+- For machine-readable output, add `-J` and parse JSON.
