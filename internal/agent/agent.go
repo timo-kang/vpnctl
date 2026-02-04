@@ -29,13 +29,13 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 	}
 
 	var shared *direct.Shared
-	if cfg.DirectMode != "off" {
+	if cfg.ProbePort > 0 {
 		shared, err = direct.ListenShared(fmt.Sprintf(":%d", cfg.ProbePort))
 		if err != nil {
 			return err
 		}
 		defer shared.Close()
-		log.Printf("direct responder on %s", shared.LocalAddr())
+		log.Printf("probe responder on %s", shared.LocalAddr())
 	}
 
 	keepaliveTicker := time.NewTicker(time.Duration(cfg.KeepaliveIntervalSec) * time.Second)
