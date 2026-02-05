@@ -139,3 +139,45 @@ iperf3 -c 10.7.0.12 -u -b 20M -t 30 -i 1
 Notes:
 - Binding to the VPN IP forces traffic over `wg0`.
 - For machine-readable output, add `-J` and parse JSON.
+
+## sockperf (latency + jitter)
+
+Server (Node B):
+```bash
+sockperf server -i 10.7.0.12 -p 11111
+```
+
+Client (Node A, ping-pong):
+```bash
+# Example: 100Hz, 100B, 30s
+sockperf ping-pong -i 10.7.0.12 -p 11111 -m 100 -t 30 --mps 100
+
+# Example: 10Hz, 2000B, 30s
+sockperf ping-pong -i 10.7.0.12 -p 11111 -m 2000 -t 30 --mps 10
+```
+
+Client (under-load):
+```bash
+# Example: 400Hz, 1000B, 30s
+sockperf under-load -i 10.7.0.12 -p 11111 -m 1000 -t 30 --mps 400
+```
+
+CSV output:
+```bash
+sockperf ping-pong -i 10.7.0.12 -p 11111 -m 100 -t 30 --mps 100 --full-log /tmp/sockperf.csv
+```
+
+### Sample results (your runs)
+
+| 시나리오 (부하 수준) | 타겟 노드 | 실험 회차 | 평균 지연(Avg Latency) | 안정성 지표(99th Percentile) | 표준 편차(Jitter) | 평가 |
+|---|---|---|---|---|---|---|
+| 1. 제어 신호(100Hz, 100B) | Office (12) | 1차 시도 | 28.9 ms | 61.2 ms | 9.9 ms | 보통 |
+| 1. 제어 신호(100Hz, 100B) | Office (12) | 2차 시도 | 21.5 ms | 29.3 ms | 5.8 ms | 매우 우수 |
+| 1. 제어 신호(100Hz, 100B) | Server (2) | - | 28.7 ms | 42.0 ms | 8.2 ms | 우수 |
+| 2. 센서 데이터(10Hz, 2000B) | Office (12) | 1차 시도 | 39.9 ms | 212.6 ms | 27.0 ms | 위험 (Lag) |
+| 2. 센서 데이터(10Hz, 2000B) | Office (12) | 2차 시도 | 26.2 ms | 37.8 ms | 4.5 ms | 최상 (Best) |
+| 2. 센서 데이터(10Hz, 2000B) | Server (2) | - | 32.2 ms | 54.5 ms | 5.4 ms | 우수 |
+| 3. 스트리밍(400Hz, 1000B) | Office (12) | 1차 시도 | 30.5 ms | 45.6 ms | 5.3 ms | 양호 |
+| 3. 스트리밍(400Hz, 1000B) | Office (12) | 2차 시도 | 24.7 ms | 36.4 ms | 3.7 ms | 매우 우수 |
+| 3. 스트리밍(400Hz, 1000B) | Server (2) | - | 31.2 ms | 48.5 ms | 7.5 ms | 양호 |
+| 4. 극한 부하(Under-load) | Server (2) | - | 28.8 ms | 38.6 ms | 4.0 ms | 매우 안정적 |
