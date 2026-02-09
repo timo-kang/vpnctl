@@ -51,6 +51,7 @@ vpnctl controller status --config configs/example.yaml
 
 # On node
 vpnctl node join --config configs/example.yaml
+vpnctl node serve --config configs/example.yaml
 vpnctl node run --config configs/example.yaml
 vpnctl node sync-config --config configs/example.yaml
 
@@ -63,6 +64,7 @@ vpnctl export csv --out metrics.csv
 vpnctl up --config configs/example.yaml
 vpnctl down --config configs/example.yaml
 vpnctl status --config configs/example.yaml
+vpnctl doctor --config configs/example.yaml
 ```
 
 ## Direct probe (best-effort)
@@ -75,10 +77,10 @@ vpnctl direct test --config configs/example.yaml --peer modem-b
 ```
 
 ## Direct path (best-effort)
-- Nodes run STUN to learn public endpoints.
-- Controller exchanges candidates.
-- Nodes attempt direct UDP handshake.
-- If direct fails, traffic uses server relay.
+- For VPN traffic, direct node-to-node requires injecting a WireGuard peer entry for the other node.
+- The controller can publish each node's WireGuard endpoint as observed on the controller's `wg0` (via `wg show wg0 dump`).
+- Nodes can then inject `/32` peers pointing at those observed endpoints.
+- STUN is still used for the probe socket and NAT classification; it must not be used as a WireGuard endpoint (different socket, different NAT mapping).
 
 ## Routing behavior
 - Hub peer keeps `AllowedIPs` for the full VPN subnet (e.g. `/24`).

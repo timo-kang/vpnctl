@@ -55,30 +55,5 @@ func RenderServerSetConf(cfg ServerConfig, peers []Peer) (string, error) {
 
 // ApplyServer ensures the interface is up and syncs peers.
 func ApplyServer(cfg ServerConfig, peers []Peer) error {
-	if cfg.Interface == "" {
-		return fmt.Errorf("wg_interface is required")
-	}
-	if cfg.Address == "" {
-		return fmt.Errorf("wg_address is required")
-	}
-	if err := ensureInterface(cfg.Interface); err != nil {
-		return err
-	}
-	if err := run("ip", "address", "replace", cfg.Address, "dev", cfg.Interface); err != nil {
-		return err
-	}
-	if cfg.MTU > 0 {
-		if err := run("ip", "link", "set", "dev", cfg.Interface, "mtu", fmt.Sprintf("%d", cfg.MTU)); err != nil {
-			return err
-		}
-	}
-	if err := run("ip", "link", "set", "dev", cfg.Interface, "up"); err != nil {
-		return err
-	}
-
-	setConf, err := RenderServerSetConf(cfg, peers)
-	if err != nil {
-		return err
-	}
-	return syncConf(cfg.Interface, setConf)
+	return DefaultManager().ApplyServer(cfg, peers)
 }

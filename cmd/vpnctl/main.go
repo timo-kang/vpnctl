@@ -31,6 +31,7 @@ Usage:
   vpnctl controller init --config <path>
   vpnctl controller status --config <path>
   vpnctl node join --config <path>
+  vpnctl node serve --config <path>
   vpnctl node run --config <path>
   vpnctl node sync-config --config <path>
   vpnctl direct serve --config <path> [--listen :0]
@@ -43,6 +44,7 @@ Usage:
  vpnctl up --config <path> [--wg-config <path>] [--dry-run]
  vpnctl down --config <path> [--wg-config <path>]
  vpnctl status --config <path> [--iface <name>]
+ vpnctl doctor --config <path> [--iface <name>]
 
 Planned:
  vpnctl node add
@@ -80,6 +82,8 @@ func main() {
 		handleDown(os.Args[2:])
 	case "status":
 		handleStatus(os.Args[2:])
+	case "doctor":
+		handleDoctor(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usage)
@@ -180,6 +184,8 @@ func handleNode(args []string) {
 	switch args[0] {
 	case "join":
 		nodeJoin(args[1:])
+	case "serve":
+		nodeServe(args[1:])
 	case "run":
 		nodeRun(args[1:])
 	case "sync-config":
@@ -314,6 +320,173 @@ func nodeRun(args []string) {
 	}
 }
 
+func nodeServe(args []string) {
+	fs := flag.NewFlagSet("node serve", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	retryDelay := fs.Duration("retry-delay", 2*time.Second, "initial retry delay")
+	retryMaxDelay := fs.Duration("retry-max-delay", 30*time.Second, "max retry delay")
+	_ = fs.Parse(args)
+
+	if *configPath == "" {
+		fatal(errors.New("--config is required"))
+	}
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fatal(err)
+	}
+	if cfg.Node == nil {
+		fatal(errors.New("node config required"))
+	}
+	config.ApplyDefaults(&cfg)
+	if err := config.Validate(cfg); err != nil {
+		fatal(err)
+	}
+
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	delay := *retryDelay
+	if delay <= 0 {
+		delay = 2 * time.Second
+	}
+	maxDelay := *retryMaxDelay
+	if maxDelay < delay {
+		maxDelay = delay
+	}
+
+	for {
+		// Refresh config each loop so operator edits (or write-back vpn_ip) are picked up.
+		cfg, err = loadConfig(*configPath)
+		if err != nil {
+			fatal(err)
+		}
+		if cfg.Node == nil {
+			fatal(errors.New("node config required"))
+		}
+		config.ApplyDefaults(&cfg)
+
+		if err := syncConfigOnce(*configPath, &cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "sync-config failed: %v\n", err)
+			goto retry
+		}
+		if err := upOnce(*configPath, &cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "wg up failed: %v\n", err)
+			goto retry
+		}
+
+		if err := agent.Run(ctx, *cfg.Node); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "agent exited: %v\n", err)
+			goto retry
+		}
+		return
+
+	retry:
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		delay = delay * 2
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+	}
+}
+
+func syncConfigOnce(configPath string, cfg *config.Config) error {
+	if cfg == nil || cfg.Node == nil {
+		return errors.New("node config required")
+	}
+	if cfg.Node.Controller == "" {
+		// Server fields might be pre-provisioned; if so, skip controller calls.
+		if cfg.Node.ServerPublicKey != "" && cfg.Node.ServerEndpoint != "" && len(cfg.Node.ServerAllowedIPs) > 0 {
+			return nil
+		}
+		return errors.New("node.controller is required")
+	}
+
+	client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+	ctx := context.Background()
+
+	updated := false
+	if cfg.Node.WGPublicKey != "" {
+		resp, err := client.Register(ctx, api.RegisterRequest{
+			Name:       cfg.Node.Name,
+			PubKey:     cfg.Node.WGPublicKey,
+			VPNIP:      cfg.Node.VPNIP,
+			Endpoint:   "",
+			PublicAddr: "",
+			NATType:    "",
+			DirectMode: cfg.Node.DirectMode,
+			ProbePort:  cfg.Node.ProbePort,
+		})
+		if err != nil {
+			return err
+		}
+		if cfg.Node.VPNIP == "" && resp.VPNIP != "" {
+			cfg.Node.VPNIP = resp.VPNIP
+			updated = true
+		}
+	}
+
+	if cfg.Node.ServerPublicKey == "" || cfg.Node.ServerEndpoint == "" || len(cfg.Node.ServerAllowedIPs) == 0 {
+		resp, err := client.WGConfig(ctx, cfg.Node.Name)
+		if err != nil {
+			return err
+		}
+		if cfg.Node.ServerPublicKey == "" {
+			cfg.Node.ServerPublicKey = resp.ServerPublicKey
+			updated = true
+		}
+		if cfg.Node.ServerEndpoint == "" {
+			cfg.Node.ServerEndpoint = resp.ServerEndpoint
+			updated = true
+		}
+		if len(cfg.Node.ServerAllowedIPs) == 0 {
+			cfg.Node.ServerAllowedIPs = resp.ServerAllowedIPs
+			updated = true
+		}
+		if cfg.Node.ServerKeepaliveSec == 0 && resp.ServerKeepaliveSec > 0 {
+			cfg.Node.ServerKeepaliveSec = resp.ServerKeepaliveSec
+			updated = true
+		}
+	}
+
+	if updated && configPath != "" {
+		return config.Save(configPath, *cfg)
+	}
+	return nil
+}
+
+func upOnce(configPath string, cfg *config.Config) error {
+	if cfg == nil || cfg.Node == nil {
+		return errors.New("node config required")
+	}
+	// Ensure server fields are present (controller-driven config generation).
+	if err := fillServerConfig(cfg.Node); err != nil {
+		return err
+	}
+	if cfg.Node.VPNIP == "" {
+		return errors.New("node.vpn_ip is required (run sync-config/join first)")
+	}
+	conf, err := wireguard.RenderNode(*cfg.Node)
+	if err != nil {
+		return err
+	}
+	if err := wireguard.WriteConfig(cfg.Node.WGConfigPath, conf); err != nil {
+		return err
+	}
+	setConf, err := wireguard.RenderSetConf(*cfg.Node, nil)
+	if err != nil {
+		return err
+	}
+	return wireguard.Up(*cfg.Node, setConf)
+}
+
 func nodeSyncConfig(args []string) {
 	fs := flag.NewFlagSet("node sync-config", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to YAML config")
@@ -390,6 +563,60 @@ func nodeSyncConfig(args []string) {
 		return
 	}
 	fmt.Fprintln(os.Stdout, "config already up to date")
+}
+
+func handleDoctor(args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	iface := fs.String("iface", "", "wireguard interface name")
+	_ = fs.Parse(args)
+
+	if *configPath == "" {
+		fatal(errors.New("--config is required"))
+	}
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fatal(err)
+	}
+	config.ApplyDefaults(&cfg)
+
+	if *iface == "" {
+		if cfg.Node != nil && cfg.Node.WGInterface != "" {
+			*iface = cfg.Node.WGInterface
+		} else if cfg.Controller != nil && cfg.Controller.WGInterface != "" {
+			*iface = cfg.Controller.WGInterface
+		} else {
+			*iface = config.DefaultWGInterface
+		}
+	}
+
+	fmt.Fprintf(os.Stdout, "iface=%s\n", *iface)
+	if out, err := wireguard.Status(*iface); err == nil {
+		fmt.Fprintln(os.Stdout, out)
+	} else {
+		fmt.Fprintf(os.Stdout, "wg status error: %v\n", err)
+	}
+
+	// Routing / policy diagnostics.
+	if cfg.Node != nil {
+		if config.PolicyRoutingEnabled(cfg.Node) {
+			fmt.Fprintf(os.Stdout, "policy_routing enabled=true table=%d priority=%d cidr=%s\n",
+				cfg.Node.PolicyRoutingTable, cfg.Node.PolicyRoutingPriority, cfg.Node.PolicyRoutingCIDR)
+		} else {
+			fmt.Fprintln(os.Stdout, "policy_routing enabled=false")
+		}
+		if cfg.Node.ProbePort > 0 {
+			fmt.Fprintf(os.Stdout, "probe_port=%d\n", cfg.Node.ProbePort)
+		}
+		if cfg.Node.ServerAllowedIPs != nil {
+			for _, cidr := range cfg.Node.ServerAllowedIPs {
+				if cidr == "0.0.0.0/0" || cidr == "::/0" {
+					fmt.Fprintf(os.Stdout, "warning: server_allowed_ips includes default route (%s) which may break host internet\n", cidr)
+				}
+			}
+		}
+	}
 }
 
 func handleDirect(args []string) {

@@ -28,6 +28,7 @@ type Server struct {
 	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
 	// when multiple nodes submit samples concurrently.
 	metricsMu sync.Mutex
+	wg        *wireguard.Manager
 }
 
 // NewServer constructs a controller server.
@@ -55,7 +56,7 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 			return nil, err
 		}
 	}
-	return &Server{cfg: cfg, regPath: regPath, reg: reg}, nil
+	return &Server{cfg: cfg, regPath: regPath, reg: reg, wg: wireguard.DefaultManager()}, nil
 }
 
 // ListenAndServe runs the HTTP server.
@@ -168,6 +169,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Unlock()
 	locked = false
+
+	// Fill observed WireGuard endpoints for candidates (best-effort).
+	s.fillObservedEndpoints(resp.Peers)
+
 	if autoApply {
 		if err := applyWG(s.cfg, peers); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -190,9 +195,12 @@ func (s *Server) handleCandidates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	peers := s.peersLocked(nodeID)
+	s.mu.Unlock()
 
-	resp := api.CandidatesResponse{Peers: s.peersLocked(nodeID)}
+	s.fillObservedEndpoints(peers)
+
+	resp := api.CandidatesResponse{Peers: peers}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -325,6 +333,24 @@ func (s *Server) peersLocked(nodeID string) []api.PeerCandidate {
 		})
 	}
 	return peers
+}
+
+func (s *Server) fillObservedEndpoints(peers []api.PeerCandidate) {
+	if s == nil || s.wg == nil || s.cfg.WGInterface == "" {
+		return
+	}
+	m, err := s.wg.PeerEndpoints(s.cfg.WGInterface)
+	if err != nil || len(m) == 0 {
+		return
+	}
+	for i := range peers {
+		if peers[i].PubKey == "" {
+			continue
+		}
+		if ep := m[peers[i].PubKey]; ep != "" {
+			peers[i].Endpoint = ep
+		}
+	}
 }
 
 func decodeJSON(r *http.Request, v any) error {
