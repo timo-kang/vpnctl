@@ -25,6 +25,9 @@ type Server struct {
 	regPath string
 	mu      sync.Mutex
 	reg     *store.Registry
+	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
+	// when multiple nodes submit samples concurrently.
+	metricsMu sync.Mutex
 }
 
 // NewServer constructs a controller server.
@@ -33,6 +36,24 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 	reg, err := store.LoadRegistry(regPath)
 	if err != nil {
 		return nil, err
+	}
+	// Backward/forward compatibility: older registries might not have IDs.
+	// Keep IDs stable so callers can consistently use node_id.
+	changed := false
+	for i := range reg.Nodes {
+		if reg.Nodes[i].ID == "" && reg.Nodes[i].Name != "" {
+			reg.Nodes[i].ID = reg.Nodes[i].Name
+			changed = true
+		}
+		if reg.Nodes[i].Name == "" && reg.Nodes[i].ID != "" {
+			reg.Nodes[i].Name = reg.Nodes[i].ID
+			changed = true
+		}
+	}
+	if changed {
+		if err := store.SaveRegistry(regPath, reg); err != nil {
+			return nil, err
+		}
 	}
 	return &Server{cfg: cfg, regPath: regPath, reg: reg}, nil
 }
@@ -77,11 +98,18 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	assignedVPNIP := req.VPNIP
 
 	s.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.Unlock()
+		}
+	}()
 
 	if assignedVPNIP == "" {
 		var err error
 		assignedVPNIP, err = allocateVPNIP(s.cfg.VPNCIDR, s.reg)
 		if err != nil {
+			// Important: never return while holding the registry lock.
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -91,6 +119,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	updated := false
 	for i := range s.reg.Nodes {
 		if s.reg.Nodes[i].Name == req.Name {
+			if s.reg.Nodes[i].ID == "" {
+				s.reg.Nodes[i].ID = req.Name
+			}
 			s.reg.Nodes[i].PubKey = req.PubKey
 			s.reg.Nodes[i].VPNIP = assignedVPNIP
 			s.reg.Nodes[i].Endpoint = req.Endpoint
@@ -136,6 +167,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Unlock()
+	locked = false
 	if autoApply {
 		if err := applyWG(s.cfg, peers); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -190,6 +222,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// AppendCSV is not safe for concurrent use across processes/goroutines because
+	// CSV writes are buffered and can interleave. Serialize appends in-process.
+	s.metricsMu.Lock()
+	defer s.metricsMu.Unlock()
 	if err := metrics.AppendCSV(path, req.Samples); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -378,6 +414,11 @@ func allocateVPNIP(cidr string, reg *store.Registry) (string, error) {
 	base := prefix.Masked().Addr()
 	ones, bits := prefix.Bits(), 32
 	size := 1 << uint(bits-ones)
+	// Defensive: avoid accidentally iterating millions of addresses due to misconfiguration.
+	// This controller is intended for small-ish overlays (tens to low thousands of nodes).
+	if size > 1_048_576 {
+		return "", fmt.Errorf("vpn_cidr %s is too large (size=%d)", cidr, size)
+	}
 	for i := 1; i < size-1; i++ { // skip network/broadcast
 		addr := addIPv4(base, uint32(i))
 		if !used[addr] {

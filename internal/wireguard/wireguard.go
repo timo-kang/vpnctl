@@ -187,7 +187,14 @@ func Down(cfg config.NodeConfig) error {
 	if cfg.WGInterface == "" {
 		return fmt.Errorf("wg_interface is required")
 	}
-	return run("ip", "link", "del", "dev", cfg.WGInterface)
+	err := run("ip", "link", "del", "dev", cfg.WGInterface)
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "Cannot find device") || strings.Contains(err.Error(), "does not exist") {
+		return nil
+	}
+	return err
 }
 
 // Status returns a basic interface + wg status output.
@@ -246,7 +253,15 @@ func ensureInterface(iface string) error {
 	if interfaceExists(iface) {
 		return nil
 	}
-	return run("ip", "link", "add", "dev", iface, "type", "wireguard")
+	err := run("ip", "link", "add", "dev", iface, "type", "wireguard")
+	if err == nil {
+		return nil
+	}
+	// Best-effort idempotency (e.g. concurrent `up` runs).
+	if strings.Contains(err.Error(), "File exists") {
+		return nil
+	}
+	return err
 }
 
 func interfaceExists(iface string) bool {

@@ -89,7 +89,9 @@ func ProbePeer(ctx context.Context, localAddr, peerAddr string, timeout time.Dur
 		return 0, err
 	}
 
-	conn, err := net.ListenUDP("udp", udpAddr)
+	// DialUDP "connects" the socket so the kernel filters out packets from other sources.
+	// This avoids brittle string comparisons on source addresses (IPv4-mapped IPv6, etc).
+	conn, err := net.DialUDP("udp", udpAddr, peerUDP)
 	if err != nil {
 		return 0, err
 	}
@@ -108,7 +110,7 @@ func ProbePeer(ctx context.Context, localAddr, peerAddr string, timeout time.Dur
 	payload := []byte(probePrefix + nonce)
 
 	start := time.Now()
-	if _, err := conn.WriteToUDP(payload, peerUDP); err != nil {
+	if _, err := conn.Write(payload); err != nil {
 		return 0, err
 	}
 
@@ -118,12 +120,9 @@ func ProbePeer(ctx context.Context, localAddr, peerAddr string, timeout time.Dur
 
 	buf := make([]byte, 2048)
 	for {
-		n, addr, err := conn.ReadFromUDP(buf)
+		n, err := conn.Read(buf)
 		if err != nil {
 			return 0, err
-		}
-		if addr.String() != peerUDP.String() {
-			continue
 		}
 		msg := string(buf[:n])
 		if msg == ackPrefix+nonce {
@@ -157,7 +156,7 @@ func PerfProbe(ctx context.Context, localAddr, peerAddr string, packetSize, coun
 		return 0, 0, err
 	}
 
-	conn, err := net.ListenUDP("udp", udpAddr)
+	conn, err := net.DialUDP("udp", udpAddr, peerUDP)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -175,7 +174,7 @@ func PerfProbe(ctx context.Context, localAddr, peerAddr string, packetSize, coun
 	start := time.Now()
 	for i := 0; i < count; i++ {
 		copy(payload[len(echoPrefix):], fmt.Sprintf("%08d", i))
-		if _, err := conn.WriteToUDP(payload, peerUDP); err != nil {
+		if _, err := conn.Write(payload); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -188,12 +187,9 @@ func PerfProbe(ctx context.Context, localAddr, peerAddr string, packetSize, coun
 	receivedBytes := 0
 	buf := make([]byte, packetSize+64)
 	for received < count {
-		n, addr, err := conn.ReadFromUDP(buf)
+		n, err := conn.Read(buf)
 		if err != nil {
 			break
-		}
-		if addr.String() != peerUDP.String() {
-			continue
 		}
 		if n <= 0 {
 			continue

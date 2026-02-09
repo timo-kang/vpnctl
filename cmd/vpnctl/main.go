@@ -309,7 +309,9 @@ func nodeRun(args []string) {
 		}
 	}
 
-	fatal(agent.Run(ctx, *cfg.Node))
+	if err := agent.Run(ctx, *cfg.Node); err != nil && !errors.Is(err, context.Canceled) {
+		fatal(err)
+	}
 }
 
 func nodeSyncConfig(args []string) {
@@ -472,7 +474,7 @@ func directTest(args []string) {
 		NodeID:  cfg.Node.Name,
 		PeerID:  peerID,
 		Success: true,
-		RTTMs:   float64(rtt.Milliseconds()),
+		RTTMs:   float64(rtt.Microseconds()) / 1000.0,
 		Reason:  "",
 	})
 }
