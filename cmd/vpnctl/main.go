@@ -164,15 +164,26 @@ func controllerStatus(args []string) {
 		return
 	}
 
-	fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-10s  %-6s  %-20s  %-8s\n",
-		"NAME", "VPN_IP", "PUBLIC_ADDR", "NAT", "PORT", "LAST_SEEN", "STATUS")
+	wgEndpoints := map[string]string{}
+	if cfg.Controller.WGInterface != "" {
+		if m, err := wireguard.PeerEndpoints(cfg.Controller.WGInterface); err == nil {
+			wgEndpoints = m
+		}
+	}
+
+	fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-22s  %-10s  %-6s  %-20s  %-8s\n",
+		"NAME", "VPN_IP", "WG_ENDPOINT", "PUBLIC_ADDR", "NAT", "PORT", "LAST_SEEN", "STATUS")
 	for _, node := range reg.Nodes {
 		lastSeen := ""
 		if !node.LastSeenAt.IsZero() {
 			lastSeen = node.LastSeenAt.UTC().Format(time.RFC3339)
 		}
-		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-10s  %-6d  %-20s  %-8s\n",
-			node.Name, node.VPNIP, node.PublicAddr, node.NATType, node.ProbePort, lastSeen, node.Status)
+		wgEP := ""
+		if node.PubKey != "" {
+			wgEP = wgEndpoints[node.PubKey]
+		}
+		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-22s  %-10s  %-6d  %-20s  %-8s\n",
+			node.Name, node.VPNIP, wgEP, node.PublicAddr, node.NATType, node.ProbePort, lastSeen, node.Status)
 	}
 }
 
@@ -732,9 +743,9 @@ func handleDiscover(args []string) {
 		return
 	}
 
-	fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-18s\n", "NAME", "VPN_IP", "PUBLIC_ADDR", "NAT_TYPE")
+	fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-22s  %-18s\n", "NAME", "VPN_IP", "WG_ENDPOINT", "PUBLIC_ADDR", "NAT_TYPE")
 	for _, peer := range resp.Peers {
-		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-18s\n", peer.Name, peer.VPNIP, peer.PublicAddr, peer.NATType)
+		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-22s  %-18s\n", peer.Name, peer.VPNIP, peer.Endpoint, peer.PublicAddr, peer.NATType)
 	}
 }
 
