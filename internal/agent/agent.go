@@ -97,11 +97,21 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 				break
 			}
 			desired := map[string]wireguard.Peer{}
+			allowedOwner := map[string]string{}
 			for _, peer := range candidates {
 				// P2P WireGuard injection needs the peer's wg endpoint (as observed by the controller).
 				// PublicAddr from STUN is for the probe socket, not wg, and must not be used for wg endpoints.
 				wgEndpoint := peer.Endpoint
 				allowedIP := normalizeHostIP(peer.VPNIP)
+				if allowedIP != "" {
+					if prev, ok := allowedOwner[allowedIP]; ok && prev != peer.ID {
+						// Overlapping AllowedIPs are invalid in WireGuard. Skip duplicates so one bad/stale
+						// registry entry doesn't block all peer injection.
+						log.Printf("skip peer injection name=%s id=%s vpn_ip=%s: duplicate allowed_ip (already owned by %s)", peer.Name, peer.ID, peer.VPNIP, prev)
+						goto probeOnly
+					}
+					allowedOwner[allowedIP] = peer.ID
+				}
 				if allowedIP != "" && peer.PubKey != "" && wgEndpoint != "" {
 					desired[peer.ID] = wireguard.Peer{
 						PublicKey:    peer.PubKey,
@@ -111,6 +121,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 					}
 				}
 
+			probeOnly:
 				// If we have a probe socket and the peer has a STUN-derived public address, record a direct UDP reachability datapoint.
 				if shared == nil || peer.PublicAddr == "" {
 					continue
