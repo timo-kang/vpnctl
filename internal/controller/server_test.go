@@ -175,9 +175,24 @@ func TestP2PReadyLocked_MutualSuccess(t *testing.T) {
 	t.Parallel()
 
 	s := &Server{
+		cfg: config.ControllerConfig{P2PReadyMode: "mutual"},
 		directOK: map[string]map[string]time.Time{
 			"a": {"b": time.Now().UTC()},
 			"b": {"a": time.Now().UTC()},
+		},
+	}
+	if !s.p2pReadyLocked("a", "b") {
+		t.Fatalf("expected ready")
+	}
+}
+
+func TestP2PReadyLocked_EitherSuccess(t *testing.T) {
+	t.Parallel()
+
+	s := &Server{
+		cfg: config.ControllerConfig{P2PReadyMode: "either"},
+		directOK: map[string]map[string]time.Time{
+			"a": {"b": time.Now().UTC()},
 		},
 	}
 	if !s.p2pReadyLocked("a", "b") {

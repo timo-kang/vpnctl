@@ -25,6 +25,7 @@ const (
 	DefaultDirectKeepaliveSymmetricSec = 15
 	DefaultDirectKeepaliveUnknownSec   = 20
 	DefaultProbePort                   = 51900
+	DefaultP2PReadyMode                = "mutual" // mutual|either
 )
 
 // Config holds both controller and node settings.
@@ -52,6 +53,10 @@ type ControllerConfig struct {
 	ServerAllowedIPs   []string `yaml:"server_allowed_ips"`
 	ServerKeepaliveSec int      `yaml:"server_keepalive_sec"`
 	VPNCIDR            string   `yaml:"vpn_cidr"`
+	// P2PReadyMode controls when controller marks a peer-pair safe for /32 direct injection.
+	// mutual: requires recent success in both directions (safe, conservative).
+	// either: requires recent success in either direction (symmetric injection, more permissive).
+	P2PReadyMode string `yaml:"p2p_ready_mode"`
 }
 
 // NodeConfig is used by the agent process running on a device.
@@ -85,6 +90,13 @@ type NodeConfig struct {
 	STUNIntervalSec             int      `yaml:"stun_interval_sec"`
 	CandidatesIntervalSec       int      `yaml:"candidates_interval_sec"`
 	DirectIntervalSec           int      `yaml:"direct_interval_sec"`
+	// AdvertiseWGEndpoint, when set, is the WireGuard endpoint other peers should dial for direct injection.
+	// Use this for port-forwarded nodes (e.g. "WAN_IP:51820"). When unset, controller will publish the
+	// endpoint it observes on its own wg0.
+	AdvertiseWGEndpoint string `yaml:"advertise_wg_endpoint"`
+	// AdvertisePublicAddr, when set, is the direct probe address other peers should use (e.g. "WAN_IP:51900").
+	// This is required when you use port-forwarding because STUN on the probe socket returns a random mapped port.
+	AdvertisePublicAddr string `yaml:"advertise_public_addr"`
 }
 
 // Load reads and parses a YAML config file.
@@ -194,6 +206,9 @@ func ApplyDefaults(cfg *Config) {
 		}
 		if cfg.Controller.KeepaliveSec == 0 {
 			cfg.Controller.KeepaliveSec = DefaultKeepaliveSec
+		}
+		if cfg.Controller.P2PReadyMode == "" {
+			cfg.Controller.P2PReadyMode = DefaultP2PReadyMode
 		}
 	}
 

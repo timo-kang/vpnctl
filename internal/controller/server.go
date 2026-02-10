@@ -363,18 +363,29 @@ func (s *Server) p2pReadyLocked(a, b string) bool {
 
 	ab := s.directOK[a]
 	ba := s.directOK[b]
-	if ab == nil || ba == nil {
+	if ab == nil && ba == nil {
 		return false
 	}
 	t1, ok1 := ab[b]
 	t2, ok2 := ba[a]
-	if !ok1 || !ok2 {
+	switch strings.ToLower(strings.TrimSpace(s.cfg.P2PReadyMode)) {
+	case "either":
+		if ok1 && now.Sub(t1) <= ttl {
+			return true
+		}
+		if ok2 && now.Sub(t2) <= ttl {
+			return true
+		}
 		return false
+	default: // mutual
+		if !ok1 || !ok2 {
+			return false
+		}
+		if now.Sub(t1) > ttl || now.Sub(t2) > ttl {
+			return false
+		}
+		return true
 	}
-	if now.Sub(t1) > ttl || now.Sub(t2) > ttl {
-		return false
-	}
-	return true
 }
 
 func (s *Server) fillObservedEndpoints(peers []api.PeerCandidate) {
@@ -386,6 +397,10 @@ func (s *Server) fillObservedEndpoints(peers []api.PeerCandidate) {
 		return
 	}
 	for i := range peers {
+		// If the node explicitly advertised an endpoint (e.g. port-forwarded), don't override it.
+		if peers[i].Endpoint != "" {
+			continue
+		}
 		if peers[i].PubKey == "" {
 			continue
 		}

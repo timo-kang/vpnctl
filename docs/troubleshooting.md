@@ -46,6 +46,13 @@ Checks:
 - Ensure STUN servers are configured.
 - Confirm outbound UDP allowed.
 
+Port-forwarded nodes:
+- If the peer is behind NAT with port forwarding, STUN will usually report a random mapped port that does NOT match your forwarded port.
+- In that case, set:
+  - `node.advertise_public_addr: "WAN_IP:51900"` (or your forwarded probe port)
+  - `node.advertise_wg_endpoint: "WAN_IP:51820"` (or your forwarded WireGuard port)
+  - `node.wg_listen_port: 51820` (must match the forwarded port)
+
 ## 4) Internet lost on node
 Symptoms:
 - Local internet dies after `up` or `node run`.
