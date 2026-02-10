@@ -61,6 +61,11 @@ func (m *Manager) Up(cfg config.NodeConfig, setConf string) error {
 		}
 	}
 	if config.PolicyRoutingEnabled(&cfg) {
+		// The policy table must have at least the relay route(s), otherwise the ip rule
+		// will blackhole traffic to the VPN CIDR when no /32 direct peers are installed yet.
+		if err := m.installPolicyBaselineRoutes(cfg); err != nil {
+			return err
+		}
 		if err := m.ensurePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable, cfg.PolicyRoutingCIDR); err != nil {
 			return err
 		}
@@ -128,12 +133,31 @@ func (m *Manager) ApplyPeers(cfg config.NodeConfig, peers []Peer) error {
 		if err := m.flushPolicyTable(cfg.PolicyRoutingTable); err != nil {
 			return err
 		}
+		if err := m.installPolicyBaselineRoutes(cfg); err != nil {
+			return err
+		}
 		for _, peer := range peers {
 			for _, cidr := range peer.AllowedIPs {
 				if err := m.run("ip", "route", "replace", cidr, "dev", cfg.WGInterface, "table", strconv.Itoa(cfg.PolicyRoutingTable)); err != nil {
 					return err
 				}
 			}
+		}
+	}
+	return nil
+}
+
+func (m *Manager) installPolicyBaselineRoutes(cfg config.NodeConfig) error {
+	if cfg.PolicyRoutingTable <= 0 {
+		return fmt.Errorf("invalid policy routing settings")
+	}
+	// Mirror relay routes into the policy table so the rule never creates a blackhole.
+	for _, cidr := range cfg.ServerAllowedIPs {
+		if cidr == "" {
+			continue
+		}
+		if err := m.run("ip", "route", "replace", cidr, "dev", cfg.WGInterface, "table", strconv.Itoa(cfg.PolicyRoutingTable)); err != nil {
+			return err
 		}
 	}
 	return nil
