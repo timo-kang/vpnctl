@@ -170,3 +170,17 @@ func TestHandleCandidates_FillsObservedEndpointFromWgDump(t *testing.T) {
 		t.Fatalf("endpoint=%q", resp.Peers[0].Endpoint)
 	}
 }
+
+func TestP2PReadyLocked_MutualSuccess(t *testing.T) {
+	t.Parallel()
+
+	s := &Server{
+		directOK: map[string]map[string]time.Time{
+			"a": {"b": time.Now().UTC()},
+			"b": {"a": time.Now().UTC()},
+		},
+	}
+	if !s.p2pReadyLocked("a", "b") {
+		t.Fatalf("expected ready")
+	}
+}

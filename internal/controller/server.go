@@ -29,6 +29,9 @@ type Server struct {
 	// when multiple nodes submit samples concurrently.
 	metricsMu sync.Mutex
 	wg        *wireguard.Manager
+	// directOK tracks recent direct probe successes reported by nodes.
+	// Used to gate P2P WireGuard /32 injection so relay doesn't get blackholed.
+	directOK map[string]map[string]time.Time // node_id -> peer_id -> last success
 }
 
 // NewServer constructs a controller server.
@@ -56,7 +59,13 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 			return nil, err
 		}
 	}
-	return &Server{cfg: cfg, regPath: regPath, reg: reg, wg: wireguard.DefaultManager()}, nil
+	return &Server{
+		cfg:      cfg,
+		regPath:  regPath,
+		reg:      reg,
+		wg:       wireguard.DefaultManager(),
+		directOK: make(map[string]map[string]time.Time),
+	}, nil
 }
 
 // ListenAndServe runs the HTTP server.
@@ -290,6 +299,17 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.NodeID != "" && req.PeerID != "" && req.Success {
+		s.mu.Lock()
+		m := s.directOK[req.NodeID]
+		if m == nil {
+			m = make(map[string]time.Time)
+			s.directOK[req.NodeID] = m
+		}
+		m[req.PeerID] = time.Now().UTC()
+		s.mu.Unlock()
+	}
+
 	log.Printf("direct result node=%s peer=%s success=%v rtt_ms=%.2f reason=%s", req.NodeID, req.PeerID, req.Success, req.RTTMs, req.Reason)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -330,9 +350,31 @@ func (s *Server) peersLocked(nodeID string) []api.PeerCandidate {
 			PublicAddr: node.PublicAddr,
 			NATType:    node.NATType,
 			ProbePort:  node.ProbePort,
+			P2PReady:   s.p2pReadyLocked(nodeID, node.ID),
 		})
 	}
 	return peers
+}
+
+func (s *Server) p2pReadyLocked(a, b string) bool {
+	// Require mutual direct probe success within TTL.
+	const ttl = 2 * time.Minute
+	now := time.Now().UTC()
+
+	ab := s.directOK[a]
+	ba := s.directOK[b]
+	if ab == nil || ba == nil {
+		return false
+	}
+	t1, ok1 := ab[b]
+	t2, ok2 := ba[a]
+	if !ok1 || !ok2 {
+		return false
+	}
+	if now.Sub(t1) > ttl || now.Sub(t2) > ttl {
+		return false
+	}
+	return true
 }
 
 func (s *Server) fillObservedEndpoints(peers []api.PeerCandidate) {

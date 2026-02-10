@@ -24,6 +24,9 @@ type PeerCandidate struct {
 	PublicAddr string `json:"public_addr"`
 	NATType    string `json:"nat_type"`
 	ProbePort  int    `json:"probe_port"`
+	// P2PReady is set by the controller when recent mutual direct probe success exists.
+	// Nodes should only inject /32 WireGuard peers when this is true to avoid blackholing relay traffic.
+	P2PReady bool `json:"p2p_ready"`
 }
 
 // RegisterResponse returns the assigned node ID and peers list.
