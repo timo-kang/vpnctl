@@ -177,9 +177,11 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 			if cfg.ServerPublicKey != "" && cfg.ServerEndpoint != "" && len(cfg.ServerAllowedIPs) > 0 {
 				if !peersEqual(activePeers, desired) {
 					peerList := peersFromMap(desired)
+					log.Printf("inject wg peers count=%d", len(peerList))
 					if err := wireguard.ApplyPeers(cfg, peerList); err != nil {
 						log.Printf("apply peers failed: %v", err)
 					} else {
+						log.Printf("inject wg peers ok count=%d", len(peerList))
 						activePeers = desired
 					}
 				}

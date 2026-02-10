@@ -743,9 +743,9 @@ func handleDiscover(args []string) {
 		return
 	}
 
-	fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-22s  %-18s\n", "NAME", "VPN_IP", "WG_ENDPOINT", "PUBLIC_ADDR", "NAT_TYPE")
+	fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6s  %-22s  %-18s\n", "NAME", "VPN_IP", "WG_ENDPOINT", "PORT", "PUBLIC_ADDR", "NAT_TYPE")
 	for _, peer := range resp.Peers {
-		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-22s  %-18s\n", peer.Name, peer.VPNIP, peer.Endpoint, peer.PublicAddr, peer.NATType)
+		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6d  %-22s  %-18s\n", peer.Name, peer.VPNIP, peer.Endpoint, peer.ProbePort, peer.PublicAddr, peer.NATType)
 	}
 }
 
