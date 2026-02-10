@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -620,6 +622,22 @@ func handleDoctor(args []string) {
 		if cfg.Node.ProbePort > 0 {
 			fmt.Fprintf(os.Stdout, "probe_port=%d\n", cfg.Node.ProbePort)
 		}
+		if out, err := outputCmd("ip", "rule", "show"); err == nil && out != "" {
+			fmt.Fprintln(os.Stdout, "ip rule:")
+			fmt.Fprintln(os.Stdout, out)
+		}
+		if config.PolicyRoutingEnabled(cfg.Node) && cfg.Node.PolicyRoutingTable > 0 {
+			out, err := outputCmd("ip", "route", "show", "table", fmt.Sprintf("%d", cfg.Node.PolicyRoutingTable))
+			if err == nil && out != "" {
+				fmt.Fprintf(os.Stdout, "ip route table %d:\n", cfg.Node.PolicyRoutingTable)
+				fmt.Fprintln(os.Stdout, out)
+				// Heuristic warning for the most common failure: rule exists but baseline route is missing.
+				if cfg.Node.PolicyRoutingCIDR != "" && !strings.Contains(out, cfg.Node.PolicyRoutingCIDR) {
+					fmt.Fprintf(os.Stdout, "warning: policy routing table %d has no route for %s (VPN traffic may blackhole until wg up applies baseline route)\n",
+						cfg.Node.PolicyRoutingTable, cfg.Node.PolicyRoutingCIDR)
+				}
+			}
+		}
 		if cfg.Node.ServerAllowedIPs != nil {
 			for _, cidr := range cfg.Node.ServerAllowedIPs {
 				if cidr == "0.0.0.0/0" || cidr == "::/0" {
@@ -628,6 +646,17 @@ func handleDoctor(args []string) {
 			}
 		}
 	}
+}
+
+func outputCmd(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		return "", errors.New(strings.TrimSpace(buf.String()))
+	}
+	return strings.TrimSpace(buf.String()), nil
 }
 
 func handleDirect(args []string) {
