@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"vpnctl/internal/addrutil"
 	"vpnctl/internal/agent"
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
@@ -721,7 +722,7 @@ func directTest(args []string) {
 
 	peerAddr, peerID := selectPeer(*peer, candidates.Peers)
 	if peerAddr == "" {
-		fatal(fmt.Errorf("peer %q not found or missing public_addr", *peer))
+		fatal(fmt.Errorf("peer %q not found or missing probe address (need probe_port and either public_addr or wg_endpoint)", *peer))
 	}
 
 	rtt, err := direct.ProbePeer(ctx, *localAddr, peerAddr, *timeout)
@@ -772,7 +773,8 @@ func handleDiscover(args []string) {
 		return
 	}
 
-	fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6s  %-4s  %-22s  %-18s\n", "NAME", "VPN_IP", "WG_ENDPOINT", "PORT", "P2P", "PUBLIC_ADDR", "NAT_TYPE")
+	fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6s  %-4s  %-22s  %-22s  %-18s\n",
+		"NAME", "VPN_IP", "WG_ENDPOINT", "PORT", "P2P", "DIRECT_ADDR", "PUBLIC_ADDR", "NAT_TYPE")
 	for _, peer := range resp.Peers {
 		p2p := ""
 		if peer.P2PReady {
@@ -780,7 +782,9 @@ func handleDiscover(args []string) {
 		} else {
 			p2p = "no"
 		}
-		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6d  %-4s  %-22s  %-18s\n", peer.Name, peer.VPNIP, peer.Endpoint, peer.ProbePort, p2p, peer.PublicAddr, peer.NATType)
+		directAddr, _ := addrutil.ProbeAddr(peer.PublicAddr, peer.Endpoint, peer.ProbePort)
+		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6d  %-4s  %-22s  %-22s  %-18s\n",
+			peer.Name, peer.VPNIP, peer.Endpoint, peer.ProbePort, p2p, directAddr, peer.PublicAddr, peer.NATType)
 	}
 }
 
@@ -1167,11 +1171,10 @@ func normalizeBaseURL(addr string) string {
 func selectPeer(peer string, candidates []api.PeerCandidate) (string, string) {
 	for _, cand := range candidates {
 		if cand.ID == peer || cand.Name == peer {
-			if cand.PublicAddr != "" {
-				return cand.PublicAddr, cand.ID
-			}
-			if cand.Endpoint != "" {
-				return cand.Endpoint, cand.ID
+			// Prefer the stable probe address (host + probe_port). This works for
+			// port-forwarded nodes even when STUN reports an ephemeral port.
+			if addr, ok := addrutil.ProbeAddr(cand.PublicAddr, cand.Endpoint, cand.ProbePort); ok {
+				return addr, cand.ID
 			}
 			return "", cand.ID
 		}
@@ -1182,8 +1185,8 @@ func selectPeer(peer string, candidates []api.PeerCandidate) (string, string) {
 func selectProbeAddr(peer api.PeerCandidate, path string) (string, string) {
 	switch path {
 	case "direct":
-		if peer.PublicAddr != "" {
-			return peer.PublicAddr, "direct"
+		if addr, ok := addrutil.ProbeAddr(peer.PublicAddr, peer.Endpoint, peer.ProbePort); ok {
+			return addr, "direct"
 		}
 		return "", "direct"
 	case "relay":
@@ -1192,8 +1195,8 @@ func selectProbeAddr(peer api.PeerCandidate, path string) (string, string) {
 		}
 		return "", "relay"
 	default:
-		if peer.PublicAddr != "" {
-			return peer.PublicAddr, "direct"
+		if addr, ok := addrutil.ProbeAddr(peer.PublicAddr, peer.Endpoint, peer.ProbePort); ok {
+			return addr, "direct"
 		}
 		if peer.VPNIP != "" && peer.ProbePort > 0 {
 			return fmt.Sprintf("%s:%d", stripCIDR(peer.VPNIP), peer.ProbePort), "relay"

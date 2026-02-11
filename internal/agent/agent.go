@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"vpnctl/internal/addrutil"
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
@@ -123,11 +124,15 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 					}
 				}
 
-				// If we have a probe socket and the peer has a STUN-derived public address, record a direct UDP reachability datapoint.
-				if shared == nil || peer.PublicAddr == "" {
+				// Record a direct UDP reachability datapoint to the peer's probe port.
+				// Use the host from PublicAddr or (fallback) from Endpoint, and always target ProbePort.
+				if shared == nil {
 					continue
 				}
-				peerAddr := peer.PublicAddr
+				peerAddr, ok := addrutil.ProbeAddr(peer.PublicAddr, peer.Endpoint, peer.ProbePort)
+				if !ok {
+					continue
+				}
 				path := "direct"
 
 				rtt, err := shared.ProbePeer(ctx, peerAddr, 2*time.Second)
