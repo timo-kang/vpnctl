@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -197,5 +198,59 @@ func TestP2PReadyLocked_EitherSuccess(t *testing.T) {
 	}
 	if !s.p2pReadyLocked("a", "b") {
 		t.Fatalf("expected ready")
+	}
+}
+
+func TestServer_ProbeResponder(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	cfg := config.ControllerConfig{
+		DataDir:   tmp,
+		ProbePort: 0, // OS-assigned
+		Listen:    "127.0.0.1:0",
+	}
+
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	addr, err := s.StartProbeResponder()
+	if err != nil {
+		t.Fatalf("StartProbeResponder: %v", err)
+	}
+	defer s.StopProbeResponder()
+
+	if addr == "" {
+		t.Fatal("expected non-empty address")
+	}
+
+	// Send a vpnctl-echo:healthcheck UDP packet to the responder.
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		t.Fatalf("ResolveUDPAddr: %v", err)
+	}
+	conn, err := net.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		t.Fatalf("DialUDP: %v", err)
+	}
+	defer conn.Close()
+
+	msg := []byte("vpnctl-echo:healthcheck")
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 2048)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	got := string(buf[:n])
+	if got != string(msg) {
+		t.Fatalf("echo mismatch: got %q, want %q", got, string(msg))
 	}
 }
