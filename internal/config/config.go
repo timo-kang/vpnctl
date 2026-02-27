@@ -26,6 +26,9 @@ const (
 	DefaultDirectKeepaliveUnknownSec   = 20
 	DefaultProbePort                   = 51900
 	DefaultP2PReadyMode                = "mutual" // mutual|either
+	DefaultHealthCheckIntervalSec      = 3
+	DefaultHealthCheckFailures         = 3
+	DefaultHealthCheckTimeoutSec       = 2
 )
 
 // Config holds both controller and node settings.
@@ -57,6 +60,7 @@ type ControllerConfig struct {
 	// mutual: requires recent success in both directions (safe, conservative).
 	// either: requires recent success in either direction (symmetric injection, more permissive).
 	P2PReadyMode string `yaml:"p2p_ready_mode"`
+	ProbePort    int    `yaml:"probe_port"`
 }
 
 // NodeConfig is used by the agent process running on a device.
@@ -96,7 +100,10 @@ type NodeConfig struct {
 	AdvertiseWGEndpoint string `yaml:"advertise_wg_endpoint"`
 	// AdvertisePublicAddr, when set, is the direct probe address other peers should use (e.g. "WAN_IP:51900").
 	// This is required when you use port-forwarding because STUN on the probe socket returns a random mapped port.
-	AdvertisePublicAddr string `yaml:"advertise_public_addr"`
+	AdvertisePublicAddr    string `yaml:"advertise_public_addr"`
+	HealthCheckIntervalSec int    `yaml:"health_check_interval_sec"`
+	HealthCheckFailures    int    `yaml:"health_check_failures"`
+	HealthCheckTimeoutSec  int    `yaml:"health_check_timeout_sec"`
 }
 
 // Load reads and parses a YAML config file.
@@ -210,6 +217,9 @@ func ApplyDefaults(cfg *Config) {
 		if cfg.Controller.P2PReadyMode == "" {
 			cfg.Controller.P2PReadyMode = DefaultP2PReadyMode
 		}
+		if cfg.Controller.ProbePort == 0 {
+			cfg.Controller.ProbePort = DefaultProbePort
+		}
 	}
 
 	if cfg.Node != nil {
@@ -264,6 +274,15 @@ func ApplyDefaults(cfg *Config) {
 		}
 		if cfg.Node.DirectIntervalSec == 0 {
 			cfg.Node.DirectIntervalSec = DefaultDirectIntervalSec
+		}
+		if cfg.Node.HealthCheckIntervalSec == 0 {
+			cfg.Node.HealthCheckIntervalSec = DefaultHealthCheckIntervalSec
+		}
+		if cfg.Node.HealthCheckFailures == 0 {
+			cfg.Node.HealthCheckFailures = DefaultHealthCheckFailures
+		}
+		if cfg.Node.HealthCheckTimeoutSec == 0 {
+			cfg.Node.HealthCheckTimeoutSec = DefaultHealthCheckTimeoutSec
 		}
 	}
 }
