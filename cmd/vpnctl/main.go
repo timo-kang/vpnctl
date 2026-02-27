@@ -394,6 +394,13 @@ func nodeServe(args []string) {
 				return
 			}
 			fmt.Fprintf(os.Stderr, "agent exited: %v\n", err)
+			if errors.Is(err, agent.ErrTunnelDead) {
+				fmt.Fprintf(os.Stderr, "tunnel dead, recovering...\n")
+				delay = *retryDelay
+				if delay <= 0 {
+					delay = 2 * time.Second
+				}
+			}
 			goto retry
 		}
 		return
