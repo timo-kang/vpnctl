@@ -20,6 +20,7 @@ controller:
     - "10.7.0.0/24"
   server_keepalive_sec: 25
   vpn_cidr: "10.7.0.0/24"
+  probe_port: 51900
 
 node:
   name: "modem-a"
@@ -45,6 +46,9 @@ node:
   stun_interval_sec: 60
   candidates_interval_sec: 30
   direct_interval_sec: 60
+  health_check_interval_sec: 3
+  health_check_failures: 3
+  health_check_timeout_sec: 2
   stun_servers:
     - "stun.l.google.com:19302"
   metrics_path: "/var/lib/vpnctl/metrics.csv"
