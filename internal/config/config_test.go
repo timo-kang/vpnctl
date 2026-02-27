@@ -41,6 +41,34 @@ func TestValidate_NodeRequiresControllerOrServerFields(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_HealthCheck(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Node: &NodeConfig{Name: "test"}}
+	ApplyDefaults(&cfg)
+
+	if cfg.Node.HealthCheckIntervalSec != DefaultHealthCheckIntervalSec {
+		t.Fatalf("health_check_interval_sec=%d, want %d", cfg.Node.HealthCheckIntervalSec, DefaultHealthCheckIntervalSec)
+	}
+	if cfg.Node.HealthCheckFailures != DefaultHealthCheckFailures {
+		t.Fatalf("health_check_failures=%d, want %d", cfg.Node.HealthCheckFailures, DefaultHealthCheckFailures)
+	}
+	if cfg.Node.HealthCheckTimeoutSec != DefaultHealthCheckTimeoutSec {
+		t.Fatalf("health_check_timeout_sec=%d, want %d", cfg.Node.HealthCheckTimeoutSec, DefaultHealthCheckTimeoutSec)
+	}
+}
+
+func TestApplyDefaults_ControllerProbePort(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Controller: &ControllerConfig{Listen: ":8443"}}
+	ApplyDefaults(&cfg)
+
+	if cfg.Controller.ProbePort != DefaultProbePort {
+		t.Fatalf("probe_port=%d, want %d", cfg.Controller.ProbePort, DefaultProbePort)
+	}
+}
+
 func TestSave_Writes0600(t *testing.T) {
 	t.Parallel()
 
