@@ -14,8 +14,10 @@ var ErrTunnelDead = errors.New("tunnel health check failed")
 
 // checkTunnelHealth sends a single UDP echo to hubAddr and waits for
 // the response. Returns true if the echo was received within timeout.
+// The context is used to cancel the dial; the read/write deadline handles I/O.
 func checkTunnelHealth(ctx context.Context, hubAddr string, timeout time.Duration) bool {
-	conn, err := net.DialTimeout("udp", hubAddr, timeout)
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "udp", hubAddr)
 	if err != nil {
 		return false
 	}

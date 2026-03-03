@@ -83,6 +83,16 @@ func TestHubProbeAddress(t *testing.T) {
 			},
 			expect: "",
 		},
+		{
+			name: "custom server probe port",
+			cfg: config.NodeConfig{
+				HealthCheckIntervalSec: 3,
+				HealthCheckFailures:    3,
+				ServerAllowedIPs:       []string{"10.7.0.0/24"},
+				ServerProbePort:        9999,
+			},
+			expect: "10.7.0.1:9999",
+		},
 	}
 
 	for _, tc := range tests {

@@ -104,6 +104,7 @@ type NodeConfig struct {
 	HealthCheckIntervalSec int    `yaml:"health_check_interval_sec"`
 	HealthCheckFailures    int    `yaml:"health_check_failures"`
 	HealthCheckTimeoutSec  int    `yaml:"health_check_timeout_sec"`
+	ServerProbePort        int    `yaml:"server_probe_port"`
 }
 
 // Load reads and parses a YAML config file.

@@ -360,6 +360,7 @@ func (s *Server) handleWGConfig(w http.ResponseWriter, r *http.Request) {
 		ServerEndpoint:     s.cfg.ServerEndpoint,
 		ServerAllowedIPs:   s.cfg.ServerAllowedIPs,
 		ServerKeepaliveSec: s.cfg.ServerKeepaliveSec,
+		ServerProbePort:    s.cfg.ProbePort,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

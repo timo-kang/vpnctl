@@ -286,6 +286,7 @@ func fillServerConfig(ctx context.Context, client *api.Client, cfg *config.NodeC
 	cfg.ServerEndpoint = resp.ServerEndpoint
 	cfg.ServerAllowedIPs = resp.ServerAllowedIPs
 	cfg.ServerKeepaliveSec = resp.ServerKeepaliveSec
+	cfg.ServerProbePort = resp.ServerProbePort
 	if cfg.PolicyRoutingCIDR == "" {
 		cfg.PolicyRoutingCIDR = firstScopedCIDR(cfg.ServerAllowedIPs)
 	}
@@ -383,6 +384,10 @@ func hubProbeAddress(cfg config.NodeConfig) string {
 	if cfg.HealthCheckIntervalSec <= 0 || cfg.HealthCheckFailures <= 0 {
 		return ""
 	}
+	probePort := cfg.ServerProbePort
+	if probePort == 0 {
+		probePort = config.DefaultProbePort
+	}
 	for _, cidr := range cfg.ServerAllowedIPs {
 		if cidr == "" || cidr == "0.0.0.0/0" || cidr == "::/0" {
 			continue
@@ -391,15 +396,9 @@ func hubProbeAddress(cfg config.NodeConfig) string {
 		if err != nil || !prefix.Addr().Is4() {
 			continue
 		}
-		hubIP := addOne(prefix.Masked().Addr())
-		return fmt.Sprintf("%s:%d", hubIP.String(), config.DefaultProbePort)
+		hubIP := prefix.Masked().Addr().Next()
+		return fmt.Sprintf("%s:%d", hubIP.String(), probePort)
 	}
 	return ""
 }
 
-func addOne(addr netip.Addr) netip.Addr {
-	v := addr.As4()
-	val := uint32(v[0])<<24 | uint32(v[1])<<16 | uint32(v[2])<<8 | uint32(v[3])
-	val++
-	return netip.AddrFrom4([4]byte{byte(val >> 24), byte(val >> 16), byte(val >> 8), byte(val)})
-}
