@@ -49,16 +49,6 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 	directTicker := time.NewTicker(time.Duration(cfg.DirectIntervalSec) * time.Second)
 	defer directTicker.Stop()
 
-	// Health check ticker — detect dead tunnels.
-	var healthC <-chan time.Time
-	hubProbeAddr := hubProbeAddress(cfg)
-	if hubProbeAddr != "" && cfg.HealthCheckIntervalSec > 0 {
-		healthTicker := time.NewTicker(time.Duration(cfg.HealthCheckIntervalSec) * time.Second)
-		defer healthTicker.Stop()
-		healthC = healthTicker.C
-	}
-	healthFailures := 0
-
 	var candidates []api.PeerCandidate
 	var publicAddr string
 	var natType string
@@ -66,6 +56,23 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 	if err := fillServerConfig(ctx, client, &cfg); err != nil {
 		log.Printf("server config fetch failed: %v", err)
 	}
+
+	// Health check ticker — detect dead tunnels.
+	// Must be computed AFTER fillServerConfig which populates ServerAllowedIPs and ServerProbePort.
+	// When disabled, healthC stays nil so the select case blocks forever (no-op).
+	var healthC <-chan time.Time
+	hubProbeAddr := hubProbeAddress(cfg)
+	if hubProbeAddr != "" && cfg.HealthCheckIntervalSec > 0 {
+		healthTicker := time.NewTicker(time.Duration(cfg.HealthCheckIntervalSec) * time.Second)
+		defer healthTicker.Stop()
+		healthC = healthTicker.C
+		log.Printf("health check enabled interval=%ds failures=%d timeout=%ds hub=%s",
+			cfg.HealthCheckIntervalSec, cfg.HealthCheckFailures, cfg.HealthCheckTimeoutSec, hubProbeAddr)
+	} else if cfg.HealthCheckIntervalSec > 0 && cfg.HealthCheckFailures > 0 {
+		log.Printf("health check configured but probe address could not be determined (server_allowed_ips=%v server_probe_port=%d)",
+			cfg.ServerAllowedIPs, cfg.ServerProbePort)
+	}
+	healthFailures := 0
 
 	for {
 		select {
@@ -208,7 +215,16 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 			if timeout <= 0 {
 				timeout = 2 * time.Second
 			}
-			if checkTunnelHealth(ctx, hubProbeAddr, timeout) {
+			ok, hErr := checkTunnelHealth(ctx, hubProbeAddr, timeout)
+			if hErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				// Infrastructure error (local socket, etc.) — don't count as tunnel failure.
+				log.Printf("health check error (not counted) hub=%s: %v", hubProbeAddr, hErr)
+				break
+			}
+			if ok {
 				healthFailures = 0
 			} else {
 				healthFailures++

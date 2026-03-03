@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -11,7 +12,6 @@ import (
 
 func TestCheckTunnelHealth_Success(t *testing.T) {
 	t.Parallel()
-	// Start a real UDP responder, send health check to it, verify success
 	resp, err := direct.StartResponder(":0")
 	if err != nil {
 		t.Fatalf("StartResponder: %v", err)
@@ -21,21 +21,77 @@ func TestCheckTunnelHealth_Success(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	ok := checkTunnelHealth(ctx, resp.LocalAddr(), 2*time.Second)
+	ok, hErr := checkTunnelHealth(ctx, resp.LocalAddr(), 2*time.Second)
+	if hErr != nil {
+		t.Fatalf("unexpected error: %v", hErr)
+	}
 	if !ok {
 		t.Fatal("expected health check to succeed")
 	}
 }
 
-func TestCheckTunnelHealth_Timeout(t *testing.T) {
+func TestCheckTunnelHealth_NoResponder(t *testing.T) {
 	t.Parallel()
-	// Probe a port with no responder -- should timeout and return false
+	// Probe a port with no responder — returns (false, nil) whether via
+	// read timeout or ICMP connection refused (both are tunnel-level failures).
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	ok := checkTunnelHealth(ctx, "127.0.0.1:19999", 500*time.Millisecond)
+	ok, hErr := checkTunnelHealth(ctx, "127.0.0.1:19999", 500*time.Millisecond)
+	if hErr != nil {
+		t.Fatalf("no-responder should return (false, nil), got error: %v", hErr)
+	}
 	if ok {
 		t.Fatal("expected health check to fail")
+	}
+}
+
+func TestCheckTunnelHealth_ContextCancelled(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	start := time.Now()
+	ok, hErr := checkTunnelHealth(ctx, "127.0.0.1:19999", 10*time.Second)
+	elapsed := time.Since(start)
+
+	if ok {
+		t.Fatal("expected health check to fail with cancelled context")
+	}
+	if hErr == nil {
+		t.Fatal("expected an error for cancelled context, got nil")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("cancelled context should return quickly, took %s", elapsed)
+	}
+}
+
+func TestCheckTunnelHealth_MismatchedResponse(t *testing.T) {
+	t.Parallel()
+	// Start a UDP listener that always replies with wrong data.
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			_, addr, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			conn.WriteTo([]byte("wrong-response"), addr)
+		}
+	}()
+
+	ctx := context.Background()
+	ok, hErr := checkTunnelHealth(ctx, conn.LocalAddr().String(), 2*time.Second)
+	if hErr != nil {
+		t.Fatalf("unexpected error: %v", hErr)
+	}
+	if ok {
+		t.Fatal("expected health check to fail with mismatched echo")
 	}
 }
 

@@ -69,6 +69,33 @@ func TestApplyDefaults_ControllerProbePort(t *testing.T) {
 	}
 }
 
+func TestValidate_HealthCheckNegativeValues(t *testing.T) {
+	t.Parallel()
+
+	base := func() Config {
+		return Config{Node: &NodeConfig{Name: "n1", Controller: "127.0.0.1:8080"}}
+	}
+
+	tests := []struct {
+		name  string
+		tweak func(*Config)
+	}{
+		{"negative interval", func(c *Config) { c.Node.HealthCheckIntervalSec = -1 }},
+		{"negative failures", func(c *Config) { c.Node.HealthCheckFailures = -1 }},
+		{"negative timeout", func(c *Config) { c.Node.HealthCheckTimeoutSec = -1 }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			tc.tweak(&cfg)
+			if err := Validate(cfg); err == nil {
+				t.Fatalf("expected validation error for %s", tc.name)
+			}
+		})
+	}
+}
+
 func TestSave_Writes0600(t *testing.T) {
 	t.Parallel()
 

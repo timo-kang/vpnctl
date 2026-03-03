@@ -161,6 +161,15 @@ func Validate(cfg Config) error {
 		if cfg.Node.Controller == "" && (cfg.Node.ServerPublicKey == "" || cfg.Node.ServerEndpoint == "" || len(cfg.Node.ServerAllowedIPs) == 0) {
 			return fmt.Errorf("node.controller is required unless server fields are set")
 		}
+		if cfg.Node.HealthCheckIntervalSec < 0 {
+			return fmt.Errorf("node.health_check_interval_sec must be >= 0")
+		}
+		if cfg.Node.HealthCheckFailures < 0 {
+			return fmt.Errorf("node.health_check_failures must be >= 0")
+		}
+		if cfg.Node.HealthCheckTimeoutSec < 0 {
+			return fmt.Errorf("node.health_check_timeout_sec must be >= 0")
+		}
 	}
 	return nil
 }

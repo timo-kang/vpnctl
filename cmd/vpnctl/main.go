@@ -475,6 +475,10 @@ func syncConfigOnce(configPath string, cfg *config.Config) error {
 			cfg.Node.ServerKeepaliveSec = resp.ServerKeepaliveSec
 			updated = true
 		}
+		if cfg.Node.ServerProbePort == 0 && resp.ServerProbePort > 0 {
+			cfg.Node.ServerProbePort = resp.ServerProbePort
+			updated = true
+		}
 	}
 
 	if updated && configPath != "" {
@@ -572,6 +576,10 @@ func nodeSyncConfig(args []string) {
 		}
 		if cfg.Node.ServerKeepaliveSec == 0 && resp.ServerKeepaliveSec > 0 {
 			cfg.Node.ServerKeepaliveSec = resp.ServerKeepaliveSec
+			updated = true
+		}
+		if cfg.Node.ServerProbePort == 0 && resp.ServerProbePort > 0 {
+			cfg.Node.ServerProbePort = resp.ServerProbePort
 			updated = true
 		}
 	}
