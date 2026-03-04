@@ -1,3 +1,6 @@
+// Copyright 2025 Jonghyeok Kang
+// SPDX-License-Identifier: Apache-2.0
+
 package agent
 
 import (
