@@ -72,4 +72,5 @@ type WGConfigResponse struct {
 	ServerEndpoint     string   `json:"server_endpoint"`
 	ServerAllowedIPs   []string `json:"server_allowed_ips"`
 	ServerKeepaliveSec int      `json:"server_keepalive_sec"`
+	ServerProbePort    int      `json:"server_probe_port,omitempty"`
 }

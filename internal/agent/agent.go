@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -58,6 +59,23 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 	if err := fillServerConfig(ctx, client, &cfg); err != nil {
 		log.Printf("server config fetch failed: %v", err)
 	}
+
+	// Health check ticker — detect dead tunnels.
+	// Must be computed AFTER fillServerConfig which populates ServerAllowedIPs and ServerProbePort.
+	// When disabled, healthC stays nil so the select case blocks forever (no-op).
+	var healthC <-chan time.Time
+	hubProbeAddr := hubProbeAddress(cfg)
+	if hubProbeAddr != "" && cfg.HealthCheckIntervalSec > 0 {
+		healthTicker := time.NewTicker(time.Duration(cfg.HealthCheckIntervalSec) * time.Second)
+		defer healthTicker.Stop()
+		healthC = healthTicker.C
+		log.Printf("health check enabled interval=%ds failures=%d timeout=%ds hub=%s",
+			cfg.HealthCheckIntervalSec, cfg.HealthCheckFailures, cfg.HealthCheckTimeoutSec, hubProbeAddr)
+	} else if cfg.HealthCheckIntervalSec > 0 && cfg.HealthCheckFailures > 0 {
+		log.Printf("health check configured but probe address could not be determined (server_allowed_ips=%v server_probe_port=%d)",
+			cfg.ServerAllowedIPs, cfg.ServerProbePort)
+	}
+	healthFailures := 0
 
 	for {
 		select {
@@ -195,6 +213,29 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 					}
 				}
 			}
+		case <-healthC:
+			timeout := time.Duration(cfg.HealthCheckTimeoutSec) * time.Second
+			if timeout <= 0 {
+				timeout = 2 * time.Second
+			}
+			ok, hErr := checkTunnelHealth(ctx, hubProbeAddr, timeout)
+			if hErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				// Infrastructure error (local socket, etc.) — don't count as tunnel failure.
+				log.Printf("health check error (not counted) hub=%s: %v", hubProbeAddr, hErr)
+				break
+			}
+			if ok {
+				healthFailures = 0
+			} else {
+				healthFailures++
+				log.Printf("health check failed (%d/%d) hub=%s", healthFailures, cfg.HealthCheckFailures, hubProbeAddr)
+				if healthFailures >= cfg.HealthCheckFailures {
+					return ErrTunnelDead
+				}
+			}
 		}
 	}
 }
@@ -264,6 +305,7 @@ func fillServerConfig(ctx context.Context, client *api.Client, cfg *config.NodeC
 	cfg.ServerEndpoint = resp.ServerEndpoint
 	cfg.ServerAllowedIPs = resp.ServerAllowedIPs
 	cfg.ServerKeepaliveSec = resp.ServerKeepaliveSec
+	cfg.ServerProbePort = resp.ServerProbePort
 	if cfg.PolicyRoutingCIDR == "" {
 		cfg.PolicyRoutingCIDR = firstScopedCIDR(cfg.ServerAllowedIPs)
 	}
@@ -354,3 +396,28 @@ func firstScopedCIDR(values []string) string {
 	}
 	return ""
 }
+
+// hubProbeAddress returns the hub VPN IP + probe port for health checks.
+// The hub VPN IP is the first usable address in ServerAllowedIPs (e.g. 10.7.0.0/24 -> 10.7.0.1).
+func hubProbeAddress(cfg config.NodeConfig) string {
+	if cfg.HealthCheckIntervalSec <= 0 || cfg.HealthCheckFailures <= 0 {
+		return ""
+	}
+	probePort := cfg.ServerProbePort
+	if probePort == 0 {
+		probePort = config.DefaultProbePort
+	}
+	for _, cidr := range cfg.ServerAllowedIPs {
+		if cidr == "" || cidr == "0.0.0.0/0" || cidr == "::/0" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil || !prefix.Addr().Is4() {
+			continue
+		}
+		hubIP := prefix.Masked().Addr().Next()
+		return fmt.Sprintf("%s:%d", hubIP.String(), probePort)
+	}
+	return ""
+}
+
