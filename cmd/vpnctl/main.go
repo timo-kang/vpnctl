@@ -397,6 +397,13 @@ func nodeServe(args []string) {
 				return
 			}
 			fmt.Fprintf(os.Stderr, "agent exited: %v\n", err)
+			if errors.Is(err, agent.ErrTunnelDead) {
+				fmt.Fprintf(os.Stderr, "tunnel dead, recovering...\n")
+				delay = *retryDelay
+				if delay <= 0 {
+					delay = 2 * time.Second
+				}
+			}
 			goto retry
 		}
 		return
@@ -469,6 +476,10 @@ func syncConfigOnce(configPath string, cfg *config.Config) error {
 		}
 		if cfg.Node.ServerKeepaliveSec == 0 && resp.ServerKeepaliveSec > 0 {
 			cfg.Node.ServerKeepaliveSec = resp.ServerKeepaliveSec
+			updated = true
+		}
+		if cfg.Node.ServerProbePort == 0 && resp.ServerProbePort > 0 {
+			cfg.Node.ServerProbePort = resp.ServerProbePort
 			updated = true
 		}
 	}
@@ -568,6 +579,10 @@ func nodeSyncConfig(args []string) {
 		}
 		if cfg.Node.ServerKeepaliveSec == 0 && resp.ServerKeepaliveSec > 0 {
 			cfg.Node.ServerKeepaliveSec = resp.ServerKeepaliveSec
+			updated = true
+		}
+		if cfg.Node.ServerProbePort == 0 && resp.ServerProbePort > 0 {
+			cfg.Node.ServerProbePort = resp.ServerProbePort
 			updated = true
 		}
 	}

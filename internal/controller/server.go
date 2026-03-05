@@ -17,6 +17,7 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
+	"vpnctl/internal/direct"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/store"
 	"vpnctl/internal/wireguard"
@@ -34,7 +35,8 @@ type Server struct {
 	wg        *wireguard.Manager
 	// directOK tracks recent direct probe successes reported by nodes.
 	// Used to gate P2P WireGuard /32 injection so relay doesn't get blackholed.
-	directOK map[string]map[string]time.Time // node_id -> peer_id -> last success
+	directOK       map[string]map[string]time.Time // node_id -> peer_id -> last success
+	probeResponder *direct.Responder
 }
 
 // NewServer constructs a controller server.
@@ -73,6 +75,14 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 
 // ListenAndServe runs the HTTP server.
 func (s *Server) ListenAndServe() error {
+	if s.cfg.ProbePort > 0 {
+		addr, err := s.StartProbeResponder()
+		if err != nil {
+			return fmt.Errorf("probe responder: %w", err)
+		}
+		log.Printf("probe responder listening on %s", addr)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", s.handleRegister)
 	mux.HandleFunc("/candidates", s.handleCandidates)
@@ -89,6 +99,25 @@ func (s *Server) ListenAndServe() error {
 
 	log.Printf("controller listening on %s", s.cfg.Listen)
 	return server.ListenAndServe()
+}
+
+// StartProbeResponder starts a UDP probe responder for health checks.
+func (s *Server) StartProbeResponder() (string, error) {
+	addr := fmt.Sprintf(":%d", s.cfg.ProbePort)
+	resp, err := direct.StartResponder(addr)
+	if err != nil {
+		return "", err
+	}
+	s.probeResponder = resp
+	return resp.LocalAddr(), nil
+}
+
+// StopProbeResponder stops the probe responder if running.
+func (s *Server) StopProbeResponder() {
+	if s.probeResponder != nil {
+		_ = s.probeResponder.Close()
+		s.probeResponder = nil
+	}
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -334,6 +363,7 @@ func (s *Server) handleWGConfig(w http.ResponseWriter, r *http.Request) {
 		ServerEndpoint:     s.cfg.ServerEndpoint,
 		ServerAllowedIPs:   s.cfg.ServerAllowedIPs,
 		ServerKeepaliveSec: s.cfg.ServerKeepaliveSec,
+		ServerProbePort:    s.cfg.ProbePort,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
