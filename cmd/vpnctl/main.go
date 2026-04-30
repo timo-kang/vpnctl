@@ -26,9 +26,13 @@ import (
 	"vpnctl/internal/direct"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
+	"vpnctl/internal/monitor"
+	"vpnctl/internal/peersource"
 	"vpnctl/internal/store"
 	"vpnctl/internal/stunutil"
 	"vpnctl/internal/wireguard"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 const usage = `vpnctl - minimal VPN control-plane + metrics (MVP)
@@ -51,6 +55,7 @@ Usage:
  vpnctl down --config <path> [--wg-config <path>]
  vpnctl status --config <path> [--iface <name>]
  vpnctl doctor --config <path> [--iface <name>]
+  vpnctl monitor --interface <iface> [--watch] [--interval 5s] [--peers ip1,ip2]
 
 Planned:
  vpnctl node add
@@ -90,6 +95,8 @@ func main() {
 		handleStatus(os.Args[2:])
 	case "doctor":
 		handleDoctor(os.Args[2:])
+	case "monitor":
+		handleMonitor(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usage)
@@ -1413,4 +1420,78 @@ func fatal(err error) {
 	}
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
+}
+
+func handleMonitor(args []string) {
+	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
+	iface := fs.String("interface", "", "WireGuard interface to monitor")
+	peersFlag := fs.String("peers", "", "comma-separated VPN IPs to filter")
+	interval := fs.Duration("interval", 5*time.Second, "probe interval")
+	watch := fs.Bool("watch", false, "plain text output instead of TUI")
+	dataPath := fs.String("data", "", "SQLite store path (default: ~/.vpnctl/monitor.db)")
+	retention := fs.Duration("retention", 7*24*time.Hour, "data retention period")
+	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
+	_ = fs.Parse(args)
+
+	if *iface == "" {
+		fmt.Fprintln(os.Stderr, "error: --interface is required")
+		os.Exit(2)
+	}
+
+	if *dataPath == "" {
+		home, _ := os.UserHomeDir()
+		*dataPath = filepath.Join(home, ".vpnctl", "monitor.db")
+	}
+	if err := os.MkdirAll(filepath.Dir(*dataPath), 0o755); err != nil {
+		fatal(err)
+	}
+
+	src := peersource.NewWgSource(*iface, *probePort)
+
+	store, err := monitor.OpenStore(*dataPath)
+	if err != nil {
+		fatal(err)
+	}
+	defer store.Close()
+
+	if removed, err := store.Cleanup(*retention); err == nil && removed > 0 {
+		fmt.Fprintf(os.Stderr, "cleaned up %d old probe records\n", removed)
+	}
+
+	var peerFilter []string
+	if *peersFlag != "" {
+		peerFilter = strings.Split(*peersFlag, ",")
+	}
+
+	mon := monitor.New(monitor.Config{
+		Source:   src,
+		Store:    store,
+		Interval: *interval,
+		Peers:    peerFilter,
+	})
+
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	if *watch {
+		ww := monitor.NewWatchWriter(os.Stdout)
+		sub := mon.Subscribe()
+		go mon.Run(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case snap := <-sub:
+				ww.Write(snap)
+			}
+		}
+	} else {
+		sub := mon.Subscribe()
+		go mon.Run(ctx)
+		tuiModel := monitor.NewTUIModel(*iface, sub)
+		p := tea.NewProgram(tuiModel)
+		if _, err := p.Run(); err != nil {
+			fatal(err)
+		}
+	}
 }
