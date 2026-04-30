@@ -56,6 +56,8 @@ Usage:
  vpnctl status --config <path> [--iface <name>]
  vpnctl doctor --config <path> [--iface <name>]
   vpnctl monitor --interface <iface> [--watch] [--interval 5s] [--peers ip1,ip2]
+  vpnctl fleet status --config <path> | --interface <iface>
+  vpnctl fleet history --config <path> | --interface <iface> [--window 1h]
 
 Planned:
  vpnctl node add
@@ -97,6 +99,8 @@ func main() {
 		handleDoctor(os.Args[2:])
 	case "monitor":
 		handleMonitor(os.Args[2:])
+	case "fleet":
+		handleFleet(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usage)
@@ -1420,6 +1424,172 @@ func fatal(err error) {
 	}
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
+}
+
+func handleFleet(args []string) {
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, "fleet subcommand required (status|history)\n")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "status":
+		fleetStatus(args[1:])
+	case "history":
+		fleetHistory(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown fleet subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func fleetStatus(args []string) {
+	fs := flag.NewFlagSet("fleet status", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config (controller API)")
+	iface := fs.String("interface", "", "WireGuard interface (local monitor store)")
+	dataPath := fs.String("data", "", "SQLite store path (default: ~/.vpnctl/monitor.db)")
+	_ = fs.Parse(args)
+
+	if *configPath != "" && *iface != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+	if *configPath == "" && *iface == "" {
+		fmt.Fprintln(os.Stderr, "error: --config or --interface is required")
+		os.Exit(2)
+	}
+
+	if *configPath != "" {
+		cfg, err := loadConfig(*configPath)
+		if err != nil {
+			fatal(err)
+		}
+		if cfg.Node == nil {
+			fatal(errors.New("node config required"))
+		}
+		config.ApplyDefaults(&cfg)
+
+		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		ctx := context.Background()
+		resp, err := client.FleetStatus(ctx)
+		if err != nil {
+			fatal(err)
+		}
+
+		fmt.Printf("%-16s  %-18s  %-10s  %-8s  %-8s  %-10s  %-20s\n",
+			"NAME", "VPN_IP", "PATH", "RTT_MS", "LOSS%", "NAT", "LAST_SEEN")
+		for _, n := range resp.Nodes {
+			fmt.Printf("%-16s  %-18s  %-10s  %-8.2f  %-8.2f  %-10s  %-20s\n",
+				n.Name, n.VPNIP, n.Path, n.RTTMs, n.LossPct, n.NATType, n.LastSeen)
+		}
+		return
+	}
+
+	// --interface: read from local monitor store
+	if *dataPath == "" {
+		home, _ := os.UserHomeDir()
+		*dataPath = filepath.Join(home, ".vpnctl", "monitor.db")
+	}
+
+	st, err := monitor.OpenStore(*dataPath)
+	if err != nil {
+		fatal(err)
+	}
+	defer st.Close()
+
+	summaries, err := st.Summarize(time.Hour)
+	if err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("%-16s  %-18s  %-8s  %-8s  %-20s\n",
+		"PEER_KEY", "PEER_IP", "RTT_MS", "LOSS%", "LAST_SEEN")
+	for _, s := range summaries {
+		rttMs := float64(s.AvgRTTus) / 1000.0
+		fmt.Printf("%-16s  %-18s  %-8.2f  %-8.2f  %-20s\n",
+			s.PeerKey, s.PeerIP, rttMs, s.LossPct, s.LastSeen.Format(time.RFC3339))
+	}
+}
+
+func fleetHistory(args []string) {
+	fs := flag.NewFlagSet("fleet history", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config (controller API)")
+	iface := fs.String("interface", "", "WireGuard interface (local monitor store)")
+	dataPath := fs.String("data", "", "SQLite store path (default: ~/.vpnctl/monitor.db)")
+	window := fs.String("window", "1h", "time window (e.g. 1h, 30m)")
+	_ = fs.Parse(args)
+
+	if *configPath != "" && *iface != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+	if *configPath == "" && *iface == "" {
+		fmt.Fprintln(os.Stderr, "error: --config or --interface is required")
+		os.Exit(2)
+	}
+
+	if *configPath != "" {
+		cfg, err := loadConfig(*configPath)
+		if err != nil {
+			fatal(err)
+		}
+		if cfg.Node == nil {
+			fatal(errors.New("node config required"))
+		}
+		config.ApplyDefaults(&cfg)
+
+		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		ctx := context.Background()
+		resp, err := client.FleetHistory(ctx, *window)
+		if err != nil {
+			fatal(err)
+		}
+
+		for _, n := range resp.Nodes {
+			fmt.Printf("Node: %s\n", n.Name)
+			fmt.Printf("  %-20s  %-8s  %-8s\n", "TIME", "ONLINE%", "AVG_RTT_MS")
+			for _, b := range n.Buckets {
+				fmt.Printf("  %-20s  %-8.1f  %-8.2f\n", b.Time, b.OnlinePct, b.AvgRTTMs)
+			}
+		}
+		return
+	}
+
+	// --interface: read from local monitor store
+	if *dataPath == "" {
+		home, _ := os.UserHomeDir()
+		*dataPath = filepath.Join(home, ".vpnctl", "monitor.db")
+	}
+
+	dur, err := time.ParseDuration(*window)
+	if err != nil {
+		fatal(fmt.Errorf("invalid --window %q: %w", *window, err))
+	}
+
+	st, err := monitor.OpenStore(*dataPath)
+	if err != nil {
+		fatal(err)
+	}
+	defer st.Close()
+
+	summaries, err := st.Summarize(dur)
+	if err != nil {
+		fatal(err)
+	}
+
+	for _, s := range summaries {
+		onlinePct := 100.0 - s.LossPct
+		barLen := int(onlinePct / 5.0)
+		if barLen > 20 {
+			barLen = 20
+		}
+		if barLen < 0 {
+			barLen = 0
+		}
+		bar := strings.Repeat("█", barLen) + strings.Repeat("░", 20-barLen)
+		rttMs := float64(s.AvgRTTus) / 1000.0
+		fmt.Printf("%-16s  [%s] %.1f%% online  %.2f ms avg RTT\n",
+			s.PeerIP, bar, onlinePct, rttMs)
+	}
 }
 
 func handleMonitor(args []string) {

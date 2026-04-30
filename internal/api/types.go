@@ -74,3 +74,37 @@ type WGConfigResponse struct {
 	ServerKeepaliveSec int      `json:"server_keepalive_sec"`
 	ServerProbePort    int      `json:"server_probe_port,omitempty"`
 }
+
+// FleetNodeStatus describes the current status of a single fleet node.
+type FleetNodeStatus struct {
+	Name     string  `json:"name"`
+	VPNIP    string  `json:"vpn_ip"`
+	Path     string  `json:"path"`
+	RTTMs    float64 `json:"rtt_ms"`
+	LossPct  float64 `json:"loss_pct"`
+	NATType  string  `json:"nat_type"`
+	LastSeen string  `json:"last_seen"`
+}
+
+// FleetStatusResponse is returned by GET /fleet/status.
+type FleetStatusResponse struct {
+	Nodes []FleetNodeStatus `json:"nodes"`
+}
+
+// FleetHistoryBucket holds aggregated stats for a single time bucket.
+type FleetHistoryBucket struct {
+	Time      string  `json:"time"`
+	OnlinePct float64 `json:"online_pct"`
+	AvgRTTMs  float64 `json:"avg_rtt_ms"`
+}
+
+// FleetNodeHistory holds time-bucketed history for a single fleet node.
+type FleetNodeHistory struct {
+	Name    string               `json:"name"`
+	Buckets []FleetHistoryBucket `json:"buckets"`
+}
+
+// FleetHistoryResponse is returned by GET /fleet/history.
+type FleetHistoryResponse struct {
+	Nodes []FleetNodeHistory `json:"nodes"`
+}
