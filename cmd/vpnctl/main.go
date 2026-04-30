@@ -612,10 +612,27 @@ func handleDoctor(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to YAML config")
 	iface := fs.String("iface", "", "wireguard interface name")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
 	_ = fs.Parse(args)
 
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+
+	// --interface mode: skip config-dependent checks, show interface status only.
+	if *ifaceFlag != "" {
+		fmt.Fprintf(os.Stdout, "iface=%s\n", *ifaceFlag)
+		if out, err := wireguard.Status(*ifaceFlag); err == nil {
+			fmt.Fprintln(os.Stdout, out)
+		} else {
+			fmt.Fprintf(os.Stdout, "wg status error: %v\n", err)
+		}
+		return
+	}
+
 	if *configPath == "" {
-		fatal(errors.New("--config is required"))
+		fatal(errors.New("--config or --interface is required"))
 	}
 
 	cfg, err := loadConfig(*configPath)
@@ -779,7 +796,38 @@ func directTest(args []string) {
 func handleDiscover(args []string) {
 	fs := flag.NewFlagSet("discover", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to YAML config")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
+	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
 	_ = fs.Parse(args)
+
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+
+	// --interface mode: discover peers directly from the live WireGuard interface.
+	if *ifaceFlag != "" {
+		src := peersource.NewWgSource(*ifaceFlag, *probePort)
+		peers, err := src.Discover()
+		if err != nil {
+			fatal(err)
+		}
+		if len(peers) == 0 {
+			fmt.Fprintln(os.Stdout, "no peers")
+			return
+		}
+		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6s  %-22s\n",
+			"NAME", "VPN_IP", "WG_ENDPOINT", "PORT", "LAST_HANDSHAKE")
+		for _, p := range peers {
+			lastHS := ""
+			if !p.LastHandshake.IsZero() {
+				lastHS = p.LastHandshake.UTC().Format(time.RFC3339)
+			}
+			fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6d  %-22s\n",
+				p.Name, p.VPNIP, p.Endpoint, p.ProbePort, lastHS)
+		}
+		return
+	}
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
@@ -827,10 +875,58 @@ func handlePing(args []string) {
 	timeout := fs.Duration("timeout", 2*time.Second, "probe timeout")
 	submit := fs.Bool("submit", true, "submit metrics to controller")
 	path := fs.String("path", "auto", "path selection: auto|direct|relay")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
+	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
 	_ = fs.Parse(args)
+
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
 
 	if !*all && *peer == "" {
 		fatal(errors.New("--peer or --all is required"))
+	}
+
+	// --interface mode: discover peers from the live WireGuard interface.
+	if *ifaceFlag != "" {
+		src := peersource.NewWgSource(*ifaceFlag, *probePort)
+		wgPeers, err := src.Discover()
+		if err != nil {
+			fatal(err)
+		}
+		ctx := context.Background()
+		var matched []peersource.Peer
+		if *all {
+			matched = wgPeers
+		} else {
+			for _, p := range wgPeers {
+				if p.Name == *peer || p.VPNIP == *peer {
+					matched = append(matched, p)
+					break
+				}
+			}
+		}
+		if len(matched) == 0 {
+			fatal(errors.New("no peers matched"))
+		}
+		for _, p := range matched {
+			peerAddr := fmt.Sprintf("%s:%d", p.VPNIP, p.ProbePort)
+			results := make([]float64, 0, *count)
+			for i := 0; i < *count; i++ {
+				rtt, err := direct.ProbePeer(ctx, ":0", peerAddr, *timeout)
+				if err == nil {
+					results = append(results, float64(rtt.Microseconds())/1000.0)
+					fmt.Fprintf(os.Stdout, "ping %s seq=%d rtt=%.2fms\n", p.Name, i+1, results[len(results)-1])
+				} else {
+					fmt.Fprintf(os.Stdout, "ping %s seq=%d timeout\n", p.Name, i+1)
+				}
+				time.Sleep(*interval)
+			}
+			metric := summarizePing(*ifaceFlag, p.PublicKey, "relay", results, *count, 0)
+			fmt.Fprintf(os.Stdout, "ping summary peer=%s avg=%.2fms loss=%.2f%%\n", p.Name, metric.RTTMs, metric.LossPct)
+		}
+		return
 	}
 
 	cfg, err := loadConfig(*configPath)
@@ -895,10 +991,44 @@ func handlePerf(args []string) {
 	timeout := fs.Duration("timeout", 5*time.Second, "probe timeout")
 	submit := fs.Bool("submit", true, "submit metrics to controller")
 	path := fs.String("path", "auto", "path selection: auto|direct|relay")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
+	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
 	_ = fs.Parse(args)
+
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
 
 	if *peer == "" {
 		fatal(errors.New("--peer is required"))
+	}
+
+	// --interface mode: discover peers from the live WireGuard interface.
+	if *ifaceFlag != "" {
+		src := peersource.NewWgSource(*ifaceFlag, *probePort)
+		wgPeers, err := src.Discover()
+		if err != nil {
+			fatal(err)
+		}
+		var matched *peersource.Peer
+		for i := range wgPeers {
+			if wgPeers[i].Name == *peer || wgPeers[i].VPNIP == *peer {
+				matched = &wgPeers[i]
+				break
+			}
+		}
+		if matched == nil {
+			fatal(fmt.Errorf("peer %q not found or missing address", *peer))
+		}
+		peerAddr := fmt.Sprintf("%s:%d", matched.VPNIP, matched.ProbePort)
+		ctx := context.Background()
+		throughput, lossPct, err := direct.PerfProbe(ctx, ":0", peerAddr, *packetSize, *count, *timeout)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Fprintf(os.Stdout, "perf peer=%s throughput=%.2f Mbps loss=%.2f%%\n", *peer, throughput, lossPct)
+		return
 	}
 
 	cfg, err := loadConfig(*configPath)
@@ -955,7 +1085,44 @@ func handleStats(args []string) {
 	configPath := fs.String("config", "", "path to YAML config")
 	window := fs.Duration("window", 5*time.Minute, "time window")
 	path := fs.String("path", "", "metrics CSV path override")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
+	_ = fs.String("probe-port", "", "") // accepted but unused for stats
 	_ = fs.Parse(args)
+
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+
+	// --interface mode: read from local monitor store (~/.vpnctl/monitor.db).
+	if *ifaceFlag != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fatal(err)
+		}
+		dbPath := filepath.Join(home, ".vpnctl", "monitor.db")
+		st, err := monitor.OpenStore(dbPath)
+		if err != nil {
+			fatal(fmt.Errorf("open monitor store %s: %w", dbPath, err))
+		}
+		defer st.Close()
+		summaries, err := st.Summarize(*window)
+		if err != nil {
+			fatal(err)
+		}
+		if len(summaries) == 0 {
+			fmt.Fprintln(os.Stdout, "no samples in window")
+			return
+		}
+		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-8s  %-10s  %-10s  %-10s  %-8s  %-22s\n",
+			"PEER_KEY", "PEER_IP", "COUNT", "AVG_RTT_us", "MIN_RTT_us", "MAX_RTT_us", "LOSS%", "LAST_SEEN")
+		for _, s := range summaries {
+			fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-8d  %-10d  %-10d  %-10d  %-8.2f  %-22s\n",
+				s.PeerKey, s.PeerIP, s.Count, s.AvgRTTus, s.MinRTTus, s.MaxRTTus, s.LossPct,
+				s.LastSeen.Format(time.RFC3339))
+		}
+		return
+	}
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
