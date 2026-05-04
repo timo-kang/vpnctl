@@ -63,7 +63,7 @@ func TestMonitor_RunCollectsProbes(t *testing.T) {
 		t.Fatalf("expected at least 2 probe results, got %d", len(results))
 	}
 
-	peerKey := "AAAAAAAAAA"
+	peerKey := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	for _, r := range results {
 		if r.PeerKey != peerKey {
 			t.Errorf("PeerKey: want %q, got %q", peerKey, r.PeerKey)
