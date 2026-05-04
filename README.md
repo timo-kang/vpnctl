@@ -1,91 +1,172 @@
 # vpnctl
 
-Minimal VPN control-plane + metrics agent for cellular test fleets.
+Network intelligence for WireGuard. Monitor, diagnose, and analyze any WireGuard network.
 
-## Goals (MVP)
-- Encrypted data plane using WireGuard.
-- Hub-and-spoke topology (server relay) with optional direct path when possible.
-- Discovery + metrics (latency, jitter, loss, throughput) with CSV export.
-- Linux-only nodes.
+Works standalone or alongside Tailscale, Nebula, or plain WireGuard.
 
-## Topology
-- Default: all traffic goes through the server (public IP).
-- Optional: direct node-to-node path if NAT allows it, otherwise relay fallback.
+## What it does
 
-## MTU
-- Start at MTU=1280 for cellular reliability.
-- Raise later (1380/1420) after path-MTU testing.
+- **Monitor mode** — real-time TUI dashboard or text output showing peer RTT, loss, and handshake status for any WireGuard interface
+- **Fleet status** — fleet-wide view from the controller, or local view from monitor data
+- **Diagnostics** — `ping`, `perf`, `doctor`, `discover` work with any WireGuard interface via `--interface`
+- **VPN management** — built-in WireGuard mesh with hub-and-spoke relay, optional P2P direct paths, NAT traversal, and tunnel health watchdog
 
-## Config
-Configuration is YAML. See `configs/example.yaml`.
+## Quick start
 
-Node requirements for `vpnctl up/down`:
-- `wg_private_key`, `vpn_ip` (or `controller.vpn_cidr` allocation)
-- Either `controller` (to fetch server fields) or manual `server_*` fields
-- `wg_config_path` (or use `--wg-config`)
+### Monitor any WireGuard interface
 
-Routing defaults:
-- Policy routing is enabled by default; set `policy_routing_enabled: false` to disable.
-- `policy_routing_cidr` scopes the rule (default: first non-0/0 in `server_allowed_ips`).
-- `server_allowed_ips` should usually be the VPN subnet (e.g. `10.7.0.0/24`) to avoid full-tunnel routing.
+```bash
+# Real-time TUI dashboard
+vpnctl monitor --interface wg0
 
-Direct/relay probing:
-- `probe_port` (default `51900`) is used for relay path probes over the VPN.
-- `direct_keepalive_*` controls per-peer keepalive tuning for NAT stability.
+# Plain text output (for scripts/logging)
+vpnctl monitor --interface wg0 --watch
 
-Controller features:
-- If `vpn_ip` is omitted, the controller can allocate it from `controller.vpn_cidr`.
-- `controller.wg_apply: true` + `wg_private_key` + `wg_address` lets the controller auto-apply its `wg0` peers (requires root and `wg/ip`).
-- When using `node join`, `node run`, or `up` with a config path, the assigned `vpn_ip` is written back into the YAML.
+# Filter specific peers
+vpnctl monitor --interface wg0 --peers 10.7.0.2,10.7.0.3
 
-## High-level architecture
-- Controller (server): node registry, peer distribution, metrics ingest.
-- Agent (node): registers, configures WireGuard, runs tests, reports metrics.
-- CLI: operator entrypoint for both controller and node actions.
+# Diagnostics without a vpnctl config
+vpnctl ping --interface wg0 --peer 10.7.0.2
+vpnctl doctor --interface wg0
+vpnctl discover --interface wg0
+```
 
-## Example usage
+### Fleet overview
+
+```bash
+# From controller (full fleet view)
+vpnctl fleet status --config controller.yaml
+vpnctl fleet history --config controller.yaml --window 24h
+
+# From local monitor data (no controller needed)
+vpnctl fleet status --interface wg0
+vpnctl fleet history --interface wg0 --window 1h
+```
+
+### Full VPN management
+
 ```bash
 # On server
-vpnctl controller init --config configs/example.yaml
-vpnctl controller status --config configs/example.yaml
+vpnctl controller init --config configs/controller.yaml
 
 # On node
-vpnctl node join --config configs/example.yaml
-vpnctl node serve --config configs/example.yaml
-vpnctl node run --config configs/example.yaml
-vpnctl node sync-config --config configs/example.yaml
+vpnctl node join --config configs/node.yaml
+vpnctl node serve --config configs/node.yaml
 
-# Discovery + metrics
-vpnctl discover
-vpnctl ping --all
-vpnctl ping --all --path relay
-vpnctl perf --peer modem-b --count 200 --size 1200 --path direct
-vpnctl export csv --out metrics.csv
-vpnctl up --config configs/example.yaml
-vpnctl down --config configs/example.yaml
-vpnctl status --config configs/example.yaml
-vpnctl doctor --config configs/example.yaml
+# Interface management
+vpnctl up --config configs/node.yaml
+vpnctl down --config configs/node.yaml
+vpnctl status --config configs/node.yaml
+vpnctl doctor --config configs/node.yaml
 ```
 
-## Direct probe (best-effort)
-```bash
-# On each node
-vpnctl direct serve --config configs/example.yaml
+## Architecture
 
-# From another node
-vpnctl direct test --config configs/example.yaml --peer modem-b
+```
+                    ┌─────────────────────────┐
+                    │  Controller / Relay Hub  │
+                    │  - Node registry        │
+                    │  - Peer distribution    │
+                    │  - P2P readiness gate   │
+                    │  - Fleet API            │
+                    │  - WireGuard relay      │
+                    └────────┬────────────────┘
+                             │ WireGuard tunnels
+                ┌────────────┼────────────────┐
+                │            │                │
+         ┌──────▼─────┐ ┌───▼────────┐ ┌─────▼──────┐
+         │  Node A     │ │  Node B     │ │  Node C     │
+         │  (agent)    │ │  (agent)    │ │  (agent)    │
+         └──────┬──────┘ └───┬────────┘ └─────┬──────┘
+                │            │                │
+                └── direct P2P (if verified) ─┘
 ```
 
-## Direct path (best-effort)
-- For VPN traffic, direct node-to-node requires injecting a WireGuard peer entry for the other node.
-- The controller can publish each node's WireGuard endpoint as observed on the controller's `wg0` (via `wg show wg0 dump`).
-- Nodes can then inject `/32` peers pointing at those observed endpoints.
-- STUN is still used for the probe socket and NAT classification; it must not be used as a WireGuard endpoint (different socket, different NAT mapping).
+- **Controller**: node registry, peer distribution, P2P readiness gating, fleet API, WireGuard relay hub
+- **Agent**: registers with controller, configures WireGuard, probes peers, reports metrics, health watchdog
+- **Monitor**: observes any WireGuard interface (with or without vpnctl controller)
 
-## Routing behavior
-- Hub peer keeps `AllowedIPs` for the full VPN subnet (e.g. `/24`).
-- Direct peers are injected with `/32` routes on success.
-- Most-specific route wins, so direct paths override hub for that peer.
+## Commands
 
-## Data plane note
-WireGuard is used for the tunnel; vpnctl is a control-plane + testing harness.
+### Monitor & Fleet (works with any WireGuard)
+
+| Command | Description |
+|---|---|
+| `vpnctl monitor --interface <iface>` | Real-time TUI dashboard |
+| `vpnctl monitor --interface <iface> --watch` | Plain text periodic output |
+| `vpnctl fleet status` | Fleet-wide or local peer status |
+| `vpnctl fleet history` | Connectivity history over time |
+
+### Diagnostics (--config or --interface)
+
+| Command | Description |
+|---|---|
+| `vpnctl ping` | RTT, jitter, loss measurement |
+| `vpnctl perf` | Throughput + loss measurement |
+| `vpnctl discover` | List all known peers |
+| `vpnctl doctor` | Interface and routing diagnostics |
+| `vpnctl stats` | Aggregated metrics summary |
+| `vpnctl status` | WireGuard interface status |
+
+### VPN Management (--config)
+
+| Command | Description |
+|---|---|
+| `vpnctl controller init` | Start controller server |
+| `vpnctl controller status` | Show registered nodes |
+| `vpnctl node join` | Register node with controller |
+| `vpnctl node serve` | Long-running agent with auto-recovery |
+| `vpnctl node run` | Single agent cycle |
+| `vpnctl up` / `vpnctl down` | Configure/remove WireGuard interface |
+| `vpnctl direct serve` / `vpnctl direct test` | Direct path probing |
+| `vpnctl export csv` | Export metrics to file |
+
+## Configuration
+
+YAML config file. See `configs/example.yaml`.
+
+### Key settings
+
+| Setting | Default | Description |
+|---|---|---|
+| `mtu` | 1280 | Payload MTU (cellular-safe default) |
+| `probe_port` | 51900 | UDP echo responder port |
+| `direct_mode` | auto | `auto` or `off` |
+| `policy_routing_enabled` | true | Per-peer /32 route injection |
+| `health_check_interval_sec` | 3 | Tunnel health probe interval |
+| `health_check_failures` | 3 | Consecutive failures before tunnel death |
+| `p2p_ready_mode` | mutual | `mutual` (both directions) or `either` |
+
+### Monitor data
+
+Monitor stores probe history in SQLite at `~/.vpnctl/monitor.db` (configurable via `--data`). Default retention is 7 days.
+
+## How it works
+
+### Monitor mode
+
+1. Reads peers from `wg show <iface> dump`
+2. Sends `vpnctl-echo` UDP probes to each peer's probe port
+3. Records RTT and success/failure in local SQLite
+4. Displays results in TUI or text output
+
+Requires vpnctl echo responder on target peers (`vpnctl monitor`, `vpnctl node serve`, or `vpnctl direct serve`).
+
+### VPN mesh
+
+1. Nodes register with controller, receive VPN IP and peer list
+2. STUN probing classifies NAT type per node
+3. Nodes probe peers for direct reachability, report to controller
+4. Controller verifies bidirectional reachability before allowing P2P injection
+5. Policy routing maintains relay as baseline; /32 direct routes override when verified
+6. Tunnel health watchdog detects dead tunnels and triggers auto-recovery
+
+## Requirements
+
+- Linux (WireGuard kernel module or wireguard-go)
+- `wg` and `ip` commands available
+- Go 1.22+ to build
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).

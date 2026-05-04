@@ -90,6 +90,8 @@ func (s *Server) ListenAndServe() error {
 	mux.HandleFunc("/nat-probe", s.handleNATProbe)
 	mux.HandleFunc("/direct-result", s.handleDirectResult)
 	mux.HandleFunc("/wg-config", s.handleWGConfig)
+	mux.HandleFunc("/fleet/status", s.handleFleetStatus)
+	mux.HandleFunc("/fleet/history", s.handleFleetHistory)
 
 	server := &http.Server{
 		Addr:              s.cfg.Listen,
@@ -441,6 +443,40 @@ func (s *Server) fillObservedEndpoints(peers []api.PeerCandidate) {
 			peers[i].Endpoint = ep
 		}
 	}
+}
+
+func (s *Server) handleFleetStatus(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var nodes []api.FleetNodeStatus
+	for _, node := range s.reg.Nodes {
+		lastSeen := ""
+		if !node.LastSeenAt.IsZero() {
+			lastSeen = node.LastSeenAt.Format(time.RFC3339)
+		}
+		nodes = append(nodes, api.FleetNodeStatus{
+			Name:     node.Name,
+			VPNIP:    node.VPNIP,
+			NATType:  node.NATType,
+			LastSeen: lastSeen,
+		})
+	}
+	writeJSON(w, http.StatusOK, api.FleetStatusResponse{Nodes: nodes})
+}
+
+func (s *Server) handleFleetHistory(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var nodes []api.FleetNodeHistory
+	for _, node := range s.reg.Nodes {
+		nodes = append(nodes, api.FleetNodeHistory{
+			Name:    node.Name,
+			Buckets: []api.FleetHistoryBucket{},
+		})
+	}
+	writeJSON(w, http.StatusOK, api.FleetHistoryResponse{Nodes: nodes})
 }
 
 func decodeJSON(r *http.Request, v any) error {

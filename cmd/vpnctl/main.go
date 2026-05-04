@@ -26,9 +26,13 @@ import (
 	"vpnctl/internal/direct"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
+	"vpnctl/internal/monitor"
+	"vpnctl/internal/peersource"
 	"vpnctl/internal/store"
 	"vpnctl/internal/stunutil"
 	"vpnctl/internal/wireguard"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 const usage = `vpnctl - minimal VPN control-plane + metrics (MVP)
@@ -51,6 +55,9 @@ Usage:
  vpnctl down --config <path> [--wg-config <path>]
  vpnctl status --config <path> [--iface <name>]
  vpnctl doctor --config <path> [--iface <name>]
+  vpnctl monitor --interface <iface> [--watch] [--interval 5s] [--peers ip1,ip2]
+  vpnctl fleet status --config <path> | --interface <iface>
+  vpnctl fleet history --config <path> | --interface <iface> [--window 1h]
 
 Planned:
  vpnctl node add
@@ -90,6 +97,10 @@ func main() {
 		handleStatus(os.Args[2:])
 	case "doctor":
 		handleDoctor(os.Args[2:])
+	case "monitor":
+		handleMonitor(os.Args[2:])
+	case "fleet":
+		handleFleet(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usage)
@@ -601,10 +612,27 @@ func handleDoctor(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to YAML config")
 	iface := fs.String("iface", "", "wireguard interface name")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
 	_ = fs.Parse(args)
 
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+
+	// --interface mode: skip config-dependent checks, show interface status only.
+	if *ifaceFlag != "" {
+		fmt.Fprintf(os.Stdout, "iface=%s\n", *ifaceFlag)
+		if out, err := wireguard.Status(*ifaceFlag); err == nil {
+			fmt.Fprintln(os.Stdout, out)
+		} else {
+			fmt.Fprintf(os.Stdout, "wg status error: %v\n", err)
+		}
+		return
+	}
+
 	if *configPath == "" {
-		fatal(errors.New("--config is required"))
+		fatal(errors.New("--config or --interface is required"))
 	}
 
 	cfg, err := loadConfig(*configPath)
@@ -768,7 +796,38 @@ func directTest(args []string) {
 func handleDiscover(args []string) {
 	fs := flag.NewFlagSet("discover", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to YAML config")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
+	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
 	_ = fs.Parse(args)
+
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+
+	// --interface mode: discover peers directly from the live WireGuard interface.
+	if *ifaceFlag != "" {
+		src := peersource.NewWgSource(*ifaceFlag, *probePort)
+		peers, err := src.Discover()
+		if err != nil {
+			fatal(err)
+		}
+		if len(peers) == 0 {
+			fmt.Fprintln(os.Stdout, "no peers")
+			return
+		}
+		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6s  %-22s\n",
+			"NAME", "VPN_IP", "WG_ENDPOINT", "PORT", "LAST_HANDSHAKE")
+		for _, p := range peers {
+			lastHS := ""
+			if !p.LastHandshake.IsZero() {
+				lastHS = p.LastHandshake.UTC().Format(time.RFC3339)
+			}
+			fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-22s  %-6d  %-22s\n",
+				p.Name, p.VPNIP, p.Endpoint, p.ProbePort, lastHS)
+		}
+		return
+	}
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
@@ -816,10 +875,58 @@ func handlePing(args []string) {
 	timeout := fs.Duration("timeout", 2*time.Second, "probe timeout")
 	submit := fs.Bool("submit", true, "submit metrics to controller")
 	path := fs.String("path", "auto", "path selection: auto|direct|relay")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
+	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
 	_ = fs.Parse(args)
+
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
 
 	if !*all && *peer == "" {
 		fatal(errors.New("--peer or --all is required"))
+	}
+
+	// --interface mode: discover peers from the live WireGuard interface.
+	if *ifaceFlag != "" {
+		src := peersource.NewWgSource(*ifaceFlag, *probePort)
+		wgPeers, err := src.Discover()
+		if err != nil {
+			fatal(err)
+		}
+		ctx := context.Background()
+		var matched []peersource.Peer
+		if *all {
+			matched = wgPeers
+		} else {
+			for _, p := range wgPeers {
+				if p.Name == *peer || p.VPNIP == *peer {
+					matched = append(matched, p)
+					break
+				}
+			}
+		}
+		if len(matched) == 0 {
+			fatal(errors.New("no peers matched"))
+		}
+		for _, p := range matched {
+			peerAddr := fmt.Sprintf("%s:%d", p.VPNIP, p.ProbePort)
+			results := make([]float64, 0, *count)
+			for i := 0; i < *count; i++ {
+				rtt, err := direct.ProbePeer(ctx, ":0", peerAddr, *timeout)
+				if err == nil {
+					results = append(results, float64(rtt.Microseconds())/1000.0)
+					fmt.Fprintf(os.Stdout, "ping %s seq=%d rtt=%.2fms\n", p.Name, i+1, results[len(results)-1])
+				} else {
+					fmt.Fprintf(os.Stdout, "ping %s seq=%d timeout\n", p.Name, i+1)
+				}
+				time.Sleep(*interval)
+			}
+			metric := summarizePing(*ifaceFlag, p.PublicKey, "relay", results, *count, 0)
+			fmt.Fprintf(os.Stdout, "ping summary peer=%s avg=%.2fms loss=%.2f%%\n", p.Name, metric.RTTMs, metric.LossPct)
+		}
+		return
 	}
 
 	cfg, err := loadConfig(*configPath)
@@ -884,10 +991,44 @@ func handlePerf(args []string) {
 	timeout := fs.Duration("timeout", 5*time.Second, "probe timeout")
 	submit := fs.Bool("submit", true, "submit metrics to controller")
 	path := fs.String("path", "auto", "path selection: auto|direct|relay")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
+	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
 	_ = fs.Parse(args)
+
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
 
 	if *peer == "" {
 		fatal(errors.New("--peer is required"))
+	}
+
+	// --interface mode: discover peers from the live WireGuard interface.
+	if *ifaceFlag != "" {
+		src := peersource.NewWgSource(*ifaceFlag, *probePort)
+		wgPeers, err := src.Discover()
+		if err != nil {
+			fatal(err)
+		}
+		var matched *peersource.Peer
+		for i := range wgPeers {
+			if wgPeers[i].Name == *peer || wgPeers[i].VPNIP == *peer {
+				matched = &wgPeers[i]
+				break
+			}
+		}
+		if matched == nil {
+			fatal(fmt.Errorf("peer %q not found or missing address", *peer))
+		}
+		peerAddr := fmt.Sprintf("%s:%d", matched.VPNIP, matched.ProbePort)
+		ctx := context.Background()
+		throughput, lossPct, err := direct.PerfProbe(ctx, ":0", peerAddr, *packetSize, *count, *timeout)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Fprintf(os.Stdout, "perf peer=%s throughput=%.2f Mbps loss=%.2f%%\n", *peer, throughput, lossPct)
+		return
 	}
 
 	cfg, err := loadConfig(*configPath)
@@ -944,7 +1085,44 @@ func handleStats(args []string) {
 	configPath := fs.String("config", "", "path to YAML config")
 	window := fs.Duration("window", 5*time.Minute, "time window")
 	path := fs.String("path", "", "metrics CSV path override")
+	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
+	_ = fs.String("probe-port", "", "") // accepted but unused for stats
 	_ = fs.Parse(args)
+
+	if *configPath != "" && *ifaceFlag != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+
+	// --interface mode: read from local monitor store (~/.vpnctl/monitor.db).
+	if *ifaceFlag != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fatal(err)
+		}
+		dbPath := filepath.Join(home, ".vpnctl", "monitor.db")
+		st, err := monitor.OpenStore(dbPath)
+		if err != nil {
+			fatal(fmt.Errorf("open monitor store %s: %w", dbPath, err))
+		}
+		defer st.Close()
+		summaries, err := st.Summarize(*window)
+		if err != nil {
+			fatal(err)
+		}
+		if len(summaries) == 0 {
+			fmt.Fprintln(os.Stdout, "no samples in window")
+			return
+		}
+		fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-8s  %-10s  %-10s  %-10s  %-8s  %-22s\n",
+			"PEER_KEY", "PEER_IP", "COUNT", "AVG_RTT_us", "MIN_RTT_us", "MAX_RTT_us", "LOSS%", "LAST_SEEN")
+		for _, s := range summaries {
+			fmt.Fprintf(os.Stdout, "%-12s  %-15s  %-8d  %-10d  %-10d  %-10d  %-8.2f  %-22s\n",
+				s.PeerKey, s.PeerIP, s.Count, s.AvgRTTus, s.MinRTTus, s.MaxRTTus, s.LossPct,
+				s.LastSeen.Format(time.RFC3339))
+		}
+		return
+	}
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
@@ -1413,4 +1591,249 @@ func fatal(err error) {
 	}
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
+}
+
+func defaultMonitorDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fatal(fmt.Errorf("cannot determine home directory: %w", err))
+	}
+	return filepath.Join(home, ".vpnctl", "monitor.db")
+}
+
+func handleFleet(args []string) {
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, "fleet subcommand required (status|history)\n")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "status":
+		fleetStatus(args[1:])
+	case "history":
+		fleetHistory(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown fleet subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func fleetStatus(args []string) {
+	fs := flag.NewFlagSet("fleet status", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config (controller API)")
+	iface := fs.String("interface", "", "WireGuard interface (local monitor store)")
+	dataPath := fs.String("data", "", "SQLite store path (default: ~/.vpnctl/monitor.db)")
+	_ = fs.Parse(args)
+
+	if *configPath != "" && *iface != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+	if *configPath == "" && *iface == "" {
+		fmt.Fprintln(os.Stderr, "error: --config or --interface is required")
+		os.Exit(2)
+	}
+
+	if *configPath != "" {
+		cfg, err := loadConfig(*configPath)
+		if err != nil {
+			fatal(err)
+		}
+		if cfg.Node == nil {
+			fatal(errors.New("node config required"))
+		}
+		config.ApplyDefaults(&cfg)
+
+		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		ctx := context.Background()
+		resp, err := client.FleetStatus(ctx)
+		if err != nil {
+			fatal(err)
+		}
+
+		fmt.Printf("%-16s  %-18s  %-10s  %-8s  %-8s  %-10s  %-20s\n",
+			"NAME", "VPN_IP", "PATH", "RTT_MS", "LOSS%", "NAT", "LAST_SEEN")
+		for _, n := range resp.Nodes {
+			fmt.Printf("%-16s  %-18s  %-10s  %-8.2f  %-8.2f  %-10s  %-20s\n",
+				n.Name, n.VPNIP, n.Path, n.RTTMs, n.LossPct, n.NATType, n.LastSeen)
+		}
+		return
+	}
+
+	// --interface: read from local monitor store
+	if *dataPath == "" {
+		*dataPath = defaultMonitorDBPath()
+	}
+
+	st, err := monitor.OpenStore(*dataPath)
+	if err != nil {
+		fatal(err)
+	}
+	defer st.Close()
+
+	summaries, err := st.Summarize(time.Hour)
+	if err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("%-16s  %-18s  %-8s  %-8s  %-20s\n",
+		"PEER_KEY", "PEER_IP", "RTT_MS", "LOSS%", "LAST_SEEN")
+	for _, s := range summaries {
+		rttMs := float64(s.AvgRTTus) / 1000.0
+		fmt.Printf("%-16s  %-18s  %-8.2f  %-8.2f  %-20s\n",
+			s.PeerKey, s.PeerIP, rttMs, s.LossPct, s.LastSeen.Format(time.RFC3339))
+	}
+}
+
+func fleetHistory(args []string) {
+	fs := flag.NewFlagSet("fleet history", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config (controller API)")
+	iface := fs.String("interface", "", "WireGuard interface (local monitor store)")
+	dataPath := fs.String("data", "", "SQLite store path (default: ~/.vpnctl/monitor.db)")
+	window := fs.String("window", "1h", "time window (e.g. 1h, 30m)")
+	_ = fs.Parse(args)
+
+	if *configPath != "" && *iface != "" {
+		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
+		os.Exit(2)
+	}
+	if *configPath == "" && *iface == "" {
+		fmt.Fprintln(os.Stderr, "error: --config or --interface is required")
+		os.Exit(2)
+	}
+
+	if *configPath != "" {
+		cfg, err := loadConfig(*configPath)
+		if err != nil {
+			fatal(err)
+		}
+		if cfg.Node == nil {
+			fatal(errors.New("node config required"))
+		}
+		config.ApplyDefaults(&cfg)
+
+		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		ctx := context.Background()
+		resp, err := client.FleetHistory(ctx, *window)
+		if err != nil {
+			fatal(err)
+		}
+
+		for _, n := range resp.Nodes {
+			fmt.Printf("Node: %s\n", n.Name)
+			fmt.Printf("  %-20s  %-8s  %-8s\n", "TIME", "ONLINE%", "AVG_RTT_MS")
+			for _, b := range n.Buckets {
+				fmt.Printf("  %-20s  %-8.1f  %-8.2f\n", b.Time, b.OnlinePct, b.AvgRTTMs)
+			}
+		}
+		return
+	}
+
+	// --interface: read from local monitor store
+	if *dataPath == "" {
+		*dataPath = defaultMonitorDBPath()
+	}
+
+	dur, err := time.ParseDuration(*window)
+	if err != nil {
+		fatal(fmt.Errorf("invalid --window %q: %w", *window, err))
+	}
+
+	st, err := monitor.OpenStore(*dataPath)
+	if err != nil {
+		fatal(err)
+	}
+	defer st.Close()
+
+	summaries, err := st.Summarize(dur)
+	if err != nil {
+		fatal(err)
+	}
+
+	for _, s := range summaries {
+		onlinePct := 100.0 - s.LossPct
+		barLen := int(onlinePct / 5.0)
+		if barLen > 20 {
+			barLen = 20
+		}
+		if barLen < 0 {
+			barLen = 0
+		}
+		bar := strings.Repeat("█", barLen) + strings.Repeat("░", 20-barLen)
+		rttMs := float64(s.AvgRTTus) / 1000.0
+		fmt.Printf("%-16s  [%s] %.1f%% online  %.2f ms avg RTT\n",
+			s.PeerIP, bar, onlinePct, rttMs)
+	}
+}
+
+func handleMonitor(args []string) {
+	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
+	iface := fs.String("interface", "", "WireGuard interface to monitor")
+	peersFlag := fs.String("peers", "", "comma-separated VPN IPs to filter")
+	interval := fs.Duration("interval", 5*time.Second, "probe interval")
+	watch := fs.Bool("watch", false, "plain text output instead of TUI")
+	dataPath := fs.String("data", "", "SQLite store path (default: ~/.vpnctl/monitor.db)")
+	retention := fs.Duration("retention", 7*24*time.Hour, "data retention period")
+	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
+	_ = fs.Parse(args)
+
+	if *iface == "" {
+		fmt.Fprintln(os.Stderr, "error: --interface is required")
+		os.Exit(2)
+	}
+
+	if *dataPath == "" {
+		*dataPath = defaultMonitorDBPath()
+	}
+	if err := os.MkdirAll(filepath.Dir(*dataPath), 0o755); err != nil {
+		fatal(err)
+	}
+
+	src := peersource.NewWgSource(*iface, *probePort)
+
+	store, err := monitor.OpenStore(*dataPath)
+	if err != nil {
+		fatal(err)
+	}
+	defer store.Close()
+
+	if removed, err := store.Cleanup(*retention); err == nil && removed > 0 {
+		fmt.Fprintf(os.Stderr, "cleaned up %d old probe records\n", removed)
+	}
+
+	var peerFilter []string
+	if *peersFlag != "" {
+		peerFilter = strings.Split(*peersFlag, ",")
+	}
+
+	mon := monitor.New(monitor.Config{
+		Source:   src,
+		Store:    store,
+		Interval: *interval,
+		Peers:    peerFilter,
+	})
+
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	if *watch {
+		ww := monitor.NewWatchWriter(os.Stdout)
+		sub := mon.Subscribe()
+		go mon.Run(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case snap := <-sub:
+				ww.Write(snap)
+			}
+		}
+	} else {
+		sub := mon.Subscribe()
+		go mon.Run(ctx)
+		tuiModel := monitor.NewTUIModel(*iface, sub)
+		p := tea.NewProgram(tuiModel)
+		if _, err := p.Run(); err != nil {
+			fatal(err)
+		}
+	}
 }

@@ -75,6 +75,24 @@ func (c *Client) WGConfig(ctx context.Context, nodeID string) (WGConfigResponse,
 	return resp, nil
 }
 
+// FleetStatus fetches the current status of all fleet nodes.
+func (c *Client) FleetStatus(ctx context.Context) (FleetStatusResponse, error) {
+	var resp FleetStatusResponse
+	if err := c.getJSON(ctx, "/fleet/status", &resp); err != nil {
+		return resp, err
+	}
+	return resp, nil
+}
+
+// FleetHistory fetches time-bucketed history for all fleet nodes.
+func (c *Client) FleetHistory(ctx context.Context, window string) (FleetHistoryResponse, error) {
+	var resp FleetHistoryResponse
+	if err := c.getJSON(ctx, "/fleet/history?window="+url.QueryEscape(window), &resp); err != nil {
+		return resp, err
+	}
+	return resp, nil
+}
+
 func (c *Client) postJSON(ctx context.Context, path string, body any, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
