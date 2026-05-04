@@ -37,7 +37,7 @@ func TestMonitor_RunCollectsProbes(t *testing.T) {
 			{
 				PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 				VPNIP:     "127.0.0.1",
-				ProbePort: 51900,
+				ProbePort: 19999,
 				Name:      "peer-1",
 			},
 		},
