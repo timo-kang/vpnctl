@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"vpnctl/internal/peersource"
@@ -90,31 +91,31 @@ func (m *Monitor) probeAll(ctx context.Context) {
 	}
 
 	now := time.Now().UTC()
-	states := make([]PeerState, 0, len(peers))
+	states := make([]PeerState, len(peers))
 
-	for _, peer := range peers {
-		rttUs, success := probePeer(ctx, peer)
-
-		if m.cfg.Store != nil {
-			peerKey := peer.PublicKey
-			if len(peerKey) > 10 {
-				peerKey = peerKey[:10]
+	var wg sync.WaitGroup
+	for i, peer := range peers {
+		wg.Add(1)
+		go func(idx int, p peersource.Peer) {
+			defer wg.Done()
+			rttUs, success := probePeer(ctx, p)
+			states[idx] = PeerState{
+				Peer:    p,
+				RTTus:   rttUs,
+				Success: success,
 			}
-			_ = m.cfg.Store.Insert(ProbeResult{
-				Timestamp: now,
-				PeerKey:   peerKey,
-				PeerIP:    peer.VPNIP,
-				RTTus:     rttUs,
-				Success:   success,
-			})
-		}
-
-		states = append(states, PeerState{
-			Peer:    peer,
-			RTTus:   rttUs,
-			Success: success,
-		})
+			if m.cfg.Store != nil {
+				_ = m.cfg.Store.Insert(ProbeResult{
+					Timestamp: now,
+					PeerKey:   p.PublicKey,
+					PeerIP:    p.VPNIP,
+					RTTus:     rttUs,
+					Success:   success,
+				})
+			}
+		}(i, peer)
 	}
+	wg.Wait()
 
 	snap := Snapshot{
 		Time:  now,
