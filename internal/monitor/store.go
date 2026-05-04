@@ -133,7 +133,7 @@ func (s *Store) Summarize(window time.Duration) ([]PeerSummary, error) {
 		    COALESCE(MAX(CASE WHEN success=1 THEN rtt_us END), 0) as max_rtt,
 		    100.0 * SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) / COUNT(*) as loss_pct,
 		    MAX(timestamp) as last_ts
-		FROM probes WHERE timestamp >= ? GROUP BY peer_key ORDER BY peer_ip`,
+		FROM probes WHERE timestamp >= ? GROUP BY peer_key, peer_ip ORDER BY peer_ip`,
 		since,
 	)
 	if err != nil {

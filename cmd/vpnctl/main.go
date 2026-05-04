@@ -1593,6 +1593,14 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
+func defaultMonitorDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fatal(fmt.Errorf("cannot determine home directory: %w", err))
+	}
+	return filepath.Join(home, ".vpnctl", "monitor.db")
+}
+
 func handleFleet(args []string) {
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, "fleet subcommand required (status|history)\n")
@@ -1653,8 +1661,7 @@ func fleetStatus(args []string) {
 
 	// --interface: read from local monitor store
 	if *dataPath == "" {
-		home, _ := os.UserHomeDir()
-		*dataPath = filepath.Join(home, ".vpnctl", "monitor.db")
+		*dataPath = defaultMonitorDBPath()
 	}
 
 	st, err := monitor.OpenStore(*dataPath)
@@ -1723,8 +1730,7 @@ func fleetHistory(args []string) {
 
 	// --interface: read from local monitor store
 	if *dataPath == "" {
-		home, _ := os.UserHomeDir()
-		*dataPath = filepath.Join(home, ".vpnctl", "monitor.db")
+		*dataPath = defaultMonitorDBPath()
 	}
 
 	dur, err := time.ParseDuration(*window)
@@ -1776,8 +1782,7 @@ func handleMonitor(args []string) {
 	}
 
 	if *dataPath == "" {
-		home, _ := os.UserHomeDir()
-		*dataPath = filepath.Join(home, ".vpnctl", "monitor.db")
+		*dataPath = defaultMonitorDBPath()
 	}
 	if err := os.MkdirAll(filepath.Dir(*dataPath), 0o755); err != nil {
 		fatal(err)
