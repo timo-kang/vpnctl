@@ -35,9 +35,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
+)
+
 const usage = `vpnctl - minimal VPN control-plane + metrics (MVP)
 
 Usage:
+  vpnctl version
   vpnctl controller init --config <path>
   vpnctl controller status --config <path>
   vpnctl node join --config <path>
@@ -73,6 +80,8 @@ func main() {
 	switch cmd {
 	case "-h", "--help", "help":
 		fmt.Print(usage)
+	case "version", "--version":
+		fmt.Printf("vpnctl %s (commit %s, built %s)\n", version, commit, buildTime)
 	case "controller":
 		handleController(os.Args[2:])
 	case "node":
