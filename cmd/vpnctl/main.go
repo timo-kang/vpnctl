@@ -1626,7 +1626,7 @@ func fatal(err error) {
 	if err == nil {
 		return
 	}
-	fmt.Fprintln(os.Stderr, err)
+	slog.Error("fatal", "err", err)
 	os.Exit(1)
 }
 
@@ -1865,6 +1865,8 @@ func handleMonitor(args []string) {
 			}
 		}
 	} else {
+		// Suppress slog output during TUI mode to avoid corrupting the display.
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		sub := mon.Subscribe()
 		go mon.Run(ctx)
 		tuiModel := monitor.NewTUIModel(*iface, sub)
