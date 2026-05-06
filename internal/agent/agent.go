@@ -6,7 +6,7 @@ package agent
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/netip"
 	"strings"
 	"time"
@@ -40,7 +40,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 			return err
 		}
 		defer shared.Close()
-		log.Printf("probe responder on %s", shared.LocalAddr())
+		slog.Info("probe responder started", "addr", shared.LocalAddr())
 	}
 
 	keepaliveTicker := time.NewTicker(time.Duration(cfg.KeepaliveIntervalSec) * time.Second)
@@ -57,7 +57,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 	var natType string
 	activePeers := map[string]wireguard.Peer{}
 	if err := fillServerConfig(ctx, client, &cfg); err != nil {
-		log.Printf("server config fetch failed: %v", err)
+		slog.Warn("server config fetch failed", "err", err)
 	}
 
 	// Health check ticker — detect dead tunnels.
@@ -69,11 +69,9 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 		healthTicker := time.NewTicker(time.Duration(cfg.HealthCheckIntervalSec) * time.Second)
 		defer healthTicker.Stop()
 		healthC = healthTicker.C
-		log.Printf("health check enabled interval=%ds failures=%d timeout=%ds hub=%s",
-			cfg.HealthCheckIntervalSec, cfg.HealthCheckFailures, cfg.HealthCheckTimeoutSec, hubProbeAddr)
+		slog.Info("health check enabled", "interval_sec", cfg.HealthCheckIntervalSec, "failures", cfg.HealthCheckFailures, "timeout_sec", cfg.HealthCheckTimeoutSec, "hub", hubProbeAddr)
 	} else if cfg.HealthCheckIntervalSec > 0 && cfg.HealthCheckFailures > 0 {
-		log.Printf("health check configured but probe address could not be determined (server_allowed_ips=%v server_probe_port=%d)",
-			cfg.ServerAllowedIPs, cfg.ServerProbePort)
+		slog.Warn("health check probe address undetermined", "server_allowed_ips", cfg.ServerAllowedIPs, "server_probe_port", cfg.ServerProbePort)
 	}
 	healthFailures := 0
 
@@ -84,7 +82,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 		case <-keepaliveTicker.C:
 			_, _, err := register(ctx, client, cfg)
 			if err != nil {
-				log.Printf("keepalive register failed: %v", err)
+				slog.Warn("keepalive register failed", "err", err)
 			}
 		case <-stunTicker.C:
 			if cfg.DirectMode == "off" || len(cfg.STUNServers) == 0 {
@@ -95,7 +93,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 			}
 			addr, nat, err := probeShared(ctx, shared, cfg.STUNServers, 5*time.Second)
 			if err != nil {
-				log.Printf("STUN probe failed: %v", err)
+				slog.Warn("STUN probe failed", "err", err)
 				break
 			}
 			publicAddr = addr
@@ -105,12 +103,12 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 				NATType:    natType,
 				PublicAddr: publicAddr,
 			}); err != nil {
-				log.Printf("NAT probe submit failed: %v", err)
+				slog.Warn("NAT probe submit failed", "err", err)
 			}
 		case <-candidatesTicker.C:
 			resp, err := client.Candidates(ctx, nodeID)
 			if err != nil {
-				log.Printf("candidates fetch failed: %v", err)
+				slog.Warn("candidates fetch failed", "err", err)
 				break
 			}
 			candidates = resp.Peers
@@ -130,7 +128,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 					if prev, ok := allowedOwner[allowedIP]; ok && prev != peer.ID {
 						// Overlapping AllowedIPs are invalid in WireGuard. Skip duplicates so one bad/stale
 						// registry entry doesn't block all peer injection.
-						log.Printf("skip peer injection name=%s id=%s vpn_ip=%s: duplicate allowed_ip (already owned by %s)", peer.Name, peer.ID, peer.VPNIP, prev)
+						slog.Warn("skip peer injection: duplicate allowed_ip", "name", peer.Name, "id", peer.ID, "vpn_ip", peer.VPNIP, "owner", prev)
 						inject = false
 					} else {
 						allowedOwner[allowedIP] = peer.ID
@@ -193,22 +191,22 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 
 				if cfg.MetricsPath != "" {
 					if err := metrics.AppendCSV(cfg.MetricsPath, []model.Metric{sample}); err != nil {
-						log.Printf("append metrics failed: %v", err)
+						slog.Warn("append metrics failed", "err", err)
 					}
 				}
 				if err := client.SubmitMetrics(ctx, api.MetricsRequest{NodeID: nodeID, Samples: []model.Metric{sample}}); err != nil {
-					log.Printf("submit metrics failed: %v", err)
+					slog.Warn("submit metrics failed", "err", err)
 				}
 			}
 
 			if cfg.ServerPublicKey != "" && cfg.ServerEndpoint != "" && len(cfg.ServerAllowedIPs) > 0 {
 				if !peersEqual(activePeers, desired) {
 					peerList := peersFromMap(desired)
-					log.Printf("inject wg peers count=%d", len(peerList))
+					slog.Info("injecting wg peers", "count", len(peerList))
 					if err := wireguard.ApplyPeers(cfg, peerList); err != nil {
-						log.Printf("apply peers failed: %v", err)
+						slog.Error("apply peers failed", "err", err)
 					} else {
-						log.Printf("inject wg peers ok count=%d", len(peerList))
+						slog.Info("wg peers injected", "count", len(peerList))
 						activePeers = desired
 					}
 				}
@@ -224,14 +222,14 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 					return ctx.Err()
 				}
 				// Infrastructure error (local socket, etc.) — don't count as tunnel failure.
-				log.Printf("health check error (not counted) hub=%s: %v", hubProbeAddr, hErr)
+				slog.Warn("health check error (not counted)", "hub", hubProbeAddr, "err", hErr)
 				break
 			}
 			if ok {
 				healthFailures = 0
 			} else {
 				healthFailures++
-				log.Printf("health check failed (%d/%d) hub=%s", healthFailures, cfg.HealthCheckFailures, hubProbeAddr)
+				slog.Warn("health check failed", "failures", healthFailures, "threshold", cfg.HealthCheckFailures, "hub", hubProbeAddr)
 				if healthFailures >= cfg.HealthCheckFailures {
 					return ErrTunnelDead
 				}

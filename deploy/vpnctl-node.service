@@ -1,0 +1,15 @@
+[Unit]
+Description=vpnctl node agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vpnctl node serve --config /etc/vpnctl/node.yaml
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_ADMIN
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

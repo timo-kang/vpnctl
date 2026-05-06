@@ -167,6 +167,46 @@ Requires vpnctl echo responder on target peers (`vpnctl monitor`, `vpnctl node s
 - `wg` and `ip` commands available
 - Go 1.22+ to build
 
+## Installation
+
+### From source
+
+```bash
+git clone https://github.com/timo-kang/vpnctl.git
+cd vpnctl
+make build
+sudo cp vpnctl /usr/local/bin/
+```
+
+### With Docker
+
+```bash
+make docker
+docker run -p 8443:8443 -v vpnctl-data:/var/lib/vpnctl vpnctl controller init --config /etc/vpnctl/config.yaml
+```
+
+### systemd
+
+```bash
+sudo cp vpnctl /usr/local/bin/
+sudo mkdir -p /etc/vpnctl
+sudo cp deploy/vpnctl-node.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vpnctl-node
+```
+
+## Logging
+
+vpnctl uses structured logging via Go's `log/slog`.
+
+```bash
+# Set log level (debug, info, warn, error)
+VPNCTL_LOG_LEVEL=debug vpnctl node serve --config node.yaml
+
+# JSON output (for log aggregation)
+VPNCTL_LOG_FORMAT=json vpnctl node serve --config node.yaml
+```
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).

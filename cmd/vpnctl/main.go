@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -35,9 +36,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
+)
+
 const usage = `vpnctl - minimal VPN control-plane + metrics (MVP)
 
 Usage:
+  vpnctl version
   vpnctl controller init --config <path>
   vpnctl controller status --config <path>
   vpnctl node join --config <path>
@@ -63,7 +71,34 @@ Planned:
  vpnctl node add
 `
 
+func setupLogging() {
+	logLevel := os.Getenv("VPNCTL_LOG_LEVEL")
+	logFormat := os.Getenv("VPNCTL_LOG_FORMAT")
+
+	var level slog.Level
+	switch strings.ToLower(logLevel) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+
+	opts := &slog.HandlerOptions{Level: level}
+	var handler slog.Handler
+	if strings.ToLower(logFormat) == "json" {
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(handler))
+}
+
 func main() {
+	setupLogging()
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -73,6 +108,8 @@ func main() {
 	switch cmd {
 	case "-h", "--help", "help":
 		fmt.Print(usage)
+	case "version", "--version":
+		fmt.Printf("vpnctl %s (commit %s, built %s)\n", version, commit, buildTime)
 	case "controller":
 		handleController(os.Args[2:])
 	case "node":
@@ -1589,7 +1626,7 @@ func fatal(err error) {
 	if err == nil {
 		return
 	}
-	fmt.Fprintln(os.Stderr, err)
+	slog.Error("fatal", "err", err)
 	os.Exit(1)
 }
 
@@ -1828,6 +1865,8 @@ func handleMonitor(args []string) {
 			}
 		}
 	} else {
+		// Suppress slog output during TUI mode to avoid corrupting the display.
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		sub := mon.Subscribe()
 		go mon.Run(ctx)
 		tuiModel := monitor.NewTUIModel(*iface, sub)
