@@ -86,6 +86,58 @@ vpnctl doctor --config configs/node.yaml
 - **Agent**: registers with controller, configures WireGuard, probes peers, reports metrics, health watchdog
 - **Monitor**: observes any WireGuard interface (with or without vpnctl controller)
 
+## Authentication (mTLS)
+
+vpnctl supports mutual TLS authentication. When enabled, all API communication between nodes and the controller is encrypted and mutually authenticated.
+
+### Setup
+
+1. Add `pki:` section to controller config:
+
+```yaml
+controller:
+  listen: "0.0.0.0:8443"
+  data_dir: "/var/lib/vpnctl"
+  vpn_cidr: "10.7.0.0/24"
+  pki:
+    ca_expiry: "87600h"      # 10 years
+    server_expiry: "8760h"   # 1 year
+    client_expiry: "8760h"   # 1 year
+```
+
+2. Start the controller — it generates CA, server cert, and bootstrap token:
+
+```bash
+$ vpnctl controller init --config controller.yaml
+Bootstrap token: vpnctl-bootstrap-a1b2c3d4e5f6...
+```
+
+3. Join nodes using the bootstrap token:
+
+```bash
+$ vpnctl node join --config node.yaml --token vpnctl-bootstrap-a1b2c3d4e5f6...
+bootstrap ok node_id=node-a vpn_ip=10.7.0.2/32 pki_dir=/etc/vpnctl/pki
+```
+
+4. All subsequent commands automatically use mTLS:
+
+```bash
+$ vpnctl node serve --config node.yaml   # uses client cert from pki_dir
+$ vpnctl ping --config node.yaml --all   # same
+```
+
+### Token management
+
+```bash
+vpnctl controller token create --config controller.yaml   # new token
+vpnctl controller token list --config controller.yaml      # list active
+vpnctl controller token revoke <token> --config controller.yaml
+```
+
+### Without mTLS
+
+If the `pki:` section is omitted from the controller config, vpnctl runs in plain HTTP mode with no authentication (backward compatible).
+
 ## Commands
 
 ### Monitor & Fleet (works with any WireGuard)
