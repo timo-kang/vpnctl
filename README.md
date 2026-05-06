@@ -242,9 +242,16 @@ docker run -p 8443:8443 -v vpnctl-data:/var/lib/vpnctl vpnctl controller init --
 ```bash
 sudo cp vpnctl /usr/local/bin/
 sudo mkdir -p /etc/vpnctl
+
+# Node agent
 sudo cp deploy/vpnctl-node.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now vpnctl-node
+
+# Network monitor (optional, enables /network/quality API on port 9090)
+sudo cp deploy/vpnctl-monitor.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vpnctl-monitor
 ```
 
 ## Logging

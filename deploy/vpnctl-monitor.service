@@ -1,0 +1,13 @@
+[Unit]
+Description=vpnctl network monitor
+After=network-online.target vpnctl-node.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vpnctl monitor --interface wg0 --metrics-port 9090
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
