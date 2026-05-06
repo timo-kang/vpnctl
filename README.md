@@ -259,6 +259,43 @@ VPNCTL_LOG_LEVEL=debug vpnctl node serve --config node.yaml
 VPNCTL_LOG_FORMAT=json vpnctl node serve --config node.yaml
 ```
 
+## Prometheus Metrics
+
+### Controller
+
+The controller exposes metrics at `/prom/metrics` (no authentication required for scraping):
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: vpnctl-controller
+    static_configs:
+      - targets: ['controller:8443']
+    scheme: https
+    metrics_path: /prom/metrics
+    tls_config:
+      insecure_skip_verify: true
+```
+
+Available metrics:
+- `vpnctl_nodes_registered` — total registered nodes
+- `vpnctl_nodes_online` — nodes seen within last 60s
+- `vpnctl_direct_probes_total{node,peer,success}` — probe attempt counter
+- `vpnctl_p2p_ready_pairs` — verified P2P peer pairs
+
+### Monitor
+
+Start monitor with `--metrics-port` to expose node-side metrics:
+
+```bash
+vpnctl monitor --interface wg0 --metrics-port 9090
+```
+
+Available metrics:
+- `vpnctl_probe_rtt_seconds{peer}` — last probe RTT
+- `vpnctl_probe_success{peer}` — last probe result (1/0)
+- `vpnctl_probe_total{peer,result}` — probe attempt counter
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
