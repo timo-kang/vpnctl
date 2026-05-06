@@ -51,7 +51,8 @@ Usage:
   vpnctl version
   vpnctl controller init --config <path>
   vpnctl controller status --config <path>
-  vpnctl node join --config <path>
+  vpnctl controller token create|list|revoke --config <path>
+  vpnctl node join --config <path> [--token <bootstrap-token>]
   vpnctl node serve --config <path>
   vpnctl node run --config <path>
   vpnctl node sync-config --config <path>
@@ -70,8 +71,6 @@ Usage:
   vpnctl fleet status --config <path> | --interface <iface>
   vpnctl fleet history --config <path> | --interface <iface> [--window 1h]
 
-Planned:
- vpnctl node add
 `
 
 func setupLogging() {
@@ -326,9 +325,6 @@ func handleNode(args []string) {
 		nodeRun(args[1:])
 	case "sync-config":
 		nodeSyncConfig(args[1:])
-	case "add":
-		fmt.Fprintln(os.Stderr, "node add not implemented yet")
-		os.Exit(2)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown node subcommand %q\n", args[0])
 		os.Exit(2)
@@ -427,7 +423,7 @@ func nodeJoin(args []string) {
 		fatal(errors.New("wg_public_key is required"))
 	}
 
-	client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+	client := newAPIClient(cfg.Node)
 
 	ctx := context.Background()
 	resp, err := client.Register(ctx, api.RegisterRequest{
@@ -495,7 +491,7 @@ func nodeRun(args []string) {
 	defer cancel()
 
 	if cfg.Node.VPNIP == "" && cfg.Node.Controller != "" {
-		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		client := newAPIClient(cfg.Node)
 		resp, err := client.Register(ctx, api.RegisterRequest{
 			Name:       cfg.Node.Name,
 			PubKey:     cfg.Node.WGPublicKey,
@@ -616,7 +612,7 @@ func syncConfigOnce(configPath string, cfg *config.Config) error {
 		return errors.New("node.controller is required")
 	}
 
-	client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+	client := newAPIClient(cfg.Node)
 	ctx := context.Background()
 
 	updated := false
@@ -719,7 +715,7 @@ func nodeSyncConfig(args []string) {
 		fatal(errors.New("node.controller is required"))
 	}
 
-	client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+	client := newAPIClient(cfg.Node)
 	ctx := context.Background()
 
 	updated := false
@@ -931,7 +927,7 @@ func directTest(args []string) {
 	}
 	config.ApplyDefaults(&cfg)
 
-	client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+	client := newAPIClient(cfg.Node)
 	ctx := context.Background()
 	candidates, err := client.Candidates(ctx, cfg.Node.Name)
 	if err != nil {
@@ -1010,7 +1006,7 @@ func handleDiscover(args []string) {
 	}
 	config.ApplyDefaults(&cfg)
 
-	client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+	client := newAPIClient(cfg.Node)
 	ctx := context.Background()
 	resp, err := client.Candidates(ctx, cfg.Node.Name)
 	if err != nil {
@@ -1110,7 +1106,7 @@ func handlePing(args []string) {
 	}
 	config.ApplyDefaults(&cfg)
 
-	client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+	client := newAPIClient(cfg.Node)
 	ctx := context.Background()
 	resp, err := client.Candidates(ctx, cfg.Node.Name)
 	if err != nil {
@@ -1212,7 +1208,7 @@ func handlePerf(args []string) {
 	}
 	config.ApplyDefaults(&cfg)
 
-	client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+	client := newAPIClient(cfg.Node)
 	ctx := context.Background()
 	resp, err := client.Candidates(ctx, cfg.Node.Name)
 	if err != nil {
@@ -1384,7 +1380,7 @@ func handleUp(args []string) {
 		fatal(err)
 	}
 	if cfg.Node.VPNIP == "" && cfg.Node.Controller != "" {
-		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		client := newAPIClient(cfg.Node)
 		resp, err := client.Register(context.Background(), api.RegisterRequest{
 			Name:       cfg.Node.Name,
 			PubKey:     cfg.Node.WGPublicKey,
@@ -1545,6 +1541,36 @@ func normalizeBootstrapURL(addr string) string {
 		return "https://" + strings.TrimPrefix(addr, "http://")
 	}
 	return "https://" + addr
+}
+
+// newAPIClient creates an API client, using mTLS if PKI credentials exist.
+func newAPIClient(cfg *config.NodeConfig) *api.Client {
+	baseURL := normalizeBaseURL(cfg.Controller)
+
+	if cfg.PKIDir != "" {
+		caCert := filepath.Join(cfg.PKIDir, "ca.crt")
+		clientCert := filepath.Join(cfg.PKIDir, "client.crt")
+		clientKey := filepath.Join(cfg.PKIDir, "client.key")
+
+		// Check if all cert files exist.
+		if fileExists(caCert) && fileExists(clientCert) && fileExists(clientKey) {
+			tlsCfg, err := pki.ClientTLSConfig(caCert, clientCert, clientKey)
+			if err != nil {
+				slog.Warn("mTLS config failed, falling back to plain HTTP", "err", err)
+				return api.NewClient(baseURL)
+			}
+			// Switch to HTTPS.
+			baseURL = normalizeBootstrapURL(cfg.Controller)
+			return api.NewTLSClient(baseURL, tlsCfg)
+		}
+	}
+
+	return api.NewClient(baseURL)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func selectPeer(peer string, candidates []api.PeerCandidate) (string, string) {
@@ -1723,7 +1749,7 @@ func fillServerConfig(node *config.NodeConfig) error {
 	if node.Controller == "" {
 		return errors.New("node.controller required to fetch server config")
 	}
-	client := api.NewClient(normalizeBaseURL(node.Controller))
+	client := newAPIClient(node)
 	resp, err := client.WGConfig(context.Background(), node.Name)
 	if err != nil {
 		return err
@@ -1826,7 +1852,7 @@ func fleetStatus(args []string) {
 		}
 		config.ApplyDefaults(&cfg)
 
-		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		client := newAPIClient(cfg.Node)
 		ctx := context.Background()
 		resp, err := client.FleetStatus(ctx)
 		if err != nil {
@@ -1894,7 +1920,7 @@ func fleetHistory(args []string) {
 		}
 		config.ApplyDefaults(&cfg)
 
-		client := api.NewClient(normalizeBaseURL(cfg.Node.Controller))
+		client := newAPIClient(cfg.Node)
 		ctx := context.Background()
 		resp, err := client.FleetHistory(ctx, *window)
 		if err != nil {
