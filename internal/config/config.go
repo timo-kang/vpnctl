@@ -64,6 +64,15 @@ type ControllerConfig struct {
 	// either: requires recent success in either direction (symmetric injection, more permissive).
 	P2PReadyMode string `yaml:"p2p_ready_mode"`
 	ProbePort    int    `yaml:"probe_port"`
+	PKI          *PKIConfig `yaml:"pki,omitempty"`
+}
+
+// PKIConfig controls certificate generation for mTLS.
+type PKIConfig struct {
+	CAExpiry     string `yaml:"ca_expiry"`      // e.g. "87600h" (default 10 years)
+	ServerExpiry string `yaml:"server_expiry"`   // e.g. "8760h" (default 1 year)
+	ClientExpiry string `yaml:"client_expiry"`   // e.g. "8760h" (default 1 year)
+	KeyAlgorithm string `yaml:"key_algorithm"`   // e.g. "ecdsa-p256" (default)
 }
 
 // NodeConfig is used by the agent process running on a device.
@@ -108,6 +117,7 @@ type NodeConfig struct {
 	HealthCheckFailures    int    `yaml:"health_check_failures"`
 	HealthCheckTimeoutSec  int    `yaml:"health_check_timeout_sec"`
 	ServerProbePort        int    `yaml:"server_probe_port"`
+	PKIDir                 string `yaml:"pki_dir"` // directory for ca.crt, client.key, client.crt
 }
 
 // Load reads and parses a YAML config file.
@@ -232,6 +242,20 @@ func ApplyDefaults(cfg *Config) {
 		}
 		if cfg.Controller.ProbePort == 0 {
 			cfg.Controller.ProbePort = DefaultProbePort
+		}
+		if cfg.Controller.PKI != nil {
+			if cfg.Controller.PKI.CAExpiry == "" {
+				cfg.Controller.PKI.CAExpiry = "87600h"
+			}
+			if cfg.Controller.PKI.ServerExpiry == "" {
+				cfg.Controller.PKI.ServerExpiry = "8760h"
+			}
+			if cfg.Controller.PKI.ClientExpiry == "" {
+				cfg.Controller.PKI.ClientExpiry = "8760h"
+			}
+			if cfg.Controller.PKI.KeyAlgorithm == "" {
+				cfg.Controller.PKI.KeyAlgorithm = "ecdsa-p256"
+			}
 		}
 	}
 

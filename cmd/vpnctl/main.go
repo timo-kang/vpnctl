@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"crypto/tls"
+
 	"vpnctl/internal/addrutil"
 	"vpnctl/internal/agent"
 	"vpnctl/internal/api"
@@ -29,6 +31,7 @@ import (
 	"vpnctl/internal/model"
 	"vpnctl/internal/monitor"
 	"vpnctl/internal/peersource"
+	"vpnctl/internal/pki"
 	"vpnctl/internal/store"
 	"vpnctl/internal/stunutil"
 	"vpnctl/internal/wireguard"
@@ -155,6 +158,8 @@ func handleController(args []string) {
 		controllerInit(args[1:])
 	case "status":
 		controllerStatus(args[1:])
+	case "token":
+		controllerToken(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown controller subcommand %q\n", args[0])
 		os.Exit(2)
@@ -188,6 +193,17 @@ func controllerInit(args []string) {
 	if err != nil {
 		fatal(err)
 	}
+
+	if cfg.Controller.PKI != nil {
+		token, err := srv.InitPKI()
+		if err != nil {
+			fatal(err)
+		}
+		if token != "" {
+			fmt.Fprintf(os.Stdout, "bootstrap token: %s\n", token)
+		}
+	}
+
 	fatal(srv.ListenAndServe())
 }
 
@@ -241,6 +257,61 @@ func controllerStatus(args []string) {
 	}
 }
 
+func controllerToken(args []string) {
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, "controller token subcommand required (create|list|revoke)\n")
+		os.Exit(2)
+	}
+
+	sub := args[0]
+	fs := flag.NewFlagSet("controller token "+sub, flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	_ = fs.Parse(args[1:])
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fatal(err)
+	}
+	if cfg.Controller == nil {
+		fatal(errors.New("controller config required"))
+	}
+	config.ApplyDefaults(&cfg)
+	if cfg.Controller.DataDir == "" {
+		fatal(errors.New("controller.data_dir is required"))
+	}
+
+	tokenPath := filepath.Join(cfg.Controller.DataDir, "pki", "bootstrap-tokens.json")
+	ts, err := pki.OpenTokenStore(tokenPath)
+	if err != nil {
+		fatal(err)
+	}
+
+	switch sub {
+	case "create":
+		token := ts.Create()
+		fmt.Fprintln(os.Stdout, token)
+	case "list":
+		tokens := ts.List()
+		if len(tokens) == 0 {
+			fmt.Fprintln(os.Stdout, "no active tokens")
+			return
+		}
+		for _, t := range tokens {
+			fmt.Fprintln(os.Stdout, t)
+		}
+	case "revoke":
+		remaining := fs.Args()
+		if len(remaining) == 0 {
+			fatal(errors.New("token value is required"))
+		}
+		ts.Revoke(remaining[0])
+		fmt.Fprintln(os.Stdout, "token revoked")
+	default:
+		fmt.Fprintf(os.Stderr, "unknown token subcommand %q\n", sub)
+		os.Exit(2)
+	}
+}
+
 func handleNode(args []string) {
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, "node subcommand required\n")
@@ -273,6 +344,7 @@ func nodeJoin(args []string) {
 	vpnIP := fs.String("vpn-ip", "", "WireGuard VPN IP")
 	directMode := fs.String("direct", "", "direct mode: auto|off")
 	stunList := fs.String("stun", "", "comma-separated STUN servers")
+	token := fs.String("token", "", "bootstrap token for mTLS enrollment")
 	_ = fs.Parse(args)
 
 	cfg, err := loadConfig(*configPath)
@@ -288,6 +360,69 @@ func nodeJoin(args []string) {
 	if err := config.Validate(cfg); err != nil {
 		fatal(err)
 	}
+
+	// Token-based bootstrap flow: generate CSR, call /bootstrap, save certs.
+	if *token != "" && cfg.Node.Controller != "" {
+		if cfg.Node.Name == "" {
+			fatal(errors.New("node.name is required for bootstrap"))
+		}
+
+		csrPEM, keyPEM, err := pki.GenerateCSR(cfg.Node.Name)
+		if err != nil {
+			fatal(fmt.Errorf("generate CSR: %w", err))
+		}
+
+		// Use an insecure TLS client for bootstrap — we don't have the CA cert yet.
+		baseURL := normalizeBootstrapURL(cfg.Node.Controller)
+		insecureClient := api.NewTLSClient(baseURL, &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // bootstrap phase
+			MinVersion:         tls.VersionTLS13,
+		})
+
+		ctx := context.Background()
+		resp, err := insecureClient.Bootstrap(ctx, api.BootstrapRequest{
+			Token: *token,
+			Name:  cfg.Node.Name,
+			CSR:   string(csrPEM),
+		})
+		if err != nil {
+			fatal(fmt.Errorf("bootstrap: %w", err))
+		}
+
+		// Save certificates to pki_dir.
+		pkiDir := cfg.Node.PKIDir
+		if pkiDir == "" {
+			pkiDir = filepath.Join(filepath.Dir(*configPath), "pki")
+		}
+		if err := os.MkdirAll(pkiDir, 0o755); err != nil {
+			fatal(err)
+		}
+
+		if err := os.WriteFile(filepath.Join(pkiDir, "ca.crt"), []byte(resp.CACert), 0o644); err != nil {
+			fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pkiDir, "client.key"), keyPEM, 0o600); err != nil {
+			fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pkiDir, "client.crt"), []byte(resp.ClientCert), 0o644); err != nil {
+			fatal(err)
+		}
+
+		// Write pki_dir back to config.
+		cfg.Node.PKIDir = pkiDir
+		if cfg.Node.VPNIP == "" && resp.VPNIP != "" {
+			cfg.Node.VPNIP = resp.VPNIP
+		}
+		if *configPath != "" {
+			if err := config.Save(*configPath, cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to save config: %v\n", err)
+			}
+		}
+
+		fmt.Fprintf(os.Stdout, "bootstrap ok node_id=%s vpn_ip=%s pki_dir=%s\n", resp.NodeID, resp.VPNIP, pkiDir)
+		return
+	}
+
 	if cfg.Node.WGPublicKey == "" {
 		fatal(errors.New("wg_public_key is required"))
 	}
@@ -1399,6 +1534,17 @@ func normalizeBaseURL(addr string) string {
 		return addr
 	}
 	return "http://" + addr
+}
+
+// normalizeBootstrapURL ensures the controller URL uses https for bootstrap.
+func normalizeBootstrapURL(addr string) string {
+	if strings.HasPrefix(addr, "https://") {
+		return addr
+	}
+	if strings.HasPrefix(addr, "http://") {
+		return "https://" + strings.TrimPrefix(addr, "http://")
+	}
+	return "https://" + addr
 }
 
 func selectPeer(peer string, candidates []api.PeerCandidate) (string, string) {
