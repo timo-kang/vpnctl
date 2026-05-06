@@ -6,7 +6,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"os"
@@ -80,7 +80,7 @@ func (s *Server) ListenAndServe() error {
 		if err != nil {
 			return fmt.Errorf("probe responder: %w", err)
 		}
-		log.Printf("probe responder listening on %s", addr)
+		slog.Info("probe responder listening", "addr", addr)
 	}
 
 	mux := http.NewServeMux()
@@ -99,7 +99,7 @@ func (s *Server) ListenAndServe() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("controller listening on %s", s.cfg.Listen)
+	slog.Info("controller listening", "addr", s.cfg.Listen)
 	return server.ListenAndServe()
 }
 
@@ -344,7 +344,7 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 
-	log.Printf("direct result node=%s peer=%s success=%v rtt_ms=%.2f reason=%s", req.NodeID, req.PeerID, req.Success, req.RTTMs, req.Reason)
+	slog.Debug("direct result", "node", req.NodeID, "peer", req.PeerID, "success", req.Success, "rtt_ms", req.RTTMs, "reason", req.Reason)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -354,8 +354,7 @@ func (s *Server) handleWGConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.cfg.ServerPublicKey == "" || s.cfg.ServerEndpoint == "" || len(s.cfg.ServerAllowedIPs) == 0 {
-		log.Printf("wg-config error: server config not set (public_key=%t endpoint=%t allowed_ips=%d)",
-			s.cfg.ServerPublicKey != "", s.cfg.ServerEndpoint != "", len(s.cfg.ServerAllowedIPs))
+		slog.Warn("wg-config: server config not set", "has_public_key", s.cfg.ServerPublicKey != "", "has_endpoint", s.cfg.ServerEndpoint != "", "allowed_ips_count", len(s.cfg.ServerAllowedIPs))
 		writeJSONError(w, http.StatusInternalServerError, "server config not set")
 		return
 	}
