@@ -41,8 +41,8 @@ func (ww *WatchWriter) Write(snap Snapshot) {
 
 		hs := formatHandshake(ps.Peer.LastHandshake)
 
-		fmt.Fprintf(ww.w, "[%s] %-12s %-15s %6s %5s  %s\n",
-			ts, name, ip, rtt, loss, hs)
+		fmt.Fprintf(ww.w, "[%s] %-12s %-15s %6s %5s  %-8s %s\n",
+			ts, name, ip, rtt, loss, ps.Quality.String(), hs)
 	}
 }
 

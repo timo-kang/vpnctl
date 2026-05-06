@@ -19,6 +19,18 @@ var (
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
+// qualityStyle returns the lipgloss style for the given link quality level.
+func qualityStyle(q LinkQuality) lipgloss.Style {
+	switch q {
+	case QualityGood:
+		return okStyle
+	case QualityDegraded:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	default:
+		return failStyle
+	}
+}
+
 // snapshotMsg is a bubbletea message carrying a new Snapshot.
 type snapshotMsg Snapshot
 
@@ -86,11 +98,11 @@ func (m TUIModel) View() string {
 	sb.WriteString("\n\n")
 
 	// Column headers
-	colHeader := fmt.Sprintf("  %-14s %-16s %6s  %5s  %s", "PEER", "VPN IP", "RTT", "LOSS", "HANDSHAKE")
+	colHeader := fmt.Sprintf("  %-14s %-16s %6s  %5s  %-8s  %s", "PEER", "VPN IP", "RTT", "LOSS", "QUALITY", "HANDSHAKE")
 	sb.WriteString(dimStyle.Render(colHeader))
 	sb.WriteString("\n")
 
-	separator := "  " + strings.Repeat("─", 52)
+	separator := "  " + strings.Repeat("─", 62)
 	sb.WriteString(dimStyle.Render(separator))
 	sb.WriteString("\n")
 
@@ -110,12 +122,11 @@ func (m TUIModel) View() string {
 			loss = "100%"
 		}
 
-		row := fmt.Sprintf("  %-14s %-16s %6s  %5s  %s", name, ip, rtt, loss, hs)
-		if ps.Success {
-			sb.WriteString(okStyle.Render(row))
-		} else {
-			sb.WriteString(failStyle.Render(row))
-		}
+		prefix := fmt.Sprintf("  %-14s %-16s %6s  %5s  ", name, ip, rtt, loss)
+		qualStr := fmt.Sprintf("%-8s", ps.Quality.String())
+		suffix := fmt.Sprintf("  %s", hs)
+
+		sb.WriteString(qualityStyle(ps.Quality).Render(prefix + qualityStyle(ps.Quality).Render(qualStr) + suffix))
 		sb.WriteString("\n")
 	}
 
