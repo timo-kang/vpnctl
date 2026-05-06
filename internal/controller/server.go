@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
@@ -176,6 +178,8 @@ func (s *Server) ListenAndServe() error {
 	mux.HandleFunc("/wg-config", s.requireClientCert(s.handleWGConfig))
 	mux.HandleFunc("/fleet/status", s.requireClientCert(s.handleFleetStatus))
 	mux.HandleFunc("/fleet/history", s.requireClientCert(s.handleFleetHistory))
+	// Prometheus metrics endpoint — no client cert required so Prometheus can scrape without mTLS.
+	mux.Handle("/prom/metrics", promhttp.Handler())
 
 	server := &http.Server{
 		Addr:              s.cfg.Listen,
@@ -367,6 +371,33 @@ func (s *Server) registerNodeLocked(name, pubKey, vpnIP, endpoint string, probeP
 	return nodeID, assignedVPNIP
 }
 
+// updateMetrics refreshes Prometheus gauges based on current registry and directOK state.
+func (s *Server) updateMetrics() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	metrics.NodesRegistered.Set(float64(len(s.reg.Nodes)))
+
+	online := 0
+	for _, n := range s.reg.Nodes {
+		if time.Since(n.LastSeenAt) < 60*time.Second {
+			online++
+		}
+	}
+	metrics.NodesOnline.Set(float64(online))
+
+	// Count P2P ready pairs
+	pairs := 0
+	for _, peers := range s.directOK {
+		for _, t := range peers {
+			if time.Since(t) < 2*time.Minute {
+				pairs++
+			}
+		}
+	}
+	metrics.P2PReadyPairs.Set(float64(pairs))
+}
+
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -467,6 +498,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.updateMetrics()
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -589,7 +621,16 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 
+	if req.NodeID != "" && req.PeerID != "" {
+		result := "success"
+		if !req.Success {
+			result = "failure"
+		}
+		metrics.DirectProbesTotal.WithLabelValues(req.NodeID, req.PeerID, result).Inc()
+	}
+
 	slog.Debug("direct result", "node", req.NodeID, "peer", req.PeerID, "success", req.Success, "rtt_ms", req.RTTMs, "reason", req.Reason)
+	s.updateMetrics()
 	w.WriteHeader(http.StatusNoContent)
 }
 

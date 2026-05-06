@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"vpnctl/internal/metrics"
 	"vpnctl/internal/peersource"
 )
 
@@ -112,6 +113,18 @@ func (m *Monitor) probeAll(ctx context.Context) {
 					RTTus:     rttUs,
 					Success:   success,
 				})
+			}
+			peerLabel := p.VPNIP
+			if peerLabel == "" {
+				peerLabel = p.PublicKey[:8]
+			}
+			if success {
+				metrics.ProbeRTTSeconds.WithLabelValues(peerLabel).Set(float64(rttUs) / 1e6)
+				metrics.ProbeSuccess.WithLabelValues(peerLabel).Set(1)
+				metrics.ProbeTotal.WithLabelValues(peerLabel, "success").Inc()
+			} else {
+				metrics.ProbeSuccess.WithLabelValues(peerLabel).Set(0)
+				metrics.ProbeTotal.WithLabelValues(peerLabel, "failure").Inc()
 			}
 		}(i, peer)
 	}
