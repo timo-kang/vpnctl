@@ -4,9 +4,11 @@
 package controller
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
 	"vpnctl/internal/metrics"
+	"vpnctl/internal/pki"
 	"vpnctl/internal/store"
 	"vpnctl/internal/wireguard"
 )
@@ -37,6 +40,8 @@ type Server struct {
 	// Used to gate P2P WireGuard /32 injection so relay doesn't get blackholed.
 	directOK       map[string]map[string]time.Time // node_id -> peer_id -> last success
 	probeResponder *direct.Responder
+	tokenStore     *pki.TokenStore
+	pkiDir         string
 }
 
 // NewServer constructs a controller server.
@@ -73,6 +78,84 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 	}, nil
 }
 
+// InitPKI initialises the PKI directory, generates the CA and server certificate
+// if they don't exist, opens the bootstrap token store, and creates an initial
+// token when the store is empty. The returned string is the bootstrap token if
+// one was freshly created (empty otherwise).
+func (s *Server) InitPKI() (string, error) {
+	if s.cfg.PKI == nil {
+		return "", fmt.Errorf("controller.pki config section is required")
+	}
+
+	pkiDir := filepath.Join(s.cfg.DataDir, "pki")
+	if err := os.MkdirAll(pkiDir, 0o755); err != nil {
+		return "", fmt.Errorf("create pki dir: %w", err)
+	}
+	s.pkiDir = pkiDir
+
+	caKeyPath := filepath.Join(pkiDir, "ca.key")
+	caCertPath := filepath.Join(pkiDir, "ca.crt")
+
+	// Generate CA if it doesn't exist.
+	if _, err := os.Stat(caCertPath); os.IsNotExist(err) {
+		caExpiry, err := time.ParseDuration(s.cfg.PKI.CAExpiry)
+		if err != nil {
+			return "", fmt.Errorf("parse ca_expiry: %w", err)
+		}
+		if err := pki.GenerateCA(caKeyPath, caCertPath, caExpiry); err != nil {
+			return "", fmt.Errorf("generate CA: %w", err)
+		}
+		slog.Info("generated CA certificate", "path", caCertPath)
+	}
+
+	serverKeyPath := filepath.Join(pkiDir, "server.key")
+	serverCertPath := filepath.Join(pkiDir, "server.crt")
+
+	// Generate server cert if it doesn't exist.
+	if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
+		serverExpiry, err := time.ParseDuration(s.cfg.PKI.ServerExpiry)
+		if err != nil {
+			return "", fmt.Errorf("parse server_expiry: %w", err)
+		}
+		sans := extractSANs(s.cfg.Listen)
+		if err := pki.GenerateServerCert(caCertPath, caKeyPath, serverKeyPath, serverCertPath, sans, serverExpiry); err != nil {
+			return "", fmt.Errorf("generate server cert: %w", err)
+		}
+		slog.Info("generated server certificate", "path", serverCertPath, "sans", sans)
+	}
+
+	// Open token store.
+	tokenPath := filepath.Join(pkiDir, "bootstrap-tokens.json")
+	ts, err := pki.OpenTokenStore(tokenPath)
+	if err != nil {
+		return "", fmt.Errorf("open token store: %w", err)
+	}
+	s.tokenStore = ts
+
+	// Create initial bootstrap token if store is empty.
+	var bootstrapToken string
+	if len(ts.List()) == 0 {
+		bootstrapToken = ts.Create()
+		slog.Info("created initial bootstrap token")
+	}
+
+	return bootstrapToken, nil
+}
+
+// extractSANs parses the host part of a listen address and returns suitable
+// SANs for the server certificate. If the host is empty, it adds "127.0.0.1"
+// and "localhost".
+func extractSANs(listen string) []string {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		host = listen
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return []string{"127.0.0.1", "localhost"}
+	}
+	return []string{host}
+}
+
 // ListenAndServe runs the HTTP server.
 func (s *Server) ListenAndServe() error {
 	if s.cfg.ProbePort > 0 {
@@ -84,19 +167,38 @@ func (s *Server) ListenAndServe() error {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/register", s.handleRegister)
-	mux.HandleFunc("/candidates", s.handleCandidates)
-	mux.HandleFunc("/metrics", s.handleMetrics)
-	mux.HandleFunc("/nat-probe", s.handleNATProbe)
-	mux.HandleFunc("/direct-result", s.handleDirectResult)
-	mux.HandleFunc("/wg-config", s.handleWGConfig)
-	mux.HandleFunc("/fleet/status", s.handleFleetStatus)
-	mux.HandleFunc("/fleet/history", s.handleFleetHistory)
+	mux.HandleFunc("/bootstrap", s.handleBootstrap)
+	mux.HandleFunc("/register", s.requireClientCert(s.handleRegister))
+	mux.HandleFunc("/candidates", s.requireClientCert(s.handleCandidates))
+	mux.HandleFunc("/metrics", s.requireClientCert(s.handleMetrics))
+	mux.HandleFunc("/nat-probe", s.requireClientCert(s.handleNATProbe))
+	mux.HandleFunc("/direct-result", s.requireClientCert(s.handleDirectResult))
+	mux.HandleFunc("/wg-config", s.requireClientCert(s.handleWGConfig))
+	mux.HandleFunc("/fleet/status", s.requireClientCert(s.handleFleetStatus))
+	mux.HandleFunc("/fleet/history", s.requireClientCert(s.handleFleetHistory))
 
 	server := &http.Server{
 		Addr:              s.cfg.Listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	if s.cfg.PKI != nil && s.pkiDir != "" {
+		tlsCfg, err := pki.ServerTLSConfig(
+			filepath.Join(s.pkiDir, "ca.crt"),
+			filepath.Join(s.pkiDir, "server.crt"),
+			filepath.Join(s.pkiDir, "server.key"),
+		)
+		if err != nil {
+			return fmt.Errorf("server TLS config: %w", err)
+		}
+		// Allow /bootstrap to work without a client cert. The
+		// requireClientCert middleware enforces client certs for all
+		// other endpoints.
+		tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
+		server.TLSConfig = tlsCfg
+		slog.Info("controller listening (mTLS)", "addr", s.cfg.Listen)
+		return server.ListenAndServeTLS("", "")
 	}
 
 	slog.Info("controller listening", "addr", s.cfg.Listen)
@@ -120,6 +222,149 @@ func (s *Server) StopProbeResponder() {
 		_ = s.probeResponder.Close()
 		s.probeResponder = nil
 	}
+}
+
+// requireClientCert wraps a handler and rejects requests without a valid
+// client certificate when mTLS is configured.
+func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.PKI != nil && s.pkiDir != "" {
+			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+				http.Error(w, "client certificate required", http.StatusUnauthorized)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// handleBootstrap handles POST /bootstrap for node enrollment via token + CSR.
+func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req api.BootstrapRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Token == "" || req.Name == "" || req.CSR == "" {
+		writeJSONError(w, http.StatusBadRequest, "token, name, and csr are required")
+		return
+	}
+
+	// Validate token.
+	if s.tokenStore == nil || !s.tokenStore.Validate(req.Token) {
+		writeJSONError(w, http.StatusUnauthorized, "invalid bootstrap token")
+		return
+	}
+
+	// Load CA and sign the CSR.
+	caKeyPath := filepath.Join(s.pkiDir, "ca.key")
+	caCertPath := filepath.Join(s.pkiDir, "ca.crt")
+	caCert, caKey, err := pki.LoadCA(caKeyPath, caCertPath)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to load CA: "+err.Error())
+		return
+	}
+
+	clientExpiry, err := time.ParseDuration(s.cfg.PKI.ClientExpiry)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "invalid client_expiry: "+err.Error())
+		return
+	}
+
+	signedCert, err := pki.SignCSR(caCert, caKey, []byte(req.CSR), clientExpiry)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "failed to sign CSR: "+err.Error())
+		return
+	}
+
+	// Read CA cert PEM for the response.
+	caCertPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to read CA cert: "+err.Error())
+		return
+	}
+
+	// Register the node in the registry (reuse registration logic).
+	nodeID, vpnIP := s.registerNodeLocked(req.Name, "" /* pubKey */, "" /* vpnIP */, "" /* endpoint */, 0 /* probePort */, "" /* publicAddr */, "" /* natType */)
+
+	writeJSON(w, http.StatusOK, api.BootstrapResponse{
+		CACert:     string(caCertPEM),
+		ClientCert: string(signedCert),
+		NodeID:     nodeID,
+		VPNIP:      vpnIP,
+	})
+}
+
+// registerNodeLocked registers or updates a node in the registry, allocating a
+// VPN IP when one is not provided. It returns (nodeID, vpnIP). This method is
+// shared by handleRegister and handleBootstrap.
+func (s *Server) registerNodeLocked(name, pubKey, vpnIP, endpoint string, probePort int, publicAddr, natType string) (string, string) {
+	now := time.Now().UTC()
+	assignedVPNIP := vpnIP
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if assignedVPNIP == "" {
+		var err error
+		assignedVPNIP, err = allocateVPNIP(s.cfg.VPNCIDR, s.reg)
+		if err != nil {
+			return name, ""
+		}
+	}
+
+	var nodeID string
+	updated := false
+	for i := range s.reg.Nodes {
+		if s.reg.Nodes[i].Name == name {
+			if s.reg.Nodes[i].ID == "" {
+				s.reg.Nodes[i].ID = name
+			}
+			if pubKey != "" {
+				s.reg.Nodes[i].PubKey = pubKey
+			}
+			s.reg.Nodes[i].VPNIP = assignedVPNIP
+			if endpoint != "" {
+				s.reg.Nodes[i].Endpoint = endpoint
+			}
+			s.reg.Nodes[i].ProbePort = probePort
+			if publicAddr != "" {
+				s.reg.Nodes[i].PublicAddr = publicAddr
+			}
+			if natType != "" {
+				s.reg.Nodes[i].NATType = natType
+			}
+			s.reg.Nodes[i].LastSeenAt = now
+			s.reg.Nodes[i].Status = "online"
+			nodeID = s.reg.Nodes[i].ID
+			updated = true
+			break
+		}
+	}
+
+	if !updated {
+		nodeID = name
+		s.reg.Nodes = append(s.reg.Nodes, store.NodeInfo{
+			ID:         nodeID,
+			Name:       name,
+			PubKey:     pubKey,
+			VPNIP:      assignedVPNIP,
+			Endpoint:   endpoint,
+			ProbePort:  probePort,
+			PublicAddr: publicAddr,
+			NATType:    natType,
+			LastSeenAt: now,
+			Status:     "online",
+		})
+	}
+
+	_ = store.SaveRegistry(s.regPath, s.reg)
+	return nodeID, assignedVPNIP
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
