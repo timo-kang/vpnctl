@@ -6,6 +6,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,10 +32,30 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
+// NewTLSClient creates a client with custom TLS configuration.
+func NewTLSClient(baseURL string, tlsConfig *tls.Config) *Client {
+	return &Client{
+		baseURL: baseURL,
+		http: &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: &http.Transport{TLSClientConfig: tlsConfig},
+		},
+	}
+}
+
 // Register registers a node and returns peer candidates.
 func (c *Client) Register(ctx context.Context, req RegisterRequest) (RegisterResponse, error) {
 	var resp RegisterResponse
 	if err := c.postJSON(ctx, "/register", req, &resp); err != nil {
+		return resp, err
+	}
+	return resp, nil
+}
+
+// Bootstrap enrolls a node using a bootstrap token and CSR.
+func (c *Client) Bootstrap(ctx context.Context, req BootstrapRequest) (BootstrapResponse, error) {
+	var resp BootstrapResponse
+	if err := c.postJSON(ctx, "/bootstrap", req, &resp); err != nil {
 		return resp, err
 	}
 	return resp, nil

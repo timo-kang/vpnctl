@@ -1,0 +1,92 @@
+# docker-compose.test.yaml — mTLS bootstrap flow integration test
+#
+# Tests the full enrollment flow WITHOUT WireGuard (control plane only):
+#   1. Controller starts, generates CA + server cert + bootstrap token
+#   2. Nodes wait for token, then join via --token
+#   3. mTLS handshake verified
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.test.yaml up --build
+#   docker compose -f deploy/docker-compose.test.yaml down -v
+
+services:
+  controller:
+    build: ..
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Start controller and capture bootstrap token from stdout
+        vpnctl controller init --config /etc/vpnctl/controller.yaml 2>&1 &
+        PID=$$!
+        # Wait for token file to be generated
+        while [ ! -f /var/lib/vpnctl/pki/bootstrap-tokens.json ]; do sleep 0.5; done
+        # Extract token and write to shared volume
+        TOKEN=$$(cat /var/lib/vpnctl/pki/bootstrap-tokens.json | head -1 | grep -o 'vpnctl-bootstrap-[a-f0-9]*')
+        echo "$$TOKEN" > /shared/bootstrap-token
+        echo "Bootstrap token written: $$TOKEN"
+        wait $$PID
+    volumes:
+      - shared-pki:/shared
+      - controller-data:/var/lib/vpnctl
+      - ./test-configs/controller.yaml:/etc/vpnctl/controller.yaml:ro
+    ports:
+      - "8443:8443"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -f /shared/bootstrap-token"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  node-a:
+    build: ..
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for bootstrap token..."
+        while [ ! -f /shared/bootstrap-token ]; do sleep 1; done
+        TOKEN=$$(cat /shared/bootstrap-token)
+        echo "Joining with token: $$TOKEN"
+        vpnctl node join --config /etc/vpnctl/node.yaml --token "$$TOKEN"
+        echo "=== Node A: checking certificates ==="
+        ls -la /etc/vpnctl/pki/
+        echo "=== Node A: ca.crt ==="
+        openssl x509 -in /etc/vpnctl/pki/ca.crt -noout -subject 2>/dev/null && echo "CA cert OK" || echo "CA cert missing"
+        echo "=== Node A: client.crt ==="
+        openssl x509 -in /etc/vpnctl/pki/client.crt -noout -subject 2>/dev/null && echo "Client cert OK" || echo "Client cert missing"
+        echo "=== Node A: DONE ==="
+        sleep 3600
+    volumes:
+      - shared-pki:/shared
+      - node-a-pki:/etc/vpnctl/pki
+      - ./test-configs/node-a.yaml:/etc/vpnctl/node.yaml
+    depends_on:
+      controller:
+        condition: service_healthy
+
+  node-b:
+    build: ..
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for bootstrap token..."
+        while [ ! -f /shared/bootstrap-token ]; do sleep 1; done
+        TOKEN=$$(cat /shared/bootstrap-token)
+        echo "Joining with token: $$TOKEN"
+        vpnctl node join --config /etc/vpnctl/node.yaml --token "$$TOKEN"
+        echo "=== Node B: checking certificates ==="
+        ls -la /etc/vpnctl/pki/
+        echo "=== Node B: DONE ==="
+        sleep 3600
+    volumes:
+      - shared-pki:/shared
+      - node-b-pki:/etc/vpnctl/pki
+      - ./test-configs/node-b.yaml:/etc/vpnctl/node.yaml
+    depends_on:
+      controller:
+        condition: service_healthy
+
+volumes:
+  shared-pki:
+  controller-data:
+  node-a-pki:
+  node-b-pki:

@@ -108,3 +108,18 @@ type FleetNodeHistory struct {
 type FleetHistoryResponse struct {
 	Nodes []FleetNodeHistory `json:"nodes"`
 }
+
+// BootstrapRequest is sent by a node during initial enrollment.
+type BootstrapRequest struct {
+	Token string `json:"token"`
+	Name  string `json:"name"`
+	CSR   string `json:"csr"` // PEM-encoded CSR
+}
+
+// BootstrapResponse returns the CA cert and signed client cert.
+type BootstrapResponse struct {
+	CACert     string `json:"ca_cert"`     // PEM
+	ClientCert string `json:"client_cert"` // PEM
+	NodeID     string `json:"node_id"`
+	VPNIP      string `json:"vpn_ip"`
+}
