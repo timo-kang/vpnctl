@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -2013,18 +2014,6 @@ func handleMonitor(args []string) {
 		fmt.Fprintf(os.Stderr, "cleaned up %d old probe records\n", removed)
 	}
 
-	if *metricsPort > 0 {
-		go func() {
-			mux := http.NewServeMux()
-			mux.Handle("/metrics", promhttp.Handler())
-			addr := fmt.Sprintf(":%d", *metricsPort)
-			slog.Info("metrics server listening", "addr", addr)
-			if err := http.ListenAndServe(addr, mux); err != nil {
-				slog.Error("metrics server failed", "err", err)
-			}
-		}()
-	}
-
 	var peerFilter []string
 	if *peersFlag != "" {
 		peerFilter = strings.Split(*peersFlag, ",")
@@ -2036,6 +2025,38 @@ func handleMonitor(args []string) {
 		Interval: *interval,
 		Peers:    peerFilter,
 	})
+
+	if *metricsPort > 0 {
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.Handler())
+			mux.HandleFunc("/network/quality", func(w http.ResponseWriter, r *http.Request) {
+				snap := mon.Latest()
+				var qualities []monitor.PeerQuality
+				for _, ps := range snap.Peers {
+					rttMs := float64(ps.RTTus) / 1000.0
+					lossPct := 0.0
+					if !ps.Success {
+						lossPct = 100.0
+					}
+					qualities = append(qualities, monitor.PeerQuality{
+						PeerIP:  ps.Peer.VPNIP,
+						Quality: ps.Quality.String(),
+						RTTMs:   rttMs,
+						LossPct: lossPct,
+						Level:   ps.Quality,
+					})
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(qualities)
+			})
+			addr := fmt.Sprintf(":%d", *metricsPort)
+			slog.Info("metrics server listening", "addr", addr)
+			if err := http.ListenAndServe(addr, mux); err != nil {
+				slog.Error("metrics server failed", "err", err)
+			}
+		}()
+	}
 
 	ctx, cancel := signalContext()
 	defer cancel()

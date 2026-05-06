@@ -35,6 +35,7 @@ type PeerState struct {
 	Peer    peersource.Peer
 	RTTus   int64
 	Success bool
+	Quality LinkQuality
 }
 
 // Monitor runs a periodic probe loop over discovered VPN peers.
@@ -100,10 +101,16 @@ func (m *Monitor) probeAll(ctx context.Context) {
 		go func(idx int, p peersource.Peer) {
 			defer wg.Done()
 			rttUs, success := probePeer(ctx, p)
+			rttMs := float64(rttUs) / 1000.0
+			quality := ComputeQuality(rttMs, 0, success, DefaultThresholds)
+			if !success {
+				quality = QualityOffline
+			}
 			states[idx] = PeerState{
 				Peer:    p,
 				RTTus:   rttUs,
 				Success: success,
+				Quality: quality,
 			}
 			if m.cfg.Store != nil {
 				_ = m.cfg.Store.Insert(ProbeResult{
@@ -129,6 +136,21 @@ func (m *Monitor) probeAll(ctx context.Context) {
 		}(i, peer)
 	}
 	wg.Wait()
+
+	// Compute link quality from recent store data.
+	if m.cfg.Store != nil {
+		summaries, err := m.cfg.Store.Summarize(1 * time.Minute)
+		if err == nil {
+			for _, s := range summaries {
+				rttMs := float64(s.AvgRTTus) / 1000.0
+				lossPct := s.LossPct
+				hasSuccess := s.Count > 0 && lossPct < 100
+				q := ComputeQuality(rttMs, lossPct, hasSuccess, DefaultThresholds)
+				metrics.LinkQualityLevel.WithLabelValues(s.PeerIP).Set(float64(q))
+				metrics.ProbeLossRatio.WithLabelValues(s.PeerIP).Set(lossPct / 100.0)
+			}
+		}
+	}
 
 	snap := Snapshot{
 		Time:  now,
@@ -193,6 +215,11 @@ func probePeer(ctx context.Context, peer peersource.Peer) (rttUs int64, success 
 	}
 
 	return time.Since(start).Microseconds(), true
+}
+
+// Latest returns the most recent snapshot.
+func (m *Monitor) Latest() Snapshot {
+	return m.latest
 }
 
 // filterPeers returns only those peers whose VPNIP is in the ips set.

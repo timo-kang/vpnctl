@@ -49,4 +49,14 @@ var (
 		Name: "vpnctl_health_failures",
 		Help: "Current consecutive health check failures",
 	})
+
+	LinkQualityLevel = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "vpnctl_link_quality",
+		Help: "Link quality level (3=good, 2=degraded, 1=poor, 0=offline)",
+	}, []string{"peer"})
+
+	ProbeLossRatio = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "vpnctl_probe_loss_ratio",
+		Help: "Recent probe loss ratio (0.0 to 1.0)",
+	}, []string{"peer"})
 )
