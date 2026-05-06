@@ -1,0 +1,11 @@
+# Test controller config — mTLS enabled, no WireGuard
+controller:
+  listen: "0.0.0.0:8443"
+  data_dir: "/var/lib/vpnctl"
+  vpn_cidr: "10.7.0.0/24"
+  wg_apply: false
+  probe_port: 0
+  pki:
+    ca_expiry: "87600h"
+    server_expiry: "8760h"
+    client_expiry: "8760h"

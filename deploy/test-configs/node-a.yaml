@@ -1,0 +1,6 @@
+# Test node-a config — joins controller via bootstrap token
+node:
+  name: "node-a"
+  controller: "controller:8443"
+  pki_dir: "/etc/vpnctl/pki"
+  wg_public_key: "test-pubkey-node-a"
