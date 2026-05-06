@@ -295,6 +295,24 @@ Available metrics:
 - `vpnctl_probe_rtt_seconds{peer}` — last probe RTT
 - `vpnctl_probe_success{peer}` — last probe result (1/0)
 - `vpnctl_probe_total{peer,result}` — probe attempt counter
+- `vpnctl_link_quality{peer}` — link quality level (3=good, 2=degraded, 1=poor, 0=offline)
+- `vpnctl_probe_loss_ratio{peer}` — recent probe loss ratio (0.0-1.0)
+
+### Network Quality API
+
+When running monitor with `--metrics-port`, a JSON endpoint is available:
+
+```bash
+$ curl http://localhost:9090/network/quality
+[
+  {"peer":"10.7.0.2","quality":"good","rtt_ms":8.2,"loss_pct":0},
+  {"peer":"10.7.0.3","quality":"degraded","rtt_ms":120,"loss_pct":5.5}
+]
+```
+
+Quality levels: `good` (RTT<50ms, loss<2%), `degraded` (RTT<200ms, loss<10%), `poor`, `offline`.
+
+Robot applications can poll this endpoint to adapt video quality, message priority, or autonomy level based on current network conditions.
 
 ## License
 
