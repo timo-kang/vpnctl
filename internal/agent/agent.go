@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,13 +19,14 @@ import (
 	"vpnctl/internal/direct"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
+	"vpnctl/internal/pki"
 	"vpnctl/internal/stunutil"
 	"vpnctl/internal/wireguard"
 )
 
 // Run starts the long-running node agent loop.
 func Run(ctx context.Context, cfg config.NodeConfig) error {
-	client := api.NewClient(normalizeBaseURL(cfg.Controller))
+	client := newClient(cfg)
 
 	nodeID, vpnIP, err := register(ctx, client, cfg)
 	if err != nil {
@@ -280,6 +283,35 @@ func normalizeBaseURL(addr string) string {
 		return addr
 	}
 	return "http://" + addr
+}
+
+func newClient(cfg config.NodeConfig) *api.Client {
+	baseURL := normalizeBaseURL(cfg.Controller)
+
+	if cfg.PKIDir != "" {
+		caCert := filepath.Join(cfg.PKIDir, "ca.crt")
+		clientCert := filepath.Join(cfg.PKIDir, "client.crt")
+		clientKey := filepath.Join(cfg.PKIDir, "client.key")
+
+		if fileExists(caCert) && fileExists(clientCert) && fileExists(clientKey) {
+			tlsCfg, err := pki.ClientTLSConfig(caCert, clientCert, clientKey)
+			if err != nil {
+				slog.Warn("mTLS config failed, falling back to plain HTTP", "err", err)
+				return api.NewClient(baseURL)
+			}
+			if !strings.HasPrefix(baseURL, "https://") {
+				baseURL = strings.Replace(baseURL, "http://", "https://", 1)
+			}
+			return api.NewTLSClient(baseURL, tlsCfg)
+		}
+	}
+
+	return api.NewClient(baseURL)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func fillServerConfig(ctx context.Context, client *api.Client, cfg *config.NodeConfig) error {
