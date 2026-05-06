@@ -20,6 +20,9 @@ import (
 	"time"
 
 	"crypto/tls"
+	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"vpnctl/internal/addrutil"
 	"vpnctl/internal/agent"
@@ -1983,6 +1986,7 @@ func handleMonitor(args []string) {
 	dataPath := fs.String("data", "", "SQLite store path (default: ~/.vpnctl/monitor.db)")
 	retention := fs.Duration("retention", 7*24*time.Hour, "data retention period")
 	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
+	metricsPort := fs.Int("metrics-port", 0, "Prometheus metrics port (0 = disabled)")
 	_ = fs.Parse(args)
 
 	if *iface == "" {
@@ -2007,6 +2011,18 @@ func handleMonitor(args []string) {
 
 	if removed, err := store.Cleanup(*retention); err == nil && removed > 0 {
 		fmt.Fprintf(os.Stderr, "cleaned up %d old probe records\n", removed)
+	}
+
+	if *metricsPort > 0 {
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.Handler())
+			addr := fmt.Sprintf(":%d", *metricsPort)
+			slog.Info("metrics server listening", "addr", addr)
+			if err := http.ListenAndServe(addr, mux); err != nil {
+				slog.Error("metrics server failed", "err", err)
+			}
+		}()
 	}
 
 	var peerFilter []string
