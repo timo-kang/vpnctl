@@ -163,6 +163,8 @@ func handleController(args []string) {
 		controllerStatus(args[1:])
 	case "token":
 		controllerToken(args[1:])
+	case "remove-node":
+		controllerRemoveNode(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown controller subcommand %q\n", args[0])
 		os.Exit(2)
@@ -313,6 +315,55 @@ func controllerToken(args []string) {
 		fmt.Fprintf(os.Stderr, "unknown token subcommand %q\n", sub)
 		os.Exit(2)
 	}
+}
+
+func controllerRemoveNode(args []string) {
+	fs := flag.NewFlagSet("controller remove-node", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	name := fs.String("name", "", "node name to remove")
+	_ = fs.Parse(args)
+
+	if *name == "" {
+		fmt.Fprintln(os.Stderr, "error: --name is required")
+		os.Exit(2)
+	}
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fatal(err)
+	}
+	if cfg.Controller == nil || cfg.Controller.DataDir == "" {
+		fatal(fmt.Errorf("controller.data_dir required"))
+	}
+	config.ApplyDefaults(&cfg)
+
+	regPath := filepath.Join(cfg.Controller.DataDir, "registry.yaml")
+	reg, err := store.LoadRegistry(regPath)
+	if err != nil {
+		fatal(err)
+	}
+
+	found := false
+	filtered := make([]store.NodeInfo, 0, len(reg.Nodes))
+	for _, n := range reg.Nodes {
+		if n.Name == *name {
+			found = true
+			continue
+		}
+		filtered = append(filtered, n)
+	}
+
+	if !found {
+		fmt.Fprintf(os.Stderr, "node %q not found\n", *name)
+		os.Exit(1)
+	}
+
+	reg.Nodes = filtered
+	if err := store.SaveRegistry(regPath, reg); err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("removed node %q\n", *name)
 }
 
 func handleNode(args []string) {
