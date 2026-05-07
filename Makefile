@@ -6,7 +6,7 @@ LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime
 .PHONY: build test clean docker
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o vpnctl ./cmd/vpnctl
+	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o vpnctl ./cmd/vpnctl
 
 test:
 	go test ./...
