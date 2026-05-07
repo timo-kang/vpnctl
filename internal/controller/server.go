@@ -24,6 +24,7 @@ import (
 	"vpnctl/internal/direct"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/pki"
+	"vpnctl/internal/statuspage"
 	"vpnctl/internal/store"
 	"vpnctl/internal/wireguard"
 )
@@ -180,6 +181,8 @@ func (s *Server) ListenAndServe() error {
 	mux.HandleFunc("/fleet/history", s.requireClientCert(s.handleFleetHistory))
 	// Prometheus metrics endpoint — no client cert required so Prometheus can scrape without mTLS.
 	mux.Handle("/prom/metrics", promhttp.Handler())
+	// Status page — simple HTML dashboard, no auth required.
+	mux.HandleFunc("/status", statuspage.Handler(s.statusPageData))
 
 	server := &http.Server{
 		Addr:              s.cfg.Listen,
@@ -870,4 +873,45 @@ func addIPv4(base netip.Addr, offset uint32) netip.Addr {
 	val := uint32(v[0])<<24 | uint32(v[1])<<16 | uint32(v[2])<<8 | uint32(v[3])
 	val += offset
 	return netip.AddrFrom4([4]byte{byte(val >> 24), byte(val >> 16), byte(val >> 8), byte(val)})
+}
+
+func (s *Server) statusPageData() statuspage.Data {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data := statuspage.Data{Title: "vpnctl"}
+	for _, n := range s.reg.Nodes {
+		online := time.Since(n.LastSeenAt) < 60*time.Second
+		quality := "offline"
+		if online {
+			quality = "good"
+		}
+		lastSeen := "never"
+		if !n.LastSeenAt.IsZero() {
+			d := time.Since(n.LastSeenAt)
+			switch {
+			case d < time.Minute:
+				lastSeen = fmt.Sprintf("%ds ago", int(d.Seconds()))
+			case d < time.Hour:
+				lastSeen = fmt.Sprintf("%dm ago", int(d.Minutes()))
+			default:
+				lastSeen = fmt.Sprintf("%dh ago", int(d.Hours()))
+			}
+		}
+		data.Nodes = append(data.Nodes, statuspage.NodeStatus{
+			Name:    n.Name,
+			VPNIP:   n.VPNIP,
+			NATType: n.NATType,
+			LastSeen: lastSeen,
+			Online:  online,
+			Quality: quality,
+			RTTMs:   "-",
+			LossPct: "-",
+		})
+		if online {
+			data.OnlineCount++
+		}
+	}
+	data.TotalCount = len(s.reg.Nodes)
+	return data
 }
