@@ -321,6 +321,26 @@ Quality levels: `good` (RTT<50ms, loss<2%), `degraded` (RTT<200ms, loss<10%), `p
 
 Robot applications can poll this endpoint to adapt video quality, message priority, or autonomy level based on current network conditions.
 
+## Status Page
+
+The controller serves a built-in HTML status page at `/status` (no authentication required):
+
+```
+http://controller:8443/status
+```
+
+Shows all registered nodes with online/offline status, quality level, and last seen time. Auto-refreshes every 5 seconds.
+
+## Grafana Dashboard
+
+Import the pre-built dashboard for Prometheus + Grafana:
+
+```
+Grafana → Dashboards → Import → deploy/grafana/vpnctl-dashboard.json
+```
+
+Panels: nodes online/offline, RTT time series, loss ratio, link quality table/timeline, probe rates.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
