@@ -607,6 +607,11 @@ func nodeServe(args []string) {
 	}
 
 	for {
+		// Bail out promptly on SIGINT/SIGTERM before doing any work in this iteration.
+		if ctx.Err() != nil {
+			return
+		}
+
 		// Refresh config each loop so operator edits (or write-back vpn_ip) are picked up.
 		cfg, err = loadConfig(*configPath)
 		if err != nil {
@@ -617,7 +622,10 @@ func nodeServe(args []string) {
 		}
 		config.ApplyDefaults(&cfg)
 
-		if err := syncConfigOnce(*configPath, &cfg); err != nil {
+		if err := syncConfigOnce(ctx, *configPath, &cfg); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
 			fmt.Fprintf(os.Stderr, "sync-config failed: %v\n", err)
 			goto retry
 		}
@@ -655,7 +663,7 @@ func nodeServe(args []string) {
 	}
 }
 
-func syncConfigOnce(configPath string, cfg *config.Config) error {
+func syncConfigOnce(ctx context.Context, configPath string, cfg *config.Config) error {
 	if cfg == nil || cfg.Node == nil {
 		return errors.New("node config required")
 	}
@@ -668,7 +676,6 @@ func syncConfigOnce(configPath string, cfg *config.Config) error {
 	}
 
 	client := newAPIClient(cfg.Node)
-	ctx := context.Background()
 
 	updated := false
 	if cfg.Node.WGPublicKey != "" {
