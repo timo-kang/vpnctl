@@ -103,7 +103,15 @@ controller:
     ca_expiry: "87600h"      # 10 years
     server_expiry: "8760h"   # 1 year
     client_expiry: "8760h"   # 1 year
+    server_sans:             # SANs for the server cert (required if listen is 0.0.0.0)
+      - "controller.example.com"
+      - "10.10.10.1"
+      - "1.2.3.4"
 ```
+
+**Note**: When `listen` is `0.0.0.0` (all interfaces), you **must** set `server_sans` to the IPs/hostnames clients will use to connect. If `server_sans` is omitted, the server cert defaults to `127.0.0.1` and `localhost` only, which works for local testing but fails for remote nodes.
+
+If you change `server_sans` later, the server certificate is regenerated automatically on next controller start. The CA stays the same, so existing client certs remain valid.
 
 2. Start the controller — it generates CA, server cert, and bootstrap token:
 

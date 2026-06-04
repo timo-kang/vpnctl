@@ -106,6 +106,29 @@ func LoadCA(keyPath, certPath string) (*x509.Certificate, *ecdsa.PrivateKey, err
 	return cert, key, nil
 }
 
+// LoadCert reads and parses a certificate from a PEM file.
+func LoadCert(certPath string) (*x509.Certificate, error) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, &pemError{path: certPath}
+	}
+	return x509.ParseCertificate(block.Bytes)
+}
+
+// CertSANs returns the IP and DNS SANs from a certificate as a single sorted slice.
+func CertSANs(cert *x509.Certificate) []string {
+	var sans []string
+	for _, ip := range cert.IPAddresses {
+		sans = append(sans, ip.String())
+	}
+	sans = append(sans, cert.DNSNames...)
+	return sans
+}
+
 // pemError is returned when PEM decoding fails.
 type pemError struct {
 	path string

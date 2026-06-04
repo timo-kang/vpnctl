@@ -114,17 +114,36 @@ func (s *Server) InitPKI() (string, error) {
 	serverKeyPath := filepath.Join(pkiDir, "server.key")
 	serverCertPath := filepath.Join(pkiDir, "server.crt")
 
-	// Generate server cert if it doesn't exist.
+	// Determine desired SANs: explicit config takes precedence; otherwise derive from listen addr.
+	desiredSANs := s.cfg.PKI.ServerSANs
+	if len(desiredSANs) == 0 {
+		desiredSANs = extractSANs(s.cfg.Listen)
+	}
+
+	// Generate server cert if missing, or regenerate if existing SANs don't match desired.
+	regenerate := false
 	if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
+		regenerate = true
+	} else {
+		existing, err := pki.LoadCert(serverCertPath)
+		if err != nil {
+			slog.Warn("could not load existing server cert, regenerating", "err", err)
+			regenerate = true
+		} else if !sansEqual(pki.CertSANs(existing), desiredSANs) {
+			slog.Info("server cert SANs changed, regenerating", "existing", pki.CertSANs(existing), "desired", desiredSANs)
+			regenerate = true
+		}
+	}
+
+	if regenerate {
 		serverExpiry, err := time.ParseDuration(s.cfg.PKI.ServerExpiry)
 		if err != nil {
 			return "", fmt.Errorf("parse server_expiry: %w", err)
 		}
-		sans := extractSANs(s.cfg.Listen)
-		if err := pki.GenerateServerCert(caCertPath, caKeyPath, serverKeyPath, serverCertPath, sans, serverExpiry); err != nil {
+		if err := pki.GenerateServerCert(caCertPath, caKeyPath, serverKeyPath, serverCertPath, desiredSANs, serverExpiry); err != nil {
 			return "", fmt.Errorf("generate server cert: %w", err)
 		}
-		slog.Info("generated server certificate", "path", serverCertPath, "sans", sans)
+		slog.Info("generated server certificate", "path", serverCertPath, "sans", desiredSANs)
 	}
 
 	// Open token store.
@@ -143,6 +162,23 @@ func (s *Server) InitPKI() (string, error) {
 	}
 
 	return bootstrapToken, nil
+}
+
+// sansEqual returns true if both slices contain the same set of SANs (order-independent).
+func sansEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		set[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := set[s]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // extractSANs parses the host part of a listen address and returns suitable

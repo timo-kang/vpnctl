@@ -69,10 +69,11 @@ type ControllerConfig struct {
 
 // PKIConfig controls certificate generation for mTLS.
 type PKIConfig struct {
-	CAExpiry     string `yaml:"ca_expiry"`      // e.g. "87600h" (default 10 years)
-	ServerExpiry string `yaml:"server_expiry"`   // e.g. "8760h" (default 1 year)
-	ClientExpiry string `yaml:"client_expiry"`   // e.g. "8760h" (default 1 year)
-	KeyAlgorithm string `yaml:"key_algorithm"`   // e.g. "ecdsa-p256" (default)
+	CAExpiry     string   `yaml:"ca_expiry"`      // e.g. "87600h" (default 10 years)
+	ServerExpiry string   `yaml:"server_expiry"`   // e.g. "8760h" (default 1 year)
+	ClientExpiry string   `yaml:"client_expiry"`   // e.g. "8760h" (default 1 year)
+	KeyAlgorithm string   `yaml:"key_algorithm"`   // e.g. "ecdsa-p256" (default)
+	ServerSANs   []string `yaml:"server_sans"`     // SANs for the server cert (IPs and hostnames clients connect to)
 }
 
 // NodeConfig is used by the agent process running on a device.
