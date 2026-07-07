@@ -116,6 +116,99 @@ func TestAR2RTT_NegativeForecastClampedToZero(t *testing.T) {
 	}
 }
 
+func TestAR2RTT_UpdateRejectsNaNInf(t *testing.T) {
+	p := NewAR2RTT(1*time.Second, 300)
+
+	// Seed with enough clean samples for the buffer to be near-refit.
+	for i := 0; i < 30; i++ {
+		p.Update(40, 40, 45)
+	}
+	p.mu.Lock()
+	a0, b0, c0 := p.a, p.b, p.c
+	p.mu.Unlock()
+
+	// Poison attempts.
+	p.Update(math.NaN(), 40, 45)
+	p.Update(40, math.Inf(1), 45)
+	p.Update(40, 40, math.Inf(-1))
+
+	p.mu.Lock()
+	a1, b1, c1 := p.a, p.b, p.c
+	p.mu.Unlock()
+
+	// Coefficients unchanged (no refit triggered by rejected samples).
+	if a0 != a1 || b0 != b1 || c0 != c1 {
+		t.Errorf("poison samples affected coefficients: (%v,%v,%v) → (%v,%v,%v)",
+			a0, b0, c0, a1, b1, c1)
+	}
+
+	// Predictor still works on a clean input after poison.
+	now := time.Now()
+	obs := Observation{
+		Now: now,
+		RTTHistory: []Sample{
+			{At: now.Add(-100 * time.Millisecond), Value: 40},
+			{At: now, Value: 45},
+		},
+		BandwidthLast: Sample{At: now, Value: 5},
+	}
+	f, err := p.Predict(context.Background(), obs)
+	if err != nil {
+		t.Fatalf("post-poison predict: %v", err)
+	}
+	if math.IsNaN(f.Q[SignalRTT]) || math.IsInf(f.Q[SignalRTT], 0) {
+		t.Errorf("post-poison forecast is not finite: %v", f.Q[SignalRTT])
+	}
+}
+
+func TestAR2RTT_RefitIntervalWithNonMultipleWindow(t *testing.T) {
+	// windowSize = 25 is not a multiple of 10; verify that refit
+	// still triggers on exact 10-sample cadence via the dedicated
+	// counter (the previous bufIndex%10 gate would fire irregularly
+	// around the wrap-around).
+	p := NewAR2RTT(1*time.Second, 25)
+
+	// Use well-conditioned data (x1 ≠ x2) so the OLS refit is not
+	// singular; the design is to verify the counter, not the fit
+	// quality.
+	seed := seededDeterministicRNG()
+	feedOne := func() {
+		x1 := 30 + 20*seed()
+		x2 := 30 + 20*seed()
+		y := 0.7*x1 + 0.2*x2 + 3
+		p.Update(x1, x2, y)
+	}
+
+	// Fill 19 samples to leave filled()=19 < 20 (no refits possible
+	// yet).
+	for i := 0; i < 19; i++ {
+		feedOne()
+	}
+	p.mu.Lock()
+	if p.updatesSinceRefit != 0 {
+		t.Errorf("counter should stay 0 while filled() < 20; got %d", p.updatesSinceRefit)
+	}
+	p.mu.Unlock()
+
+	// Now feed exactly 10 more samples. Update 20 crosses the
+	// threshold (counter → 1); updates 21–28 take counter to 9;
+	// update 29 takes counter to 10, triggers refit, resets to 0.
+	for i := 0; i < 10; i++ {
+		feedOne()
+	}
+	p.mu.Lock()
+	sinceRefit := p.updatesSinceRefit
+	a, b, c := p.a, p.b, p.c
+	p.mu.Unlock()
+	if sinceRefit != 0 {
+		t.Errorf("updatesSinceRefit = %d after refit-triggering 10th post-threshold sample, want 0", sinceRefit)
+	}
+	// Refit changed coefficients away from the cold-start (1, 0, 0).
+	if a == 1 && b == 0 && c == 0 {
+		t.Errorf("coefficients unchanged after refit: (%v, %v, %v)", a, b, c)
+	}
+}
+
 // seededDeterministicRNG returns a deterministic pseudo-random generator
 // producing values in [0, 1). Uses a linear congruential generator seeded
 // with a fixed value so test runs are reproducible without depending on

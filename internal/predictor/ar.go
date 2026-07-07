@@ -45,6 +45,12 @@ type AR2RTT struct {
 	// standard deviation, used for the CI in Forecast. Updated on
 	// each Update call.
 	residualStd float64
+
+	// updatesSinceRefit tracks the number of new samples ingested
+	// since the last OLS parameter refit. Using a dedicated counter
+	// keeps the refit interval at exactly 10 samples regardless of
+	// whether windowSize is a multiple of 10.
+	updatesSinceRefit int
 }
 
 type arSample struct {
@@ -90,7 +96,17 @@ func (p *AR2RTT) Ready() bool { return true }
 // The predictor refits its coefficients periodically as new samples
 // arrive. Callers typically invoke Update after each control tick using
 // the historical pairing (t - horizon, t).
+//
+// Samples containing NaN or Inf are silently discarded. Admitting them
+// would corrupt the OLS sums for windowSize updates until the bad
+// sample rotates out of the ring buffer, and in the meantime every
+// refit would produce NaN coefficients that freeze the predictor.
 func (p *AR2RTT) Update(x1, x2, y float64) {
+	if math.IsNaN(x1) || math.IsNaN(x2) || math.IsNaN(y) ||
+		math.IsInf(x1, 0) || math.IsInf(x2, 0) || math.IsInf(y, 0) {
+		return
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -102,13 +118,16 @@ func (p *AR2RTT) Update(x1, x2, y float64) {
 	}
 
 	// Refit every 10 new samples once the buffer holds enough.
-	n := p.filled()
-	if n < 20 {
+	// A dedicated counter keeps the interval exact regardless of
+	// windowSize's relationship to 10.
+	if p.filled() < 20 {
 		return
 	}
-	if p.bufIndex%10 != 0 {
+	p.updatesSinceRefit++
+	if p.updatesSinceRefit < 10 {
 		return
 	}
+	p.updatesSinceRefit = 0
 	p.refit()
 }
 

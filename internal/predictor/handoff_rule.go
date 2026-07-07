@@ -71,9 +71,20 @@ type HandoffRule struct {
 
 // NewHandoffRule constructs a HandoffRule with the given horizon and
 // parameters. Pass DefaultHandoffRuleParams for the calibrated defaults.
+//
+// Scale parameters are validated: a zero or negative RSRPScale or
+// RSSIFallbackScale would produce a division by zero in sigmoidTerm.
+// Both fall back to the calibrated defaults when misconfigured, matching
+// the parameter-validation pattern used by NewNATRule.
 func NewHandoffRule(horizon time.Duration, params HandoffRuleParams) *HandoffRule {
 	if horizon <= 0 {
 		horizon = 2 * time.Second
+	}
+	if params.RSRPScale <= 0 {
+		params.RSRPScale = DefaultHandoffRuleParams.RSRPScale
+	}
+	if params.RSSIFallbackScale <= 0 {
+		params.RSSIFallbackScale = DefaultHandoffRuleParams.RSSIFallbackScale
 	}
 	return &HandoffRule{
 		horizon:  horizon,

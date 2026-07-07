@@ -91,37 +91,45 @@ func (n *NATRule) Ready() bool { return true }
 // Predict computes NAT stability and delegates the remaining signals
 // to Persistence. If a handoff predictor is present, its handoff-
 // probability term is folded into the stability output via
-// HandoffCoupling.
+// HandoffCoupling and its full handoff Forecast is also copied through
+// so a single NATRule call yields both q[3] and q[4] downstream.
+//
+// The composed handoff predictor is invoked at most once per tick,
+// keeping the call cost bounded in the 10 Hz control loop.
 func (n *NATRule) Predict(ctx context.Context, obs Observation) (Forecast, error) {
 	base, err := n.baseline.Predict(ctx, obs)
 	if err != nil {
 		return Forecast{}, err
 	}
 
-	stability, health := n.computeStability(ctx, obs)
+	var hFcst *Forecast
+	if n.handoff != nil {
+		if f, hErr := n.handoff.Predict(ctx, obs); hErr == nil {
+			hFcst = &f
+		}
+	}
+
+	stability, health := n.computeStability(obs, hFcst)
 	base.Q[SignalNATStability] = stability
 	base.QLo[SignalNATStability] = clamp(stability-0.15, 0, 1)
 	base.QHi[SignalNATStability] = clamp(stability+0.15, 0, 1)
 	base.Health[SignalNATStability] = health
 	base.PredictorName = n.Name()
 
-	// If a handoff predictor is composed in, adopt its handoff signal
-	// as well — this lets a single NATRule instance carry both the
-	// handoff and NAT-stability signals for downstream consumers.
-	if n.handoff != nil {
-		hFcst, hErr := n.handoff.Predict(ctx, obs)
-		if hErr == nil {
-			base.Q[SignalHandoffProb] = hFcst.Q[SignalHandoffProb]
-			base.QLo[SignalHandoffProb] = hFcst.QLo[SignalHandoffProb]
-			base.QHi[SignalHandoffProb] = hFcst.QHi[SignalHandoffProb]
-			base.Health[SignalHandoffProb] = hFcst.Health[SignalHandoffProb]
-		}
+	if hFcst != nil {
+		base.Q[SignalHandoffProb] = hFcst.Q[SignalHandoffProb]
+		base.QLo[SignalHandoffProb] = hFcst.QLo[SignalHandoffProb]
+		base.QHi[SignalHandoffProb] = hFcst.QHi[SignalHandoffProb]
+		base.Health[SignalHandoffProb] = hFcst.Health[SignalHandoffProb]
 	}
 	return base, nil
 }
 
 // computeStability returns the point estimate + a health self-report.
-func (n *NATRule) computeStability(ctx context.Context, obs Observation) (float64, float64) {
+// hFcst is the (optional) pre-computed handoff forecast from the
+// composed predictor; passing it in rather than calling handoff.Predict
+// again keeps the tick cost bounded.
+func (n *NATRule) computeStability(obs Observation, hFcst *Forecast) (float64, float64) {
 	// Remap-count term.
 	cutoff := obs.Now.Add(-n.params.Window)
 	count := 0
@@ -134,13 +142,10 @@ func (n *NATRule) computeStability(ctx context.Context, obs Observation) (float6
 
 	// Handoff-coupling term.
 	handoffTerm := 1.0
-	if n.handoff != nil {
-		hFcst, hErr := n.handoff.Predict(ctx, obs)
-		if hErr == nil {
-			hp := hFcst.Q[SignalHandoffProb]
-			handoffTerm = 1.0 - n.params.HandoffCoupling*hp
-			handoffTerm = clamp(handoffTerm, 0, 1)
-		}
+	if hFcst != nil {
+		hp := hFcst.Q[SignalHandoffProb]
+		handoffTerm = 1.0 - n.params.HandoffCoupling*hp
+		handoffTerm = clamp(handoffTerm, 0, 1)
 	}
 
 	// Combined stability is the minimum: whichever term believes the

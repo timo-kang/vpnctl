@@ -5,6 +5,7 @@ package predictor
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 )
@@ -75,6 +76,38 @@ func TestHandoffRule_RSSIFallback(t *testing.T) {
 	}
 	if f.Q[SignalHandoffProb] < 0.7 {
 		t.Errorf("weak RSSI handoff_prob = %v, want >= 0.7", f.Q[SignalHandoffProb])
+	}
+}
+
+func TestHandoffRule_ScaleZeroFallsBackToDefaults(t *testing.T) {
+	// A caller passes zero (or negative) scales — the constructor
+	// must repair them to the calibrated defaults, otherwise
+	// sigmoidTerm divides by zero and produces NaN/Inf.
+	badParams := HandoffRuleParams{
+		RSRPHandoverThreshold: -100,
+		RSRPScale:             0,
+		RSSIFallbackThreshold: -85,
+		RSSIFallbackScale:     -3,
+		HistoryWeight:         0.15,
+	}
+	h := NewHandoffRule(2*time.Second, badParams)
+
+	now := time.Now()
+	obs := Observation{
+		Now:           now,
+		RTTHistory:    []Sample{{At: now, Value: 30}},
+		BandwidthLast: Sample{At: now, Value: 20},
+		Cell: CellInfo{
+			CellID: "0x001",
+			RSRP:   -80,
+		},
+	}
+	f, err := h.Predict(context.Background(), obs)
+	if err != nil {
+		t.Fatalf("predict: %v", err)
+	}
+	if math.IsNaN(f.Q[SignalHandoffProb]) || math.IsInf(f.Q[SignalHandoffProb], 0) {
+		t.Errorf("handoff_prob is not finite with zero scale: %v", f.Q[SignalHandoffProb])
 	}
 }
 
