@@ -194,6 +194,11 @@ func controllerInit(args []string) {
 		fatal(err)
 	}
 
+	ownership, err := controller.AcquireStateLock(cfg.Controller.DataDir)
+	if err != nil {
+		fatal(err)
+	}
+	defer ownership.Close()
 	srv, err := controller.NewServer(*cfg.Controller)
 	if err != nil {
 		fatal(err)
@@ -263,99 +268,108 @@ func controllerStatus(args []string) {
 }
 
 func controllerToken(args []string) {
-	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, "controller token subcommand required (create|list|revoke)\n")
-		os.Exit(2)
-	}
-
-	sub := args[0]
-	fs := flag.NewFlagSet("controller token "+sub, flag.ExitOnError)
-	configPath := fs.String("config", "", "path to YAML config")
-	_ = fs.Parse(args[1:])
-
-	cfg, err := loadConfig(*configPath)
-	if err != nil {
+	if err := runControllerToken(args); err != nil {
 		fatal(err)
-	}
-	if cfg.Controller == nil {
-		fatal(errors.New("controller config required"))
-	}
-	config.ApplyDefaults(&cfg)
-	if cfg.Controller.DataDir == "" {
-		fatal(errors.New("controller.data_dir is required"))
-	}
-
-	tokenPath := filepath.Join(cfg.Controller.DataDir, "pki", "bootstrap-tokens.json")
-	ts, err := pki.OpenTokenStore(tokenPath)
-	if err != nil {
-		fatal(err)
-	}
-
-	switch sub {
-	case "create":
-		token, err := ts.Create()
-		if err != nil {
-			fatal(fmt.Errorf("create bootstrap token: %w", err))
-		}
-		fmt.Fprintln(os.Stdout, token)
-	case "list":
-		tokens, err := ts.List()
-		if err != nil {
-			fatal(fmt.Errorf("list bootstrap tokens: %w", err))
-		}
-		if len(tokens) == 0 {
-			fmt.Fprintln(os.Stdout, "no active tokens")
-			return
-		}
-		for _, t := range tokens {
-			fmt.Fprintln(os.Stdout, t)
-		}
-	case "revoke":
-		remaining := fs.Args()
-		if len(remaining) == 0 {
-			fatal(errors.New("token value is required"))
-		}
-		if err := ts.Revoke(remaining[0]); err != nil {
-			fatal(fmt.Errorf("revoke bootstrap token: %w", err))
-		}
-		fmt.Fprintln(os.Stdout, "token revoked")
-	default:
-		fmt.Fprintf(os.Stderr, "unknown token subcommand %q\n", sub)
-		os.Exit(2)
 	}
 }
 
-func controllerRemoveNode(args []string) {
-	fs := flag.NewFlagSet("controller remove-node", flag.ExitOnError)
-	configPath := fs.String("config", "", "path to YAML config")
-	name := fs.String("name", "", "node name to remove")
-	_ = fs.Parse(args)
-
-	if *name == "" {
-		fmt.Fprintln(os.Stderr, "error: --name is required")
-		os.Exit(2)
+func runControllerToken(args []string) error {
+	if len(args) == 0 {
+		return errors.New("controller token subcommand required (create|list|revoke)")
 	}
-
+	sub := args[0]
+	fs := flag.NewFlagSet("controller token "+sub, flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	ttl := fs.String("ttl", "24h", "token lifetime (0s disables expiry)")
+	singleUse := fs.Bool("single-use", false, "consume on the first admitted enrollment attempt")
+	jsonOutput := fs.Bool("json", false, "list all token records including usage history as JSON")
+	// Go flags stop at the first positional argument; retain the documented revoke
+	// <token> --config form by extracting the token before parsing flags.
+	var token string
+	rest := args[1:]
+	if sub == "revoke" && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		token, rest = rest[0], rest[1:]
+	}
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	if sub == "revoke" && token == "" && len(fs.Args()) == 1 {
+		token = fs.Args()[0]
+	} else if len(fs.Args()) != 0 {
+		return errors.New("unexpected positional arguments")
+	}
+	if sub != "create" && sub != "list" && sub != "revoke" {
+		return fmt.Errorf("unknown token subcommand %q", sub)
+	}
+	if sub == "revoke" && token == "" {
+		return errors.New("token value is required")
+	}
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		fatal(err)
+		return err
 	}
-	if cfg.Controller == nil || cfg.Controller.DataDir == "" {
-		fatal(fmt.Errorf("controller.data_dir required"))
+	if cfg.Controller == nil {
+		return errors.New("controller config required")
 	}
-	config.ApplyDefaults(&cfg)
-
-	regPath := filepath.Join(cfg.Controller.DataDir, "registry.yaml")
-	found, err := store.RemoveNode(regPath, *name)
+	response, err := api.Admin(context.Background(), cfg.Controller.DataDir, api.AdminRequest{
+		Operation: "token." + sub, Token: token, TTL: *ttl, SingleUse: *singleUse,
+	})
 	if err != nil {
+		return err
+	}
+	switch sub {
+	case "create":
+		fmt.Fprintln(os.Stdout, response.Token)
+	case "revoke":
+		fmt.Fprintln(os.Stdout, "token revoked")
+	case "list":
+		if *jsonOutput {
+			return json.NewEncoder(os.Stdout).Encode(response.Tokens)
+		}
+		count := 0
+		now := time.Now()
+		for _, record := range response.Tokens {
+			if !record.RevokedAt.IsZero() || (!record.ExpiresAt.IsZero() && !now.Before(record.ExpiresAt)) || (record.SingleUse && record.UseCount > 0) {
+				continue
+			}
+			fmt.Fprintln(os.Stdout, record.Token)
+			count++
+		}
+		if count == 0 {
+			fmt.Fprintln(os.Stdout, "no active tokens")
+		}
+	}
+	return nil
+}
+
+func controllerRemoveNode(args []string) {
+	if err := runControllerRemoveNode(args); err != nil {
 		fatal(err)
 	}
-	if !found {
-		fmt.Fprintf(os.Stderr, "node %q not found\n", *name)
-		os.Exit(1)
-	}
+}
 
-	fmt.Printf("removed node %q\n", *name)
+func runControllerRemoveNode(args []string) error {
+	fs := flag.NewFlagSet("controller remove-node", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to YAML config")
+	name := fs.String("name", "", "node identity to remove permanently")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" || len(fs.Args()) != 0 {
+		return errors.New("--name is required and positional arguments are not supported")
+	}
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Controller == nil {
+		return errors.New("controller config required")
+	}
+	if _, err := api.Admin(context.Background(), cfg.Controller.DataDir, api.AdminRequest{Operation: "node.remove", NodeID: *name}); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "removed node %q\n", *name)
+	return nil
 }
 
 func handleNode(args []string) {

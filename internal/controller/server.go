@@ -47,6 +47,8 @@ type Server struct {
 	cfg     config.ControllerConfig
 	regPath string
 	mu      sync.Mutex
+	// stateMu drains admitted requests before removal, including metric writes.
+	stateMu sync.RWMutex
 	reg     *store.Registry
 	ipam    *ipam
 	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
@@ -73,6 +75,11 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 	// Backward/forward compatibility: older registries might not have IDs.
 	// Keep IDs stable so callers can consistently use node_id.
 	changed := false
+	for id := range reg.RemovedNodes {
+		if _, err := pki.NodeIdentityURI(id); err != nil {
+			return nil, fmt.Errorf("invalid removed identity: %w", err)
+		}
+	}
 	for i := range reg.Nodes {
 		if reg.Nodes[i].ID == "" && reg.Nodes[i].Name != "" {
 			reg.Nodes[i].ID = reg.Nodes[i].Name
@@ -81,6 +88,11 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 		if reg.Nodes[i].Name == "" && reg.Nodes[i].ID != "" {
 			reg.Nodes[i].Name = reg.Nodes[i].ID
 			changed = true
+		}
+	}
+	for _, node := range reg.Nodes {
+		if _, removed := reg.RemovedNodes[node.ID]; removed {
+			return nil, fmt.Errorf("node %q is both active and removed", node.ID)
 		}
 	}
 	if err := validateRegistryNodeMetadata(reg); err != nil {
@@ -113,7 +125,7 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 
 // InitPKI initialises the PKI directory, generates the CA and server certificate
 // if they don't exist, opens the bootstrap token store, and creates an initial
-// token when the store is empty. The returned string is the bootstrap token if
+// token only when the token file is absent. The returned string is the token if
 // one was freshly created (empty otherwise).
 func (s *Server) InitPKI() (string, error) {
 	if s.cfg.PKI == nil {
@@ -178,24 +190,24 @@ func (s *Server) InitPKI() (string, error) {
 
 	// Open token store.
 	tokenPath := filepath.Join(pkiDir, "bootstrap-tokens.json")
+	_, tokenFileErr := os.Stat(tokenPath)
+	if tokenFileErr != nil && !os.IsNotExist(tokenFileErr) {
+		return "", tokenFileErr
+	}
 	ts, err := pki.OpenTokenStore(tokenPath)
 	if err != nil {
 		return "", fmt.Errorf("open token store: %w", err)
 	}
 	s.tokenStore = ts
 
-	// Create initial bootstrap token if store is empty.
+	// Only first-time initialization creates a token; revoked/empty stores stay closed.
 	var bootstrapToken string
-	tokens, err := ts.List()
-	if err != nil {
-		return "", fmt.Errorf("list bootstrap tokens: %w", err)
-	}
-	if len(tokens) == 0 {
-		bootstrapToken, err = ts.Create()
+	if os.IsNotExist(tokenFileErr) {
+		bootstrapToken, err = ts.CreateWithOptions(24*time.Hour, false)
 		if err != nil {
 			return "", fmt.Errorf("persist initial bootstrap token: %w", err)
 		}
-		slog.Info("created initial bootstrap token")
+		slog.Info("created initial bootstrap token", "ttl", "24h")
 	}
 
 	return bootstrapToken, nil
@@ -250,24 +262,15 @@ func (s *Server) ListenAndServe() error {
 		slog.Info("probe responder listening", "addr", addr)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/bootstrap", s.handleBootstrap)
-	mux.HandleFunc("/register", s.requireClientCert(s.handleRegister))
-	mux.HandleFunc("/candidates", s.requireClientCert(s.handleCandidates))
-	mux.HandleFunc("/metrics", s.requireClientCert(s.handleMetrics))
-	mux.HandleFunc("/nat-probe", s.requireClientCert(s.handleNATProbe))
-	mux.HandleFunc("/direct-result", s.requireClientCert(s.handleDirectResult))
-	mux.HandleFunc("/wg-config", s.requireClientCert(s.handleWGConfig))
-	mux.HandleFunc("/fleet/status", s.requireClientCert(s.handleFleetStatus))
-	mux.HandleFunc("/fleet/history", s.requireClientCert(s.handleFleetHistory))
-	// Prometheus metrics endpoint — no client cert required so Prometheus can scrape without mTLS.
-	mux.Handle("/prom/metrics", promhttp.Handler())
-	// Status page — simple HTML dashboard, no auth required.
-	mux.HandleFunc("/status", statuspage.Handler(s.statusPageData))
+	stopAdmin, err := s.startAdmin()
+	if err != nil {
+		return fmt.Errorf("admin IPC: %w", err)
+	}
+	defer stopAdmin()
 
 	server := &http.Server{
 		Addr:              s.cfg.Listen,
-		Handler:           mux,
+		Handler:           s.httpHandler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -295,6 +298,26 @@ func (s *Server) ListenAndServe() error {
 
 	slog.Info("controller listening", "addr", s.cfg.Listen)
 	return server.ListenAndServe()
+}
+
+// httpHandler is shared by the production listener and network integration tests.
+func (s *Server) httpHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/bootstrap", s.handleBootstrap)
+	mux.HandleFunc("/register", s.requireClientCert(s.handleRegister))
+	mux.HandleFunc("/candidates", s.requireClientCert(s.handleCandidates))
+	mux.HandleFunc("/metrics", s.requireClientCert(s.handleMetrics))
+	mux.HandleFunc("/nat-probe", s.requireClientCert(s.handleNATProbe))
+	mux.HandleFunc("/direct-result", s.requireClientCert(s.handleDirectResult))
+	mux.HandleFunc("/wg-config", s.requireClientCert(s.handleWGConfig))
+	mux.HandleFunc("/fleet/status", s.requireClientCert(s.handleFleetStatus))
+	mux.HandleFunc("/fleet/history", s.requireClientCert(s.handleFleetHistory))
+	// Prometheus metrics endpoint — no client cert required so Prometheus can scrape without mTLS.
+	mux.Handle("/prom/metrics", promhttp.Handler())
+	// Status page — simple HTML dashboard, no auth required.
+	mux.HandleFunc("/status", statuspage.Handler(s.statusPageData))
+
+	return mux
 }
 
 // StartProbeResponder starts a UDP probe responder for health checks.
@@ -328,6 +351,8 @@ type authenticatedNode struct {
 // authorizeNode to bind the authenticated identity to the requested resource.
 func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		s.stateMu.RLock()
+		defer s.stateMu.RUnlock()
 		if !s.mtlsEnabled() {
 			next(w, r)
 			return
@@ -346,6 +371,10 @@ func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 				"path", r.URL.Path,
 				"err", err)
 			writeJSONError(w, http.StatusUnauthorized, "client certificate has no valid node identity")
+			return
+		}
+		if !s.nodeRegistered(identity) {
+			writeJSONError(w, http.StatusForbidden, "authenticated node is not registered")
 			return
 		}
 		if legacy {
@@ -376,6 +405,13 @@ func requestNodeIdentity(r *http.Request) (authenticatedNode, bool) {
 
 func (s *Server) authorizeNode(w http.ResponseWriter, r *http.Request, claimedNodeID string) bool {
 	if !s.mtlsEnabled() {
+		s.mu.Lock()
+		_, removed := s.reg.RemovedNodes[claimedNodeID]
+		s.mu.Unlock()
+		if removed {
+			writeJSONError(w, http.StatusForbidden, errNodeRemoved.Error())
+			return false
+		}
 		return true
 	}
 	identity, ok := requestNodeIdentity(r)
@@ -442,6 +478,8 @@ func certificateFingerprint(cert *x509.Certificate) string {
 
 // handleBootstrap handles POST /bootstrap for node enrollment via token + CSR.
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -503,7 +541,16 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Persist the registration before returning credentials to the node.
-	result, err := s.registerNode(nodeRegistration{Name: req.Name}, s.cfg.WGApply)
+	var result nodeRegistrationResult
+	err = s.tokenStore.Use(req.Token, req.Name, func() error {
+		var registrationErr error
+		result, registrationErr = s.registerNode(nodeRegistration{Name: req.Name}, s.cfg.WGApply)
+		return registrationErr
+	})
+	if errors.Is(err, pki.ErrInvalidToken) {
+		writeJSONError(w, http.StatusUnauthorized, "invalid bootstrap token")
+		return
+	}
 	if err != nil {
 		writeRegistrationError(w, err)
 		return
@@ -518,6 +565,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
+	errNodeRemoved            = errors.New("node identity was removed; enroll with a new identity")
 	errVPNIPAllocation        = errors.New("vpn IP allocation failed")
 	errRegistrationValidation = errors.New("node registration validation failed")
 )
@@ -629,7 +677,9 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	previous := cloneRegistry(s.reg)
+	if _, removed := s.reg.RemovedNodes[input.Name]; removed {
+		return nodeRegistrationResult{}, errNodeRemoved
+	}
 	next := cloneRegistry(s.reg)
 	existingIndex := -1
 	for i := range next.Nodes {
@@ -684,6 +734,21 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 		})
 	}
 
+	if err := s.commitRegistryLocked(next, autoApply); err != nil {
+		return nodeRegistrationResult{}, err
+	}
+
+	return nodeRegistrationResult{
+		NodeID: nodeID,
+		VPNIP:  assignedVPNIP,
+		Peers:  s.peersLocked(nodeID),
+	}, nil
+}
+
+// commitRegistryLocked applies the replacement before persistence and restores
+// the previous dataplane on any failure. Caller owns s.mu.
+func (s *Server) commitRegistryLocked(next *store.Registry, autoApply bool) error {
+	previous := s.reg
 	if autoApply {
 		if err := s.applyWG(peersForWGRegistry(next)); err != nil {
 			applyErr := fmt.Errorf("apply WireGuard registry: %w", err)
@@ -691,28 +756,24 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 			if rollbackErr != nil {
 				rollbackErr = fmt.Errorf("rollback WireGuard registry: %w", rollbackErr)
 			}
-			return nodeRegistrationResult{}, errors.Join(applyErr, rollbackErr)
+			return errors.Join(applyErr, rollbackErr)
 		}
 	}
 
 	if err := s.persistRegistry(next); err != nil {
 		saveErr := fmt.Errorf("save registry: %w", err)
 		if !autoApply {
-			return nodeRegistrationResult{}, saveErr
+			return saveErr
 		}
 		rollbackErr := s.applyWG(peersForWGRegistry(previous))
 		if rollbackErr != nil {
 			rollbackErr = fmt.Errorf("rollback WireGuard registry after save failure: %w", rollbackErr)
 		}
-		return nodeRegistrationResult{}, errors.Join(saveErr, rollbackErr)
+		return errors.Join(saveErr, rollbackErr)
 	}
 
 	s.reg = next
-	return nodeRegistrationResult{
-		NodeID: nodeID,
-		VPNIP:  assignedVPNIP,
-		Peers:  s.peersLocked(nodeID),
-	}, nil
+	return nil
 }
 
 func cloneRegistry(reg *store.Registry) *store.Registry {
@@ -721,6 +782,10 @@ func cloneRegistry(reg *store.Registry) *store.Registry {
 	}
 	clone := *reg
 	clone.Nodes = append([]store.NodeInfo(nil), reg.Nodes...)
+	clone.RemovedNodes = make(map[string]time.Time, len(reg.RemovedNodes))
+	for id, removedAt := range reg.RemovedNodes {
+		clone.RemovedNodes[id] = removedAt
+	}
 	return &clone
 }
 
@@ -732,6 +797,10 @@ func (s *Server) persistRegistry(reg *store.Registry) error {
 }
 
 func writeRegistrationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errNodeRemoved) {
+		writeJSONError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	if errors.Is(err, errVPNIPAllocation) || errors.Is(err, errRegistrationValidation) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -744,7 +813,10 @@ func writeRegistrationError(w http.ResponseWriter, err error) {
 func (s *Server) updateMetrics() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.updateMetricsLocked()
+}
 
+func (s *Server) updateMetricsLocked() {
 	metrics.NodesRegistered.Set(float64(len(s.reg.Nodes)))
 
 	online := 0

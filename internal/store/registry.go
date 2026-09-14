@@ -13,8 +13,9 @@ import (
 
 // Registry persists registered nodes and their metadata.
 type Registry struct {
-	UpdatedAt time.Time  `yaml:"updated_at"`
-	Nodes     []NodeInfo `yaml:"nodes"`
+	UpdatedAt    time.Time            `yaml:"updated_at"`
+	Nodes        []NodeInfo           `yaml:"nodes"`
+	RemovedNodes map[string]time.Time `yaml:"removed_nodes,omitempty"`
 }
 
 // NodeInfo is a minimal snapshot for controller persistence.

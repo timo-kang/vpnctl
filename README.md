@@ -91,8 +91,9 @@ vpnctl doctor --config configs/node.yaml
 The controller keeps one stable `/32` VPN lease per node identity. The current
 registration API uses `name` as that identity. Re-registering, restarting, or
 reissuing a certificate with the same name preserves its lease. A renamed node
-is a new identity; remove the old node to release its lease. Changing an existing
-identity's lease also requires removing that node first. The controller rejects
+is a new identity; remove the old node to release its lease. Removal permanently
+blocks the old identity, including bootstrap and existing certificates. To replace
+a lease, remove the old identity and enroll a new name. The controller rejects
 duplicate, malformed, out-of-CIDR, network, and broadcast addresses.
 
 `controller.wg_address` is always reserved. Additional individual addresses or
@@ -181,17 +182,81 @@ preserves the registered VPN IP. Restart the node process after re-enrollment.
 If `node.name` must change, enroll it as a new identity instead of reusing the
 old certificate.
 
+### Controller administration
+
+Management commands contact the running controller over a local Unix socket at
+`<controller.data_dir>/run/admin.sock`. Run them on the controller host with the
+same data directory and OS user (or root). Prefer an absolute `data_dir`; relative
+paths must resolve from the same working directory. The socket is mode `0600`; its real,
+controller-owned `run` directory must be mode `0700`. Linux peer credentials
+identify the caller. The TCP API does not expose this management endpoint.
+
+The controller locks its data directory before loading state or initializing PKI.
+A second controller using the same directory fails before changing state. A
+restart recovers a leftover socket after acquiring the lock. Keep `data_dir` on a
+local filesystem that supports Unix sockets, `flock`, and atomic rename.
+
+Commands fail when the controller is stopped; they never fall back to editing
+files. Do not edit live registry/token files or delete the lock file. For offline
+recovery, stop the controller, back up the whole data directory (including PKI and
+`removed_nodes`), restore consistent state, then restart. Do not remove deletion
+records to reuse an identity: its old certificates would regain authorization.
+
+```bash
+vpnctl controller remove-node --name node-a --config controller.yaml
+```
+
+Successful removal commits the registry deletion and a permanent identity
+revocation record, releases the VPN lease, removes direct readiness and current
+node/peer metric labels, and removes the node from fleet/candidates responses.
+Historical CSV samples remain available. Repeated removal of an already removed
+identity succeeds. Existing certificates for that identity cannot access any
+protected node/fleet API; bootstrap and plain-mode registration/reporting also
+reject the removed identity. Enroll a new `node.name` to replace the device.
+Individual certificate serial revocation and CA rotation are separate PKI work.
+
+With `wg_apply: true`, removal replaces the controller's WireGuard peer set
+before acknowledging success. Apply or registry-save failure returns an error
+and attempts to restore the previous peer set; rollback failure is logged as well.
+With `wg_apply: false`, only controller state changes. Remote agents remove cached
+direct peers after a successful candidates refresh and direct reconciliation;
+an agent disconnected from the controller can retain stale peers. This command
+does not promise immediate packet isolation across a partitioned mesh.
+
 ### Token management
 
 ```bash
-vpnctl controller token create --config controller.yaml   # new token
-vpnctl controller token list --config controller.yaml      # list active
+vpnctl controller token create --config controller.yaml   # reusable, expires in 24h
+vpnctl controller token create --config controller.yaml --ttl 30m --single-use
+vpnctl controller token create --config controller.yaml --ttl 0s  # explicit no expiry
+vpnctl controller token list --config controller.yaml      # active tokens
+vpnctl controller token list --config controller.yaml --json # policy + admission history
 vpnctl controller token revoke <token> --config controller.yaml
 ```
 
-Token creation and revocation take effect in a running controller without a
-restart. The commands fail instead of reporting success when the token file
-cannot be updated.
+Creation and revocation take effect without restarting. Revocation waits for an
+already admitted enrollment to finish; after it returns successfully, no new
+enrollment can use that token. It does not revoke certificates already issued.
+
+Single-use consumption is persisted before enrollment changes the registry.
+Concurrent requests admit at most one attempt. A subsequent registration failure,
+crash, or lost response still consumes the token; create a new token and retry.
+`use_count` counts admitted attempts, not certificates successfully delivered.
+JSON history retains creation/expiry/revocation times, usage count and the last
+admitted node/time, including expired, consumed and revoked tokens. Token values
+in this local output are secrets. Audit logs record actor UID/PID, operation,
+result and target; tokens are represented by a SHA-256 identifier, never plaintext.
+
+First-time PKI initialization creates a reusable 24-hour token. Restarting with
+an existing empty or fully revoked/expired store does not generate a new token.
+Legacy JSON string arrays load as reusable, non-expiring records and migrate to
+the versioned format on mutation. Back up before upgrading: older binaries cannot
+read the new token format or enforce removed-identity records.
+
+A management timeout does not establish whether a mutation committed. Inspect
+`controller status` or `token list --json`; removal and revocation can safely be
+retried. Token creation retries may create another token, so inspect and revoke
+any unused token after a lost response.
 
 ### Without mTLS
 
