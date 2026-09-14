@@ -473,3 +473,115 @@ func TestConcurrentAutomaticRegistrationsReceiveUniqueLeases(t *testing.T) {
 		t.Fatalf("unique leases=%d, want %d", len(leases), nodeCount)
 	}
 }
+
+func TestVariableMeshSizesSurviveConcurrentRegistrationRestartAndAddressTheft(t *testing.T) {
+	tests := []struct {
+		name       string
+		cidr       string
+		controller string
+		nodeCount  int
+	}{
+		{name: "slash30", cidr: "10.7.0.0/30", controller: "10.7.0.1/30", nodeCount: 1},
+		{name: "slash29", cidr: "10.7.0.0/29", controller: "10.7.0.1/29", nodeCount: 5},
+		{name: "slash28", cidr: "10.7.0.0/28", controller: "10.7.0.1/28", nodeCount: 13},
+		{name: "slash24", cidr: "10.7.0.0/24", controller: "10.7.0.1/24", nodeCount: 253},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := config.ControllerConfig{DataDir: dir, VPNCIDR: tt.cidr, WGAddress: tt.controller}
+			s, err := NewServer(cfg)
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+
+			errorsCh := make(chan error, tt.nodeCount)
+			var group sync.WaitGroup
+			for index := 0; index < tt.nodeCount; index++ {
+				group.Add(1)
+				go func(index int) {
+					defer group.Done()
+					_, err := s.registerNode(nodeRegistration{
+						Name: fmt.Sprintf("node-%03d", index), PubKey: fmt.Sprintf("pub-%03d", index),
+					}, false)
+					if err != nil {
+						errorsCh <- err
+					}
+				}(index)
+			}
+			group.Wait()
+			close(errorsCh)
+			for err := range errorsCh {
+				t.Errorf("concurrent registration: %v", err)
+			}
+			if len(s.reg.Nodes) != tt.nodeCount {
+				t.Fatalf("registered nodes=%d, want %d", len(s.reg.Nodes), tt.nodeCount)
+			}
+
+			leases := make(map[string]string, tt.nodeCount)
+			addresses := make(map[string]string, tt.nodeCount)
+			for _, node := range s.reg.Nodes {
+				if owner, duplicate := addresses[node.VPNIP]; duplicate {
+					t.Fatalf("vpn_ip %q assigned to %q and %q", node.VPNIP, owner, node.ID)
+				}
+				leases[node.ID] = node.VPNIP
+				addresses[node.VPNIP] = node.ID
+			}
+
+			restarted, err := NewServer(cfg)
+			if err != nil {
+				t.Fatalf("restart NewServer: %v", err)
+			}
+			for nodeID, lease := range leases {
+				found := false
+				for _, node := range restarted.reg.Nodes {
+					if node.ID == nodeID {
+						found = true
+						if node.VPNIP != lease {
+							t.Fatalf("node %q lease changed across restart: %q -> %q", nodeID, lease, node.VPNIP)
+						}
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("node %q disappeared across restart", nodeID)
+				}
+			}
+
+			victimID := "node-000"
+			victimIP := leases[victimID]
+			for attempt := 0; attempt < 100; attempt++ {
+				attackerIndex := attempt % tt.nodeCount
+				attackerID := fmt.Sprintf("node-%03d", attackerIndex)
+				requested := victimIP
+				if attackerID == victimID {
+					requested = tt.controller
+				}
+				if _, err := restarted.registerNode(nodeRegistration{
+					Name: attackerID, PubKey: fmt.Sprintf("pub-%03d", attackerIndex), VPNIP: requested,
+				}, false); err == nil {
+					t.Fatalf("existing identity address theft attempt %d succeeded", attempt)
+				}
+				if _, err := restarted.registerNode(nodeRegistration{
+					Name: fmt.Sprintf("forged-%03d", attempt), PubKey: fmt.Sprintf("forged-pub-%03d", attempt), VPNIP: victimIP,
+				}, false); err == nil {
+					t.Fatalf("new identity address theft attempt %d succeeded", attempt)
+				}
+			}
+
+			persisted, err := store.LoadRegistry(filepath.Join(dir, "registry.yaml"))
+			if err != nil {
+				t.Fatalf("LoadRegistry: %v", err)
+			}
+			if len(persisted.Nodes) != len(leases) {
+				t.Fatalf("attacks changed persisted node count=%d, want %d", len(persisted.Nodes), len(leases))
+			}
+			for _, node := range persisted.Nodes {
+				if want, ok := leases[node.ID]; !ok || node.VPNIP != want {
+					t.Fatalf("attacks changed persisted lease for %q: got %q want %q", node.ID, node.VPNIP, want)
+				}
+			}
+		})
+	}
+}
