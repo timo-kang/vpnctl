@@ -4,6 +4,7 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,5 +57,59 @@ func TestSaveRegistry_RoundTrip(t *testing.T) {
 	}
 	if out.UpdatedAt.IsZero() {
 		t.Fatalf("updated_at not set")
+	}
+}
+
+func TestRemoveNodeSaveFailureDoesNotMutateLoadedRegistry(t *testing.T) {
+	t.Parallel()
+
+	loaded := &Registry{Nodes: []NodeInfo{
+		{ID: "node-a", Name: "node-a"},
+		{ID: "node-b", Name: "node-b"},
+	}}
+	injected := errors.New("injected rename failure")
+	found, err := removeNode(
+		"/registry.yaml",
+		"node-a",
+		func(string) (*Registry, error) { return loaded, nil },
+		func(string, *Registry) error { return injected },
+	)
+	if !found {
+		t.Fatal("expected node to be found")
+	}
+	if !errors.Is(err, injected) {
+		t.Fatalf("error=%v, want %v", err, injected)
+	}
+	if len(loaded.Nodes) != 2 || loaded.Nodes[0].Name != "node-a" {
+		t.Fatalf("failed removal mutated loaded registry: %+v", loaded.Nodes)
+	}
+}
+
+func TestRemoveNodePersistsReplacement(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "registry.yaml")
+	original := &Registry{Nodes: []NodeInfo{
+		{ID: "node-a", Name: "node-a"},
+		{ID: "node-b", Name: "node-b"},
+	}}
+	if err := SaveRegistry(path, original); err != nil {
+		t.Fatalf("SaveRegistry: %v", err)
+	}
+
+	found, err := RemoveNode(path, "node-a")
+	if err != nil {
+		t.Fatalf("RemoveNode: %v", err)
+	}
+	if !found {
+		t.Fatal("expected node to be found")
+	}
+	persisted, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatalf("LoadRegistry: %v", err)
+	}
+	if len(persisted.Nodes) != 1 || persisted.Nodes[0].Name != "node-b" {
+		t.Fatalf("persisted nodes=%+v", persisted.Nodes)
 	}
 }

@@ -293,10 +293,16 @@ func controllerToken(args []string) {
 
 	switch sub {
 	case "create":
-		token := ts.Create()
+		token, err := ts.Create()
+		if err != nil {
+			fatal(fmt.Errorf("create bootstrap token: %w", err))
+		}
 		fmt.Fprintln(os.Stdout, token)
 	case "list":
-		tokens := ts.List()
+		tokens, err := ts.List()
+		if err != nil {
+			fatal(fmt.Errorf("list bootstrap tokens: %w", err))
+		}
 		if len(tokens) == 0 {
 			fmt.Fprintln(os.Stdout, "no active tokens")
 			return
@@ -309,7 +315,9 @@ func controllerToken(args []string) {
 		if len(remaining) == 0 {
 			fatal(errors.New("token value is required"))
 		}
-		ts.Revoke(remaining[0])
+		if err := ts.Revoke(remaining[0]); err != nil {
+			fatal(fmt.Errorf("revoke bootstrap token: %w", err))
+		}
 		fmt.Fprintln(os.Stdout, "token revoked")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown token subcommand %q\n", sub)
@@ -338,29 +346,13 @@ func controllerRemoveNode(args []string) {
 	config.ApplyDefaults(&cfg)
 
 	regPath := filepath.Join(cfg.Controller.DataDir, "registry.yaml")
-	reg, err := store.LoadRegistry(regPath)
+	found, err := store.RemoveNode(regPath, *name)
 	if err != nil {
 		fatal(err)
 	}
-
-	found := false
-	filtered := make([]store.NodeInfo, 0, len(reg.Nodes))
-	for _, n := range reg.Nodes {
-		if n.Name == *name {
-			found = true
-			continue
-		}
-		filtered = append(filtered, n)
-	}
-
 	if !found {
 		fmt.Fprintf(os.Stderr, "node %q not found\n", *name)
 		os.Exit(1)
-	}
-
-	reg.Nodes = filtered
-	if err := store.SaveRegistry(regPath, reg); err != nil {
-		fatal(err)
 	}
 
 	fmt.Printf("removed node %q\n", *name)

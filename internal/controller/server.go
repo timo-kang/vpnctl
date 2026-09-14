@@ -4,9 +4,14 @@
 package controller
 
 import (
+	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -29,6 +36,13 @@ import (
 	"vpnctl/internal/wireguard"
 )
 
+const (
+	maxRequestBodyBytes = 1 << 20
+	maxWGPublicKeyBytes = 128
+	maxEndpointBytes    = 512
+	maxNATTypeBytes     = 64
+)
+
 // Server provides the controller HTTP API.
 type Server struct {
 	cfg     config.ControllerConfig
@@ -37,14 +51,16 @@ type Server struct {
 	reg     *store.Registry
 	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
 	// when multiple nodes submit samples concurrently.
-	metricsMu sync.Mutex
-	wg        *wireguard.Manager
+	metricsMu    sync.Mutex
+	wg           *wireguard.Manager
+	saveRegistry func(string, *store.Registry) error
 	// directOK tracks recent direct probe successes reported by nodes.
 	// Used to gate P2P WireGuard /32 injection so relay doesn't get blackholed.
-	directOK       map[string]map[string]time.Time // node_id -> peer_id -> last success
-	probeResponder *direct.Responder
-	tokenStore     *pki.TokenStore
-	pkiDir         string
+	directOK         map[string]map[string]time.Time // node_id -> peer_id -> last success
+	probeResponder   *direct.Responder
+	tokenStore       *pki.TokenStore
+	pkiDir           string
+	legacyCertLogged sync.Map
 }
 
 // NewServer constructs a controller server.
@@ -67,17 +83,21 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 			changed = true
 		}
 	}
+	if err := validateRegistryNodeMetadata(reg); err != nil {
+		return nil, fmt.Errorf("registry node metadata validation: %w", err)
+	}
 	if changed {
 		if err := store.SaveRegistry(regPath, reg); err != nil {
 			return nil, err
 		}
 	}
 	return &Server{
-		cfg:      cfg,
-		regPath:  regPath,
-		reg:      reg,
-		wg:       wireguard.DefaultManager(),
-		directOK: make(map[string]map[string]time.Time),
+		cfg:          cfg,
+		regPath:      regPath,
+		reg:          reg,
+		wg:           wireguard.DefaultManager(),
+		saveRegistry: store.SaveRegistry,
+		directOK:     make(map[string]map[string]time.Time),
 	}, nil
 }
 
@@ -156,8 +176,15 @@ func (s *Server) InitPKI() (string, error) {
 
 	// Create initial bootstrap token if store is empty.
 	var bootstrapToken string
-	if len(ts.List()) == 0 {
-		bootstrapToken = ts.Create()
+	tokens, err := ts.List()
+	if err != nil {
+		return "", fmt.Errorf("list bootstrap tokens: %w", err)
+	}
+	if len(tokens) == 0 {
+		bootstrapToken, err = ts.Create()
+		if err != nil {
+			return "", fmt.Errorf("persist initial bootstrap token: %w", err)
+		}
 		slog.Info("created initial bootstrap token")
 	}
 
@@ -197,6 +224,14 @@ func extractSANs(listen string) []string {
 
 // ListenAndServe runs the HTTP server.
 func (s *Server) ListenAndServe() error {
+	if s.cfg.PKI != nil && s.pkiDir == "" {
+		return fmt.Errorf("controller PKI is configured but not initialized")
+	}
+	if s.cfg.WGApply {
+		if err := s.reconcileWG(); err != nil {
+			return fmt.Errorf("reconcile WireGuard from registry: %w", err)
+		}
+	}
 	if s.cfg.ProbePort > 0 {
 		addr, err := s.StartProbeResponder()
 		if err != nil {
@@ -224,9 +259,13 @@ func (s *Server) ListenAndServe() error {
 		Addr:              s.cfg.Listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
-	if s.cfg.PKI != nil && s.pkiDir != "" {
+	if s.mtlsEnabled() {
 		tlsCfg, err := pki.ServerTLSConfig(
 			filepath.Join(s.pkiDir, "ca.crt"),
 			filepath.Join(s.pkiDir, "server.crt"),
@@ -267,18 +306,128 @@ func (s *Server) StopProbeResponder() {
 	}
 }
 
-// requireClientCert wraps a handler and rejects requests without a valid
-// client certificate when mTLS is configured.
+type nodeIdentityContextKey struct{}
+
+type authenticatedNode struct {
+	id          string
+	fingerprint string
+}
+
+// requireClientCert authenticates the verified client certificate and places
+// its node identity in the request context. Node-scoped handlers must then use
+// authorizeNode to bind the authenticated identity to the requested resource.
 func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.PKI != nil && s.pkiDir != "" {
-			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-				http.Error(w, "client certificate required", http.StatusUnauthorized)
-				return
+		if !s.mtlsEnabled() {
+			next(w, r)
+			return
+		}
+
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 {
+			writeJSONError(w, http.StatusUnauthorized, "verified client certificate required")
+			return
+		}
+
+		cert := r.TLS.VerifiedChains[0][0]
+		identity, legacy, err := pki.CertificateNodeIdentity(cert)
+		if err != nil {
+			slog.Warn("client certificate identity rejected",
+				"fingerprint_sha256", certificateFingerprint(cert),
+				"path", r.URL.Path,
+				"err", err)
+			writeJSONError(w, http.StatusUnauthorized, "client certificate has no valid node identity")
+			return
+		}
+		if legacy {
+			fingerprint := certificateFingerprint(cert)
+			if _, loaded := s.legacyCertLogged.LoadOrStore(fingerprint, struct{}{}); !loaded {
+				slog.Warn("legacy Common Name client identity accepted; re-enroll node to receive a URI identity",
+					"node_id", identity,
+					"fingerprint_sha256", fingerprint)
 			}
 		}
-		next(w, r)
+
+		ctx := context.WithValue(r.Context(), nodeIdentityContextKey{}, authenticatedNode{
+			id:          identity,
+			fingerprint: certificateFingerprint(cert),
+		})
+		next(w, r.WithContext(ctx))
 	}
+}
+
+func (s *Server) mtlsEnabled() bool {
+	return s.cfg.PKI != nil
+}
+
+func requestNodeIdentity(r *http.Request) (authenticatedNode, bool) {
+	identity, ok := r.Context().Value(nodeIdentityContextKey{}).(authenticatedNode)
+	return identity, ok && identity.id != ""
+}
+
+func (s *Server) authorizeNode(w http.ResponseWriter, r *http.Request, claimedNodeID string) bool {
+	if !s.mtlsEnabled() {
+		return true
+	}
+	identity, ok := requestNodeIdentity(r)
+	if !ok {
+		writeJSONError(w, http.StatusUnauthorized, "authenticated node identity required")
+		return false
+	}
+	if identity.id != claimedNodeID {
+		slog.Warn("node authorization denied",
+			"authenticated_node_id", identity.id,
+			"claimed_node_id", claimedNodeID,
+			"fingerprint_sha256", identity.fingerprint,
+			"path", r.URL.Path,
+			"reason", "identity_mismatch")
+		writeJSONError(w, http.StatusForbidden, "client certificate identity does not match requested node")
+		return false
+	}
+	if !s.nodeRegistered(identity.id) {
+		slog.Warn("node authorization denied",
+			"authenticated_node_id", identity.id,
+			"fingerprint_sha256", identity.fingerprint,
+			"path", r.URL.Path,
+			"reason", "node_not_registered")
+		writeJSONError(w, http.StatusForbidden, "authenticated node is not registered")
+		return false
+	}
+	return true
+}
+
+func (s *Server) nodeRegistered(nodeID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, node := range s.reg.Nodes {
+		if node.ID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) authorizePeer(w http.ResponseWriter, nodeID, peerID string) bool {
+	if peerID == "" {
+		writeJSONError(w, http.StatusBadRequest, "peer_id required")
+		return false
+	}
+	if peerID == nodeID {
+		writeJSONError(w, http.StatusBadRequest, "peer_id must differ from node_id")
+		return false
+	}
+	if s.nodeRegistered(peerID) {
+		return true
+	}
+	writeJSONError(w, http.StatusBadRequest, "peer_id does not reference a registered node")
+	return false
+}
+
+func certificateFingerprint(cert *x509.Certificate) string {
+	if cert == nil || len(cert.Raw) == 0 {
+		return "unknown"
+	}
+	sum := sha256.Sum256(cert.Raw)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 // handleBootstrap handles POST /bootstrap for node enrollment via token + CSR.
@@ -289,7 +438,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.BootstrapRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -298,8 +447,19 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate token.
-	if s.tokenStore == nil || !s.tokenStore.Validate(req.Token) {
+	// Validate token against persisted state so CLI create/revoke operations take
+	// effect without restarting the controller.
+	if s.tokenStore == nil {
+		writeJSONError(w, http.StatusUnauthorized, "invalid bootstrap token")
+		return
+	}
+	validToken, err := s.tokenStore.Validate(req.Token)
+	if err != nil {
+		slog.Error("bootstrap token validation failed", "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "bootstrap token store unavailable")
+		return
+	}
+	if !validToken {
 		writeJSONError(w, http.StatusUnauthorized, "invalid bootstrap token")
 		return
 	}
@@ -319,7 +479,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	signedCert, err := pki.SignCSR(caCert, caKey, []byte(req.CSR), clientExpiry)
+	signedCert, err := pki.SignNodeCSR(caCert, caKey, []byte(req.CSR), req.Name, clientExpiry)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "failed to sign CSR: "+err.Error())
 		return
@@ -332,82 +492,249 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register the node in the registry (reuse registration logic).
-	nodeID, vpnIP := s.registerNodeLocked(req.Name, "" /* pubKey */, "" /* vpnIP */, "" /* endpoint */, 0 /* probePort */, "" /* publicAddr */, "" /* natType */)
+	// Persist the registration before returning credentials to the node.
+	result, err := s.registerNode(nodeRegistration{Name: req.Name}, s.cfg.WGApply)
+	if err != nil {
+		writeRegistrationError(w, err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, api.BootstrapResponse{
 		CACert:     string(caCertPEM),
 		ClientCert: string(signedCert),
-		NodeID:     nodeID,
-		VPNIP:      vpnIP,
+		NodeID:     result.NodeID,
+		VPNIP:      result.VPNIP,
 	})
 }
 
-// registerNodeLocked registers or updates a node in the registry, allocating a
-// VPN IP when one is not provided. It returns (nodeID, vpnIP). This method is
-// shared by handleRegister and handleBootstrap.
-func (s *Server) registerNodeLocked(name, pubKey, vpnIP, endpoint string, probePort int, publicAddr, natType string) (string, string) {
+var (
+	errVPNIPAllocation        = errors.New("vpn IP allocation failed")
+	errRegistrationValidation = errors.New("node registration validation failed")
+)
+
+type nodeRegistration struct {
+	Name       string
+	PubKey     string
+	VPNIP      string
+	Endpoint   string
+	ProbePort  int
+	PublicAddr string
+	NATType    string
+}
+
+func validateRegistrationInput(input nodeRegistration) error {
+	if _, err := pki.NodeIdentityURI(input.Name); err != nil {
+		return fmt.Errorf("invalid node name: %w", err)
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+		limit int
+	}{
+		{name: "pub_key", value: input.PubKey, limit: maxWGPublicKeyBytes},
+		{name: "endpoint", value: input.Endpoint, limit: maxEndpointBytes},
+		{name: "public_addr", value: input.PublicAddr, limit: maxEndpointBytes},
+		{name: "nat_type", value: input.NATType, limit: maxNATTypeBytes},
+	} {
+		if err := validateRegistryText(field.name, field.value, field.limit); err != nil {
+			return err
+		}
+	}
+	if input.ProbePort < 0 || input.ProbePort > 65535 {
+		return fmt.Errorf("probe_port must be between 0 and 65535")
+	}
+	return nil
+}
+
+func validateRegistryText(field, value string, limit int) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > limit {
+		return fmt.Errorf("%s exceeds %d bytes", field, limit)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%s is not valid UTF-8", field)
+	}
+	if value != strings.TrimSpace(value) {
+		return fmt.Errorf("%s has surrounding whitespace", field)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%s contains control characters", field)
+		}
+	}
+	return nil
+}
+
+func validateRegistryNodeMetadata(reg *store.Registry) error {
+	if reg == nil {
+		return nil
+	}
+	identities := make(map[string]int, len(reg.Nodes))
+	keyOwners := make(map[string]string, len(reg.Nodes))
+	for index, node := range reg.Nodes {
+		if node.ID == "" {
+			return fmt.Errorf("node at index %d has no identity", index)
+		}
+		if previousIndex, duplicate := identities[node.ID]; duplicate {
+			return fmt.Errorf("node identity %q appears more than once (indexes %d and %d)", node.ID, previousIndex, index)
+		}
+		identities[node.ID] = index
+		if node.Name != node.ID {
+			return fmt.Errorf("node %q name %q does not match its identity", node.ID, node.Name)
+		}
+		if err := validateRegistrationInput(nodeRegistration{
+			Name: node.ID, PubKey: node.PubKey, Endpoint: node.Endpoint, ProbePort: node.ProbePort,
+			PublicAddr: node.PublicAddr, NATType: node.NATType,
+		}); err != nil {
+			return fmt.Errorf("node %q: %w", node.ID, err)
+		}
+		if node.PubKey == "" {
+			continue
+		}
+		if owner, duplicate := keyOwners[node.PubKey]; duplicate {
+			return fmt.Errorf("public key is assigned to both node %q and node %q", owner, node.ID)
+		}
+		keyOwners[node.PubKey] = node.ID
+	}
+	return nil
+}
+
+type nodeRegistrationResult struct {
+	NodeID string
+	VPNIP  string
+	Peers  []api.PeerCandidate
+}
+
+// registerNode registers or updates a node using a copy-on-write registry
+// transaction. The live registry changes only after the replacement has been
+// durably written and, when enabled, applied to the WireGuard dataplane.
+func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegistrationResult, error) {
+	if err := validateRegistrationInput(input); err != nil {
+		return nodeRegistrationResult{}, fmt.Errorf("%w: %v", errRegistrationValidation, err)
+	}
 	now := time.Now().UTC()
-	assignedVPNIP := vpnIP
+	assignedVPNIP := input.VPNIP
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	previous := cloneRegistry(s.reg)
+	next := cloneRegistry(s.reg)
+	existingIndex := -1
+	for i := range next.Nodes {
+		if next.Nodes[i].Name == input.Name {
+			existingIndex = i
+		}
+		if input.PubKey != "" && next.Nodes[i].ID != input.Name && next.Nodes[i].PubKey == input.PubKey {
+			return nodeRegistrationResult{}, fmt.Errorf("%w: public key is already registered to node %q", errRegistrationValidation, next.Nodes[i].ID)
+		}
+	}
+	if assignedVPNIP == "" && existingIndex >= 0 {
+		assignedVPNIP = next.Nodes[existingIndex].VPNIP
+	}
 	if assignedVPNIP == "" {
 		var err error
-		assignedVPNIP, err = allocateVPNIP(s.cfg.VPNCIDR, s.reg)
+		assignedVPNIP, err = allocateVPNIP(s.cfg.VPNCIDR, next)
 		if err != nil {
-			return name, ""
+			return nodeRegistrationResult{}, fmt.Errorf("%w: %v", errVPNIPAllocation, err)
 		}
 	}
 
 	var nodeID string
-	updated := false
-	for i := range s.reg.Nodes {
-		if s.reg.Nodes[i].Name == name {
-			if s.reg.Nodes[i].ID == "" {
-				s.reg.Nodes[i].ID = name
-			}
-			if pubKey != "" {
-				s.reg.Nodes[i].PubKey = pubKey
-			}
-			s.reg.Nodes[i].VPNIP = assignedVPNIP
-			if endpoint != "" {
-				s.reg.Nodes[i].Endpoint = endpoint
-			}
-			s.reg.Nodes[i].ProbePort = probePort
-			if publicAddr != "" {
-				s.reg.Nodes[i].PublicAddr = publicAddr
-			}
-			if natType != "" {
-				s.reg.Nodes[i].NATType = natType
-			}
-			s.reg.Nodes[i].LastSeenAt = now
-			s.reg.Nodes[i].Status = "online"
-			nodeID = s.reg.Nodes[i].ID
-			updated = true
-			break
+	if existingIndex >= 0 {
+		node := &next.Nodes[existingIndex]
+		if node.ID == "" {
+			node.ID = input.Name
 		}
-	}
-
-	if !updated {
-		nodeID = name
-		s.reg.Nodes = append(s.reg.Nodes, store.NodeInfo{
+		if input.PubKey != "" {
+			node.PubKey = input.PubKey
+		}
+		node.VPNIP = assignedVPNIP
+		if input.Endpoint != "" {
+			node.Endpoint = input.Endpoint
+		}
+		node.ProbePort = input.ProbePort
+		if input.PublicAddr != "" {
+			node.PublicAddr = input.PublicAddr
+		}
+		if input.NATType != "" {
+			node.NATType = input.NATType
+		}
+		node.LastSeenAt = now
+		node.Status = "online"
+		nodeID = node.ID
+	} else {
+		nodeID = input.Name
+		next.Nodes = append(next.Nodes, store.NodeInfo{
 			ID:         nodeID,
-			Name:       name,
-			PubKey:     pubKey,
+			Name:       input.Name,
+			PubKey:     input.PubKey,
 			VPNIP:      assignedVPNIP,
-			Endpoint:   endpoint,
-			ProbePort:  probePort,
-			PublicAddr: publicAddr,
-			NATType:    natType,
+			Endpoint:   input.Endpoint,
+			ProbePort:  input.ProbePort,
+			PublicAddr: input.PublicAddr,
+			NATType:    input.NATType,
 			LastSeenAt: now,
 			Status:     "online",
 		})
 	}
 
-	_ = store.SaveRegistry(s.regPath, s.reg)
-	return nodeID, assignedVPNIP
+	if autoApply {
+		if err := s.applyWG(peersForWGRegistry(next)); err != nil {
+			applyErr := fmt.Errorf("apply WireGuard registry: %w", err)
+			rollbackErr := s.applyWG(peersForWGRegistry(previous))
+			if rollbackErr != nil {
+				rollbackErr = fmt.Errorf("rollback WireGuard registry: %w", rollbackErr)
+			}
+			return nodeRegistrationResult{}, errors.Join(applyErr, rollbackErr)
+		}
+	}
+
+	if err := s.persistRegistry(next); err != nil {
+		saveErr := fmt.Errorf("save registry: %w", err)
+		if !autoApply {
+			return nodeRegistrationResult{}, saveErr
+		}
+		rollbackErr := s.applyWG(peersForWGRegistry(previous))
+		if rollbackErr != nil {
+			rollbackErr = fmt.Errorf("rollback WireGuard registry after save failure: %w", rollbackErr)
+		}
+		return nodeRegistrationResult{}, errors.Join(saveErr, rollbackErr)
+	}
+
+	s.reg = next
+	return nodeRegistrationResult{
+		NodeID: nodeID,
+		VPNIP:  assignedVPNIP,
+		Peers:  s.peersLocked(nodeID),
+	}, nil
+}
+
+func cloneRegistry(reg *store.Registry) *store.Registry {
+	if reg == nil {
+		return &store.Registry{}
+	}
+	clone := *reg
+	clone.Nodes = append([]store.NodeInfo(nil), reg.Nodes...)
+	return &clone
+}
+
+func (s *Server) persistRegistry(reg *store.Registry) error {
+	if s.saveRegistry == nil {
+		return store.SaveRegistry(s.regPath, reg)
+	}
+	return s.saveRegistry(s.regPath, reg)
+}
+
+func writeRegistrationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errVPNIPAllocation) || errors.Is(err, errRegistrationValidation) {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	slog.Error("node registration transaction failed", "err", err)
+	writeJSONError(w, http.StatusInternalServerError, "node registration failed")
 }
 
 // updateMetrics refreshes Prometheus gauges based on current registry and directOK state.
@@ -444,7 +771,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.RegisterRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -452,91 +779,33 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "name and pub_key are required")
 		return
 	}
-
-	now := time.Now().UTC()
-	assignedVPNIP := req.VPNIP
-
-	s.mu.Lock()
-	locked := true
-	defer func() {
-		if locked {
-			s.mu.Unlock()
-		}
-	}()
-
-	if assignedVPNIP == "" {
-		var err error
-		assignedVPNIP, err = allocateVPNIP(s.cfg.VPNCIDR, s.reg)
-		if err != nil {
-			// Important: never return while holding the registry lock.
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-
-	var nodeID string
-	updated := false
-	for i := range s.reg.Nodes {
-		if s.reg.Nodes[i].Name == req.Name {
-			if s.reg.Nodes[i].ID == "" {
-				s.reg.Nodes[i].ID = req.Name
-			}
-			s.reg.Nodes[i].PubKey = req.PubKey
-			s.reg.Nodes[i].VPNIP = assignedVPNIP
-			s.reg.Nodes[i].Endpoint = req.Endpoint
-			s.reg.Nodes[i].ProbePort = req.ProbePort
-			s.reg.Nodes[i].PublicAddr = req.PublicAddr
-			s.reg.Nodes[i].NATType = req.NATType
-			s.reg.Nodes[i].LastSeenAt = now
-			s.reg.Nodes[i].Status = "online"
-			nodeID = s.reg.Nodes[i].ID
-			updated = true
-			break
-		}
-	}
-
-	if !updated {
-		nodeID = req.Name
-		s.reg.Nodes = append(s.reg.Nodes, store.NodeInfo{
-			ID:         nodeID,
-			Name:       req.Name,
-			PubKey:     req.PubKey,
-			VPNIP:      assignedVPNIP,
-			Endpoint:   req.Endpoint,
-			ProbePort:  req.ProbePort,
-			PublicAddr: req.PublicAddr,
-			NATType:    req.NATType,
-			LastSeenAt: now,
-			Status:     "online",
-		})
-	}
-
-	if err := store.SaveRegistry(s.regPath, s.reg); err != nil {
-		s.mu.Unlock()
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	if !s.authorizeNode(w, r, req.Name) {
 		return
 	}
 
-	autoApply := s.cfg.WGApply
-	peers := s.peersForWGLocked()
-	resp := api.RegisterResponse{
-		NodeID: nodeID,
-		Peers:  s.peersLocked(nodeID),
-		VPNIP:  assignedVPNIP,
+	result, err := s.registerNode(nodeRegistration{
+		Name:       req.Name,
+		PubKey:     req.PubKey,
+		VPNIP:      req.VPNIP,
+		Endpoint:   req.Endpoint,
+		ProbePort:  req.ProbePort,
+		PublicAddr: req.PublicAddr,
+		NATType:    req.NATType,
+	}, s.cfg.WGApply)
+	if err != nil {
+		writeRegistrationError(w, err)
+		return
 	}
 
-	s.mu.Unlock()
-	locked = false
+	resp := api.RegisterResponse{
+		NodeID: result.NodeID,
+		Peers:  result.Peers,
+		VPNIP:  result.VPNIP,
+	}
 
 	// Fill observed WireGuard endpoints for candidates (best-effort).
 	s.fillObservedEndpoints(resp.Peers)
 
-	if autoApply {
-		if err := applyWG(s.cfg, peers); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
 	s.updateMetrics()
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -550,6 +819,9 @@ func (s *Server) handleCandidates(w http.ResponseWriter, r *http.Request) {
 	nodeID := r.URL.Query().Get("node_id")
 	if nodeID == "" {
 		writeJSONError(w, http.StatusBadRequest, "node_id required")
+		return
+	}
+	if !s.authorizeNode(w, r, nodeID) {
 		return
 	}
 
@@ -570,13 +842,29 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.MetricsRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.NodeID == "" {
+		writeJSONError(w, http.StatusBadRequest, "node_id required")
+		return
+	}
+	if !s.authorizeNode(w, r, req.NodeID) {
 		return
 	}
 	if len(req.Samples) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return
+	}
+	for _, sample := range req.Samples {
+		if sample.NodeID != req.NodeID {
+			writeJSONError(w, http.StatusForbidden, "metric sample node_id does not match request node_id")
+			return
+		}
+		if !s.authorizePeer(w, req.NodeID, sample.PeerID) {
+			return
+		}
 	}
 
 	path := s.cfg.MetricsPath
@@ -608,7 +896,7 @@ func (s *Server) handleNATProbe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.NATProbeRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -616,23 +904,35 @@ func (s *Server) handleNATProbe(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "node_id required")
 		return
 	}
+	if !s.authorizeNode(w, r, req.NodeID) {
+		return
+	}
+	if err := validateRegistrationInput(nodeRegistration{
+		Name: req.NodeID, PublicAddr: req.PublicAddr, NATType: req.NATType,
+	}); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for i := range s.reg.Nodes {
-		if s.reg.Nodes[i].ID == req.NodeID {
-			s.reg.Nodes[i].NATType = req.NATType
-			s.reg.Nodes[i].PublicAddr = req.PublicAddr
-			s.reg.Nodes[i].LastSeenAt = time.Now().UTC()
+	next := cloneRegistry(s.reg)
+	for i := range next.Nodes {
+		if next.Nodes[i].ID == req.NodeID {
+			next.Nodes[i].NATType = req.NATType
+			next.Nodes[i].PublicAddr = req.PublicAddr
+			next.Nodes[i].LastSeenAt = time.Now().UTC()
 			break
 		}
 	}
 
-	if err := store.SaveRegistry(s.regPath, s.reg); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	if err := s.persistRegistry(next); err != nil {
+		slog.Error("NAT probe registry update failed", "node_id", req.NodeID, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "registry update failed")
 		return
 	}
+	s.reg = next
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -644,12 +944,22 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.DirectResultRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.NodeID == "" || req.PeerID == "" {
+		writeJSONError(w, http.StatusBadRequest, "node_id and peer_id are required")
+		return
+	}
+	if !s.authorizeNode(w, r, req.NodeID) {
+		return
+	}
+	if !s.authorizePeer(w, req.NodeID, req.PeerID) {
+		return
+	}
 
-	if req.NodeID != "" && req.PeerID != "" && req.Success {
+	if req.Success {
 		s.mu.Lock()
 		m := s.directOK[req.NodeID]
 		if m == nil {
@@ -676,6 +986,14 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWGConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	nodeID := r.URL.Query().Get("node_id")
+	if nodeID == "" {
+		writeJSONError(w, http.StatusBadRequest, "node_id required")
+		return
+	}
+	if !s.authorizeNode(w, r, nodeID) {
 		return
 	}
 	if s.cfg.ServerPublicKey == "" || s.cfg.ServerEndpoint == "" || len(s.cfg.ServerAllowedIPs) == 0 {
@@ -803,10 +1121,20 @@ func (s *Server) handleFleetHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, api.FleetHistoryResponse{Nodes: nodes})
 }
 
-func decodeJSON(r *http.Request, v any) error {
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(v)
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request body must contain a single JSON object")
+		}
+		return fmt.Errorf("request body must contain a single JSON object: %w", err)
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -821,8 +1149,15 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 }
 
 func (s *Server) peersForWGLocked() []wireguard.Peer {
-	peers := make([]wireguard.Peer, 0, len(s.reg.Nodes))
-	for _, node := range s.reg.Nodes {
+	return peersForWGRegistry(s.reg)
+}
+
+func peersForWGRegistry(reg *store.Registry) []wireguard.Peer {
+	if reg == nil {
+		return nil
+	}
+	peers := make([]wireguard.Peer, 0, len(reg.Nodes))
+	for _, node := range reg.Nodes {
 		if node.PubKey == "" || node.VPNIP == "" {
 			continue
 		}
@@ -848,15 +1183,22 @@ func normalizeHostCIDR(value string) string {
 	return value + "/32"
 }
 
-func applyWG(cfg config.ControllerConfig, peers []wireguard.Peer) error {
+func (s *Server) reconcileWG() error {
+	s.mu.Lock()
+	peers := peersForWGRegistry(s.reg)
+	s.mu.Unlock()
+	return s.applyWG(peers)
+}
+
+func (s *Server) applyWG(peers []wireguard.Peer) error {
 	serverCfg := wireguard.ServerConfig{
-		Interface:  cfg.WGInterface,
-		PrivateKey: cfg.WGPrivateKey,
-		Address:    cfg.WGAddress,
-		ListenPort: cfg.WGPort,
-		MTU:        cfg.MTU,
+		Interface:  s.cfg.WGInterface,
+		PrivateKey: s.cfg.WGPrivateKey,
+		Address:    s.cfg.WGAddress,
+		ListenPort: s.cfg.WGPort,
+		MTU:        s.cfg.MTU,
 	}
-	return wireguard.ApplyServer(serverCfg, peers)
+	return s.wg.ApplyServer(serverCfg, peers)
 }
 
 func allocateVPNIP(cidr string, reg *store.Registry) (string, error) {
@@ -935,14 +1277,14 @@ func (s *Server) statusPageData() statuspage.Data {
 			}
 		}
 		data.Nodes = append(data.Nodes, statuspage.NodeStatus{
-			Name:    n.Name,
-			VPNIP:   n.VPNIP,
-			NATType: n.NATType,
+			Name:     n.Name,
+			VPNIP:    n.VPNIP,
+			NATType:  n.NATType,
 			LastSeen: lastSeen,
-			Online:  online,
-			Quality: quality,
-			RTTMs:   "-",
-			LossPct: "-",
+			Online:   online,
+			Quality:  quality,
+			RTTMs:    "-",
+			LossPct:  "-",
 		})
 		if online {
 			data.OnlineCount++

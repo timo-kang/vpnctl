@@ -5,7 +5,9 @@ package pki_test
 
 import (
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"net/url"
 	"testing"
 	"time"
 
@@ -117,5 +119,113 @@ func TestSignCSR(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("cert verification against CA pool failed: %v", err)
+	}
+}
+
+func TestSignNodeCSRUsesControllerAssignedIdentity(t *testing.T) {
+	dir := t.TempDir()
+	caKeyPath := dir + "/ca.key"
+	caCertPath := dir + "/ca.crt"
+	if err := pki.GenerateCA(caKeyPath, caCertPath, 24*time.Hour); err != nil {
+		t.Fatalf("GenerateCA failed: %v", err)
+	}
+	caCert, caKey, err := pki.LoadCA(caKeyPath, caCertPath)
+	if err != nil {
+		t.Fatalf("LoadCA failed: %v", err)
+	}
+
+	csrPEM, _, err := pki.GenerateCSR("attacker-controlled-csr-name")
+	if err != nil {
+		t.Fatalf("GenerateCSR failed: %v", err)
+	}
+	certPEM, err := pki.SignNodeCSR(caCert, caKey, csrPEM, "node-a", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("SignNodeCSR failed: %v", err)
+	}
+
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("failed to decode cert PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("ParseCertificate failed: %v", err)
+	}
+	identity, legacy, err := pki.CertificateNodeIdentity(cert)
+	if err != nil {
+		t.Fatalf("CertificateNodeIdentity failed: %v", err)
+	}
+	if identity != "node-a" || legacy {
+		t.Fatalf("identity=%q legacy=%v", identity, legacy)
+	}
+	if cert.Subject.CommonName != "node-a" {
+		t.Fatalf("certificate trusted CSR identity: CN=%q", cert.Subject.CommonName)
+	}
+	if len(cert.URIs) != 1 || cert.URIs[0].String() != "vpnctl://node/node-a" {
+		t.Fatalf("URIs=%v", cert.URIs)
+	}
+}
+
+func TestCertificateNodeIdentity(t *testing.T) {
+	identityA, err := pki.NodeIdentityURI("node-a")
+	if err != nil {
+		t.Fatalf("NodeIdentityURI: %v", err)
+	}
+	identityB, err := pki.NodeIdentityURI("node-b")
+	if err != nil {
+		t.Fatalf("NodeIdentityURI: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		cert       *x509.Certificate
+		want       string
+		wantLegacy bool
+		wantErr    bool
+	}{
+		{
+			name:       "legacy Common Name",
+			cert:       &x509.Certificate{Subject: pkix.Name{CommonName: "node-a"}},
+			want:       "node-a",
+			wantLegacy: true,
+		},
+		{
+			name: "URI identity",
+			cert: &x509.Certificate{Subject: pkix.Name{CommonName: "node-a"}, URIs: []*url.URL{identityA}},
+			want: "node-a",
+		},
+		{
+			name:    "URI and Common Name disagree",
+			cert:    &x509.Certificate{Subject: pkix.Name{CommonName: "node-b"}, URIs: []*url.URL{identityA}},
+			wantErr: true,
+		},
+		{
+			name:    "multiple URI identities",
+			cert:    &x509.Certificate{Subject: pkix.Name{CommonName: "node-a"}, URIs: []*url.URL{identityA, identityB}},
+			wantErr: true,
+		},
+		{
+			name:    "missing identity",
+			cert:    &x509.Certificate{},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, legacy, err := pki.CertificateNodeIdentity(tt.cert)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got identity=%q legacy=%v", got, legacy)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CertificateNodeIdentity: %v", err)
+			}
+			if got != tt.want || legacy != tt.wantLegacy {
+				t.Fatalf("identity=%q legacy=%v, want identity=%q legacy=%v", got, legacy, tt.want, tt.wantLegacy)
+			}
+		})
 	}
 }

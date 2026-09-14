@@ -134,6 +134,26 @@ $ vpnctl node serve --config node.yaml   # uses client cert from pki_dir
 $ vpnctl ping --config node.yaml --all   # same
 ```
 
+Each newly issued client certificate contains a controller-assigned identity in
+the URI SAN `vpnctl://node/<node-id>`. The controller binds that identity to
+node-scoped API fields such as `name` and `node_id`; a certificate for one node
+cannot register or report state for another node.
+
+Certificates issued by older vpnctl versions contain only a Common Name. They
+remain usable during migration and produce a controller warning containing the
+certificate fingerprint. Re-enroll each warned node with its existing
+`node.name` and a fresh bootstrap token:
+
+```bash
+$ vpnctl controller token create --config controller.yaml
+$ vpnctl node join --config node.yaml --token <new-bootstrap-token>
+```
+
+Re-enrollment replaces `client.key` and `client.crt` in `node.pki_dir` and
+preserves the registered VPN IP. Restart the node process after re-enrollment.
+If `node.name` must change, enroll it as a new identity instead of reusing the
+old certificate.
+
 ### Token management
 
 ```bash
@@ -141,6 +161,10 @@ vpnctl controller token create --config controller.yaml   # new token
 vpnctl controller token list --config controller.yaml      # list active
 vpnctl controller token revoke <token> --config controller.yaml
 ```
+
+Token creation and revocation take effect in a running controller without a
+restart. The commands fail instead of reporting success when the token file
+cannot be updated.
 
 ### Without mTLS
 

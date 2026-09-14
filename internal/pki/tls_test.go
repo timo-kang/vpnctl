@@ -18,6 +18,11 @@ import (
 // Returns paths to the CA cert, server cert/key, client cert/key.
 func setupTestPKI(t *testing.T) (caCertPath, srvCertPath, srvKeyPath, clientCertPath, clientKeyPath string) {
 	t.Helper()
+	return setupTestPKIWithClientExpiry(t, 24*time.Hour)
+}
+
+func setupTestPKIWithClientExpiry(t *testing.T, clientExpiry time.Duration) (caCertPath, srvCertPath, srvKeyPath, clientCertPath, clientKeyPath string) {
+	t.Helper()
 	dir := t.TempDir()
 
 	caKeyPath := dir + "/ca.key"
@@ -43,7 +48,7 @@ func setupTestPKI(t *testing.T) (caCertPath, srvCertPath, srvKeyPath, clientCert
 		t.Fatalf("GenerateCSR failed: %v", err)
 	}
 
-	certPEM, err := pki.SignCSR(caCert, caKey, csrPEM, 24*time.Hour)
+	certPEM, err := pki.SignCSR(caCert, caKey, csrPEM, clientExpiry)
 	if err != nil {
 		t.Fatalf("SignCSR failed: %v", err)
 	}
@@ -127,5 +132,30 @@ func TestMTLS_RejectsNoClientCert(t *testing.T) {
 	_, err = client.Get(srv.URL)
 	if err == nil {
 		t.Fatal("expected TLS handshake error when no client cert is presented, but got nil")
+	}
+}
+
+func TestMTLSRejectsExpiredClientCertificate(t *testing.T) {
+	caCertPath, srvCertPath, srvKeyPath, clientCertPath, clientKeyPath := setupTestPKIWithClientExpiry(t, -time.Hour)
+
+	serverTLS, err := pki.ServerTLSConfig(caCertPath, srvCertPath, srvKeyPath)
+	if err != nil {
+		t.Fatalf("ServerTLSConfig failed: %v", err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("unexpected"))
+	}))
+	server.TLS = serverTLS
+	server.StartTLS()
+	defer server.Close()
+
+	clientTLS, err := pki.ClientTLSConfig(caCertPath, clientCertPath, clientKeyPath)
+	if err != nil {
+		t.Fatalf("ClientTLSConfig failed: %v", err)
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLS}}
+	defer client.CloseIdleConnections()
+	if _, err := client.Get(server.URL); err == nil {
+		t.Fatal("expected TLS handshake to reject expired client certificate")
 	}
 }

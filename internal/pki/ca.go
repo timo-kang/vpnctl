@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"time"
 )
@@ -174,12 +175,12 @@ func GenerateServerCert(ca, caKey, keyPath, certPath string, sans []string, expi
 		Subject: pkix.Name{
 			CommonName: "vpnctl-controller",
 		},
-		NotBefore:    now,
-		NotAfter:     now.Add(expiry),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  ipAddresses,
-		DNSNames:     dnsNames,
+		NotBefore:   now,
+		NotAfter:    now.Add(expiry),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: ipAddresses,
+		DNSNames:    dnsNames,
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caPrivKey)
@@ -224,8 +225,23 @@ func GenerateCSR(cn string) (csrPEM, keyPEM []byte, err error) {
 }
 
 // SignCSR parses and verifies the PEM-encoded CSR, then signs it with the CA,
-// returning a PEM-encoded client certificate with ExtKeyUsage=ClientAuth.
+// preserving the CSR subject for legacy callers.
 func SignCSR(ca *x509.Certificate, caKey *ecdsa.PrivateKey, csrPEM []byte, expiry time.Duration) ([]byte, error) {
+	return signCSR(ca, caKey, csrPEM, "", nil, expiry)
+}
+
+// SignNodeCSR signs a CSR while replacing its requested subject with the
+// controller-assigned node identity. The identity is encoded in both the URI
+// SAN and Common Name; the CSR still proves possession of the private key.
+func SignNodeCSR(ca *x509.Certificate, caKey *ecdsa.PrivateKey, csrPEM []byte, nodeID string, expiry time.Duration) ([]byte, error) {
+	identityURI, err := NodeIdentityURI(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	return signCSR(ca, caKey, csrPEM, nodeID, []*url.URL{identityURI}, expiry)
+}
+
+func signCSR(ca *x509.Certificate, caKey *ecdsa.PrivateKey, csrPEM []byte, nodeID string, uris []*url.URL, expiry time.Duration) ([]byte, error) {
 	block, _ := pem.Decode(csrPEM)
 	if block == nil {
 		return nil, &pemError{path: "<csr>"}
@@ -244,14 +260,20 @@ func SignCSR(ca *x509.Certificate, caKey *ecdsa.PrivateKey, csrPEM []byte, expir
 		return nil, err
 	}
 
+	subject := csr.Subject
+	if nodeID != "" {
+		subject = pkix.Name{CommonName: nodeID}
+	}
+
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      csr.Subject,
+		Subject:      subject,
 		NotBefore:    now,
 		NotAfter:     now.Add(expiry),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		URIs:         uris,
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, csr.PublicKey, caKey)
