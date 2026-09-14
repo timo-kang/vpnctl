@@ -338,29 +338,13 @@ func controllerRemoveNode(args []string) {
 	config.ApplyDefaults(&cfg)
 
 	regPath := filepath.Join(cfg.Controller.DataDir, "registry.yaml")
-	reg, err := store.LoadRegistry(regPath)
+	found, err := store.RemoveNode(regPath, *name)
 	if err != nil {
 		fatal(err)
 	}
-
-	found := false
-	filtered := make([]store.NodeInfo, 0, len(reg.Nodes))
-	for _, n := range reg.Nodes {
-		if n.Name == *name {
-			found = true
-			continue
-		}
-		filtered = append(filtered, n)
-	}
-
 	if !found {
 		fmt.Fprintf(os.Stderr, "node %q not found\n", *name)
 		os.Exit(1)
-	}
-
-	reg.Nodes = filtered
-	if err := store.SaveRegistry(regPath, reg); err != nil {
-		fatal(err)
 	}
 
 	fmt.Printf("removed node %q\n", *name)

@@ -99,3 +99,42 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 
 	return os.Rename(tmpName, path)
 }
+
+// RemoveNode removes a node by name and persists the replacement registry.
+// The loaded registry is never mutated, so a failed save leaves the caller's
+// in-memory view and the on-disk registry unchanged.
+func RemoveNode(path, name string) (bool, error) {
+	return removeNode(path, name, LoadRegistry, SaveRegistry)
+}
+
+func removeNode(
+	path string,
+	name string,
+	load func(string) (*Registry, error),
+	save func(string, *Registry) error,
+) (bool, error) {
+	reg, err := load(path)
+	if err != nil {
+		return false, err
+	}
+
+	filtered := make([]NodeInfo, 0, len(reg.Nodes))
+	found := false
+	for _, node := range reg.Nodes {
+		if node.Name == name {
+			found = true
+			continue
+		}
+		filtered = append(filtered, node)
+	}
+	if !found {
+		return false, nil
+	}
+
+	next := *reg
+	next.Nodes = filtered
+	if err := save(path, &next); err != nil {
+		return true, err
+	}
+	return true, nil
+}
