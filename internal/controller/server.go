@@ -204,6 +204,14 @@ func extractSANs(listen string) []string {
 
 // ListenAndServe runs the HTTP server.
 func (s *Server) ListenAndServe() error {
+	if s.cfg.PKI != nil && s.pkiDir == "" {
+		return fmt.Errorf("controller PKI is configured but not initialized")
+	}
+	if s.cfg.WGApply {
+		if err := s.reconcileWG(); err != nil {
+			return fmt.Errorf("reconcile WireGuard from registry: %w", err)
+		}
+	}
 	if s.cfg.ProbePort > 0 {
 		addr, err := s.StartProbeResponder()
 		if err != nil {
@@ -233,7 +241,7 @@ func (s *Server) ListenAndServe() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	if s.cfg.PKI != nil && s.pkiDir != "" {
+	if s.mtlsEnabled() {
 		tlsCfg, err := pki.ServerTLSConfig(
 			filepath.Join(s.pkiDir, "ca.crt"),
 			filepath.Join(s.pkiDir, "server.crt"),
@@ -276,6 +284,11 @@ func (s *Server) StopProbeResponder() {
 
 type nodeIdentityContextKey struct{}
 
+type authenticatedNode struct {
+	id          string
+	fingerprint string
+}
+
 // requireClientCert authenticates the verified client certificate and places
 // its node identity in the request context. Node-scoped handlers must then use
 // authorizeNode to bind the authenticated identity to the requested resource.
@@ -310,40 +323,78 @@ func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		ctx := context.WithValue(r.Context(), nodeIdentityContextKey{}, identity)
+		ctx := context.WithValue(r.Context(), nodeIdentityContextKey{}, authenticatedNode{
+			id:          identity,
+			fingerprint: certificateFingerprint(cert),
+		})
 		next(w, r.WithContext(ctx))
 	}
 }
 
 func (s *Server) mtlsEnabled() bool {
-	return s.cfg.PKI != nil && s.pkiDir != ""
+	return s.cfg.PKI != nil
 }
 
-func requestNodeIdentity(r *http.Request) (string, bool) {
-	identity, ok := r.Context().Value(nodeIdentityContextKey{}).(string)
-	return identity, ok && identity != ""
+func requestNodeIdentity(r *http.Request) (authenticatedNode, bool) {
+	identity, ok := r.Context().Value(nodeIdentityContextKey{}).(authenticatedNode)
+	return identity, ok && identity.id != ""
 }
 
 func (s *Server) authorizeNode(w http.ResponseWriter, r *http.Request, claimedNodeID string) bool {
 	if !s.mtlsEnabled() {
 		return true
 	}
-	authenticatedNodeID, ok := requestNodeIdentity(r)
+	identity, ok := requestNodeIdentity(r)
 	if !ok {
 		writeJSONError(w, http.StatusUnauthorized, "authenticated node identity required")
 		return false
 	}
-	if authenticatedNodeID == claimedNodeID {
+	if identity.id != claimedNodeID {
+		slog.Warn("node authorization denied",
+			"authenticated_node_id", identity.id,
+			"claimed_node_id", claimedNodeID,
+			"fingerprint_sha256", identity.fingerprint,
+			"path", r.URL.Path,
+			"reason", "identity_mismatch")
+		writeJSONError(w, http.StatusForbidden, "client certificate identity does not match requested node")
+		return false
+	}
+	if !s.nodeRegistered(identity.id) {
+		slog.Warn("node authorization denied",
+			"authenticated_node_id", identity.id,
+			"fingerprint_sha256", identity.fingerprint,
+			"path", r.URL.Path,
+			"reason", "node_not_registered")
+		writeJSONError(w, http.StatusForbidden, "authenticated node is not registered")
+		return false
+	}
+	return true
+}
+
+func (s *Server) nodeRegistered(nodeID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, node := range s.reg.Nodes {
+		if node.ID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) authorizePeer(w http.ResponseWriter, nodeID, peerID string) bool {
+	if peerID == "" {
+		writeJSONError(w, http.StatusBadRequest, "peer_id required")
+		return false
+	}
+	if peerID == nodeID {
+		writeJSONError(w, http.StatusBadRequest, "peer_id must differ from node_id")
+		return false
+	}
+	if s.nodeRegistered(peerID) {
 		return true
 	}
-
-	cert := r.TLS.VerifiedChains[0][0]
-	slog.Warn("node authorization denied",
-		"authenticated_node_id", authenticatedNodeID,
-		"claimed_node_id", claimedNodeID,
-		"fingerprint_sha256", certificateFingerprint(cert),
-		"path", r.URL.Path)
-	writeJSONError(w, http.StatusForbidden, "client certificate identity does not match requested node")
+	writeJSONError(w, http.StatusBadRequest, "peer_id does not reference a registered node")
 	return false
 }
 
@@ -508,23 +559,27 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 		})
 	}
 
-	if err := s.persistRegistry(next); err != nil {
-		return nodeRegistrationResult{}, fmt.Errorf("save registry: %w", err)
-	}
-
 	if autoApply {
 		if err := s.applyWG(peersForWGRegistry(next)); err != nil {
 			applyErr := fmt.Errorf("apply WireGuard registry: %w", err)
-			rollbackWGErr := s.applyWG(peersForWGRegistry(previous))
-			rollbackStoreErr := s.persistRegistry(previous)
-			if rollbackWGErr != nil {
-				rollbackWGErr = fmt.Errorf("rollback WireGuard registry: %w", rollbackWGErr)
+			rollbackErr := s.applyWG(peersForWGRegistry(previous))
+			if rollbackErr != nil {
+				rollbackErr = fmt.Errorf("rollback WireGuard registry: %w", rollbackErr)
 			}
-			if rollbackStoreErr != nil {
-				rollbackStoreErr = fmt.Errorf("rollback persisted registry: %w", rollbackStoreErr)
-			}
-			return nodeRegistrationResult{}, errors.Join(applyErr, rollbackWGErr, rollbackStoreErr)
+			return nodeRegistrationResult{}, errors.Join(applyErr, rollbackErr)
 		}
+	}
+
+	if err := s.persistRegistry(next); err != nil {
+		saveErr := fmt.Errorf("save registry: %w", err)
+		if !autoApply {
+			return nodeRegistrationResult{}, saveErr
+		}
+		rollbackErr := s.applyWG(peersForWGRegistry(previous))
+		if rollbackErr != nil {
+			rollbackErr = fmt.Errorf("rollback WireGuard registry after save failure: %w", rollbackErr)
+		}
+		return nodeRegistrationResult{}, errors.Join(saveErr, rollbackErr)
 	}
 
 	s.reg = next
@@ -685,6 +740,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusForbidden, "metric sample node_id does not match request node_id")
 			return
 		}
+		if !s.authorizePeer(w, req.NodeID, sample.PeerID) {
+			return
+		}
 	}
 
 	path := s.cfg.MetricsPath
@@ -767,6 +825,9 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authorizeNode(w, r, req.NodeID) {
+		return
+	}
+	if !s.authorizePeer(w, req.NodeID, req.PeerID) {
 		return
 	}
 
@@ -982,6 +1043,13 @@ func normalizeHostCIDR(value string) string {
 		return value
 	}
 	return value + "/32"
+}
+
+func (s *Server) reconcileWG() error {
+	s.mu.Lock()
+	peers := peersForWGRegistry(s.reg)
+	s.mu.Unlock()
+	return s.applyWG(peers)
 }
 
 func (s *Server) applyWG(peers []wireguard.Peer) error {

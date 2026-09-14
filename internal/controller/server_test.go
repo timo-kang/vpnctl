@@ -686,6 +686,7 @@ func TestMTLSIdentityBindingOverTLS(t *testing.T) {
 	s.pkiDir = tmp
 	s.cfg.MetricsPath = filepath.Join(tmp, "metrics.csv")
 	s.reg.Nodes = []store.NodeInfo{
+		{ID: "node-a", Name: "node-a", VPNIP: "10.7.0.2/32"},
 		{ID: "node-b", Name: "node-b", PubKey: "pub-b", VPNIP: "10.7.0.3/32"},
 	}
 
@@ -845,5 +846,183 @@ func TestHandleNATProbeSaveFailureRollsBackLiveRegistry(t *testing.T) {
 	}
 	if s.reg.Nodes[0].NATType != "restricted" || s.reg.Nodes[0].PublicAddr != "198.51.100.1:1234" {
 		t.Fatalf("failed NAT update mutated live registry: %+v", s.reg.Nodes[0])
+	}
+}
+
+func TestPKIConfigurationFailsClosedWithoutInitialization(t *testing.T) {
+	s, err := NewServer(config.ControllerConfig{
+		DataDir: t.TempDir(),
+		Listen:  "127.0.0.1:0",
+		PKI:     &config.PKIConfig{},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	called := false
+	rec := httptest.NewRecorder()
+	s.requireClientCert(func(http.ResponseWriter, *http.Request) {
+		called = true
+	})(rec, httptest.NewRequest(http.MethodGet, "/protected", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("middleware status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("protected handler ran before PKI initialization")
+	}
+	if err := s.ListenAndServe(); err == nil || !strings.Contains(err.Error(), "not initialized") {
+		t.Fatalf("ListenAndServe error=%v", err)
+	}
+}
+
+func TestNodeScopedHandlerRejectsUnregisteredCertificateIdentity(t *testing.T) {
+	s := newIdentityTestServer(t)
+	req := requestWithNodeCertificate(t, http.MethodGet, "/candidates?node_id=node-removed", nil, "node-removed")
+	rec := httptest.NewRecorder()
+	s.requireClientCert(s.handleCandidates)(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReportedPeerMustBeRegisteredAndDistinct(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    any
+		handler func(*Server) http.HandlerFunc
+	}{
+		{
+			name: "direct result unknown peer",
+			body: api.DirectResultRequest{
+				NodeID: "node-a", PeerID: "unknown-peer", Success: true,
+			},
+			handler: func(s *Server) http.HandlerFunc { return s.handleDirectResult },
+		},
+		{
+			name: "direct result self peer",
+			body: api.DirectResultRequest{
+				NodeID: "node-a", PeerID: "node-a", Success: true,
+			},
+			handler: func(s *Server) http.HandlerFunc { return s.handleDirectResult },
+		},
+		{
+			name: "metric unknown peer",
+			body: api.MetricsRequest{
+				NodeID:  "node-a",
+				Samples: []model.Metric{{NodeID: "node-a", PeerID: "unknown-peer"}},
+			},
+			handler: func(s *Server) http.HandlerFunc { return s.handleMetrics },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newIdentityTestServer(t)
+			body, err := json.Marshal(tt.body)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			req := requestWithNodeCertificate(t, http.MethodPost, "/", body, "node-a")
+			rec := httptest.NewRecorder()
+			s.requireClientCert(tt.handler(s))(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if len(s.directOK) != 0 {
+				t.Fatalf("invalid peer mutated direct readiness: %+v", s.directOK)
+			}
+			if _, err := os.Stat(s.cfg.MetricsPath); err == nil {
+				t.Fatal("invalid peer wrote metrics")
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("Stat metrics: %v", err)
+			}
+		})
+	}
+}
+
+type recordingWGRunner struct {
+	configs []string
+}
+
+func (r *recordingWGRunner) Run(name string, args ...string) error {
+	if name == "wg" && len(args) == 3 && args[0] == "syncconf" {
+		data, err := os.ReadFile(args[2])
+		if err != nil {
+			return err
+		}
+		r.configs = append(r.configs, string(data))
+	}
+	return nil
+}
+
+func (*recordingWGRunner) Output(string, ...string) (string, error) {
+	return "", nil
+}
+
+func TestReconcileWGAppliesPersistedRegistry(t *testing.T) {
+	s, err := NewServer(config.ControllerConfig{
+		DataDir:      t.TempDir(),
+		WGInterface:  "wg0",
+		WGAddress:    "10.7.0.1/24",
+		WGPrivateKey: "server-private",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	s.reg.Nodes = []store.NodeInfo{{
+		ID: "node-a", Name: "node-a", PubKey: "pub-a", VPNIP: "10.7.0.2/32",
+	}}
+	runner := &recordingWGRunner{}
+	s.wg = wireguard.NewManager(runner)
+
+	if err := s.reconcileWG(); err != nil {
+		t.Fatalf("reconcileWG: %v", err)
+	}
+	if len(runner.configs) != 1 {
+		t.Fatalf("syncconf calls=%d", len(runner.configs))
+	}
+	if !strings.Contains(runner.configs[0], "PublicKey = pub-a") || !strings.Contains(runner.configs[0], "AllowedIPs = 10.7.0.2/32") {
+		t.Fatalf("reconciled config=%q", runner.configs[0])
+	}
+}
+
+func TestRegisterSaveFailureRollsBackAppliedDataplane(t *testing.T) {
+	s, err := NewServer(config.ControllerConfig{
+		DataDir:      t.TempDir(),
+		VPNCIDR:      "10.7.0.0/24",
+		WGApply:      true,
+		WGInterface:  "wg0",
+		WGAddress:    "10.7.0.1/24",
+		WGPrivateKey: "server-private",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	runner := &recordingWGRunner{}
+	s.wg = wireguard.NewManager(runner)
+	s.saveRegistry = func(string, *store.Registry) error {
+		if len(runner.configs) != 1 {
+			t.Fatalf("registry save happened before dataplane apply: syncconf calls=%d", len(runner.configs))
+		}
+		return syscall.ENOSPC
+	}
+	body, err := json.Marshal(api.RegisterRequest{
+		Name: "node-a", PubKey: "pub-a", VPNIP: "10.7.0.2/32",
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	s.handleRegister(rec, httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(runner.configs) != 2 {
+		t.Fatalf("syncconf calls=%d, want apply and rollback", len(runner.configs))
+	}
+	if strings.Contains(runner.configs[1], "public_key=pub-a") {
+		t.Fatalf("rollback retained failed peer: %q", runner.configs[1])
+	}
+	if len(s.reg.Nodes) != 0 {
+		t.Fatalf("failed registration mutated live registry: %+v", s.reg.Nodes)
 	}
 }
