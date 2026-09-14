@@ -86,6 +86,33 @@ vpnctl doctor --config configs/node.yaml
 - **Agent**: registers with controller, configures WireGuard, probes peers, reports metrics, health watchdog
 - **Monitor**: observes any WireGuard interface (with or without vpnctl controller)
 
+## Address allocation (IPAM)
+
+The controller keeps one stable `/32` VPN lease per node identity. The current
+registration API uses `name` as that identity. Re-registering, restarting, or
+reissuing a certificate with the same name preserves its lease. A renamed node
+is a new identity; remove the old node to release its lease. Changing an existing
+identity's lease also requires removing that node first. The controller rejects
+duplicate, malformed, out-of-CIDR, network, and broadcast addresses.
+
+`controller.wg_address` is always reserved. Additional individual addresses or
+CIDR ranges can be excluded with `reserved_vpn_ips`:
+
+```yaml
+controller:
+  vpn_cidr: "10.7.0.0/24"
+  wg_address: "10.7.0.1/24"
+  reserved_vpn_ips:
+    - "10.7.0.10"
+    - "10.7.0.16/28"
+```
+
+At startup, vpnctl normalizes legacy host addresses to `/32` and refuses to
+start if the existing registry contains duplicate, reserved, malformed, or
+out-of-range leases. Back up and correct `registry.yaml` before restarting;
+vpnctl does not silently reassign an address because node-side configuration
+would otherwise disagree with the controller.
+
 ## Authentication (mTLS)
 
 vpnctl supports mutual TLS authentication. When enabled, all API communication between nodes and the controller is encrypted and mutually authenticated.

@@ -20,6 +20,11 @@ controller:
     - "10.7.0.0/24"
   server_keepalive_sec: 25
   vpn_cidr: "10.7.0.0/24"
+  # Individual addresses and CIDR ranges excluded from node allocation.
+  # wg_address (10.7.0.1 above) is always reserved automatically.
+  reserved_vpn_ips:
+    - "10.7.0.10"
+    - "10.7.0.16/28"
   probe_port: 51900
 
 node:
