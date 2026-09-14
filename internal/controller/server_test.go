@@ -329,7 +329,10 @@ func TestHandleBootstrap_RegistrySaveFailureReturnsError(t *testing.T) {
 	if _, err := s.InitPKI(); err != nil {
 		t.Fatalf("InitPKI: %v", err)
 	}
-	tokens := s.tokenStore.List()
+	tokens, err := s.tokenStore.List()
+	if err != nil {
+		t.Fatalf("List tokens: %v", err)
+	}
 	if len(tokens) != 1 {
 		t.Fatalf("tokens=%d", len(tokens))
 	}
@@ -747,6 +750,19 @@ func TestMTLSIdentityBindingOverTLS(t *testing.T) {
 		Samples: []model.Metric{{NodeID: "node-a", PeerID: "node-b", Path: "relay"}},
 	}); status != http.StatusNoContent {
 		t.Fatalf("metrics status=%d", status)
+	}
+
+	originalNodeB := s.reg.Nodes[1]
+	for attempt := 0; attempt < 200; attempt++ {
+		status := doJSON(http.MethodPost, "/register", api.RegisterRequest{
+			Name: "node-b", PubKey: "attacker-key", VPNIP: "10.7.0.2/32",
+		})
+		if status != http.StatusForbidden {
+			t.Fatalf("cross-node registration attempt %d status=%d", attempt, status)
+		}
+	}
+	if s.reg.Nodes[1] != originalNodeB {
+		t.Fatalf("repeated cross-node registration mutated node-b: before=%+v after=%+v", originalNodeB, s.reg.Nodes[1])
 	}
 
 	response, err = client.Get(testServer.URL + "/candidates?node_id=node-b")

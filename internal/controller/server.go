@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -31,6 +34,13 @@ import (
 	"vpnctl/internal/statuspage"
 	"vpnctl/internal/store"
 	"vpnctl/internal/wireguard"
+)
+
+const (
+	maxRequestBodyBytes = 1 << 20
+	maxWGPublicKeyBytes = 128
+	maxEndpointBytes    = 512
+	maxNATTypeBytes     = 64
 )
 
 // Server provides the controller HTTP API.
@@ -72,6 +82,9 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 			reg.Nodes[i].Name = reg.Nodes[i].ID
 			changed = true
 		}
+	}
+	if err := validateRegistryNodeMetadata(reg); err != nil {
+		return nil, fmt.Errorf("registry node metadata validation: %w", err)
 	}
 	if changed {
 		if err := store.SaveRegistry(regPath, reg); err != nil {
@@ -163,8 +176,15 @@ func (s *Server) InitPKI() (string, error) {
 
 	// Create initial bootstrap token if store is empty.
 	var bootstrapToken string
-	if len(ts.List()) == 0 {
-		bootstrapToken = ts.Create()
+	tokens, err := ts.List()
+	if err != nil {
+		return "", fmt.Errorf("list bootstrap tokens: %w", err)
+	}
+	if len(tokens) == 0 {
+		bootstrapToken, err = ts.Create()
+		if err != nil {
+			return "", fmt.Errorf("persist initial bootstrap token: %w", err)
+		}
 		slog.Info("created initial bootstrap token")
 	}
 
@@ -239,6 +259,10 @@ func (s *Server) ListenAndServe() error {
 		Addr:              s.cfg.Listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	if s.mtlsEnabled() {
@@ -414,7 +438,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.BootstrapRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -423,8 +447,19 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate token.
-	if s.tokenStore == nil || !s.tokenStore.Validate(req.Token) {
+	// Validate token against persisted state so CLI create/revoke operations take
+	// effect without restarting the controller.
+	if s.tokenStore == nil {
+		writeJSONError(w, http.StatusUnauthorized, "invalid bootstrap token")
+		return
+	}
+	validToken, err := s.tokenStore.Validate(req.Token)
+	if err != nil {
+		slog.Error("bootstrap token validation failed", "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "bootstrap token store unavailable")
+		return
+	}
+	if !validToken {
 		writeJSONError(w, http.StatusUnauthorized, "invalid bootstrap token")
 		return
 	}
@@ -472,7 +507,10 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-var errVPNIPAllocation = errors.New("vpn IP allocation failed")
+var (
+	errVPNIPAllocation        = errors.New("vpn IP allocation failed")
+	errRegistrationValidation = errors.New("node registration validation failed")
+)
 
 type nodeRegistration struct {
 	Name       string
@@ -482,6 +520,85 @@ type nodeRegistration struct {
 	ProbePort  int
 	PublicAddr string
 	NATType    string
+}
+
+func validateRegistrationInput(input nodeRegistration) error {
+	if _, err := pki.NodeIdentityURI(input.Name); err != nil {
+		return fmt.Errorf("invalid node name: %w", err)
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+		limit int
+	}{
+		{name: "pub_key", value: input.PubKey, limit: maxWGPublicKeyBytes},
+		{name: "endpoint", value: input.Endpoint, limit: maxEndpointBytes},
+		{name: "public_addr", value: input.PublicAddr, limit: maxEndpointBytes},
+		{name: "nat_type", value: input.NATType, limit: maxNATTypeBytes},
+	} {
+		if err := validateRegistryText(field.name, field.value, field.limit); err != nil {
+			return err
+		}
+	}
+	if input.ProbePort < 0 || input.ProbePort > 65535 {
+		return fmt.Errorf("probe_port must be between 0 and 65535")
+	}
+	return nil
+}
+
+func validateRegistryText(field, value string, limit int) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > limit {
+		return fmt.Errorf("%s exceeds %d bytes", field, limit)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%s is not valid UTF-8", field)
+	}
+	if value != strings.TrimSpace(value) {
+		return fmt.Errorf("%s has surrounding whitespace", field)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%s contains control characters", field)
+		}
+	}
+	return nil
+}
+
+func validateRegistryNodeMetadata(reg *store.Registry) error {
+	if reg == nil {
+		return nil
+	}
+	identities := make(map[string]int, len(reg.Nodes))
+	keyOwners := make(map[string]string, len(reg.Nodes))
+	for index, node := range reg.Nodes {
+		if node.ID == "" {
+			return fmt.Errorf("node at index %d has no identity", index)
+		}
+		if previousIndex, duplicate := identities[node.ID]; duplicate {
+			return fmt.Errorf("node identity %q appears more than once (indexes %d and %d)", node.ID, previousIndex, index)
+		}
+		identities[node.ID] = index
+		if node.Name != node.ID {
+			return fmt.Errorf("node %q name %q does not match its identity", node.ID, node.Name)
+		}
+		if err := validateRegistrationInput(nodeRegistration{
+			Name: node.ID, PubKey: node.PubKey, Endpoint: node.Endpoint, ProbePort: node.ProbePort,
+			PublicAddr: node.PublicAddr, NATType: node.NATType,
+		}); err != nil {
+			return fmt.Errorf("node %q: %w", node.ID, err)
+		}
+		if node.PubKey == "" {
+			continue
+		}
+		if owner, duplicate := keyOwners[node.PubKey]; duplicate {
+			return fmt.Errorf("public key is assigned to both node %q and node %q", owner, node.ID)
+		}
+		keyOwners[node.PubKey] = node.ID
+	}
+	return nil
 }
 
 type nodeRegistrationResult struct {
@@ -494,6 +611,9 @@ type nodeRegistrationResult struct {
 // transaction. The live registry changes only after the replacement has been
 // durably written and, when enabled, applied to the WireGuard dataplane.
 func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegistrationResult, error) {
+	if err := validateRegistrationInput(input); err != nil {
+		return nodeRegistrationResult{}, fmt.Errorf("%w: %v", errRegistrationValidation, err)
+	}
 	now := time.Now().UTC()
 	assignedVPNIP := input.VPNIP
 
@@ -506,7 +626,9 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 	for i := range next.Nodes {
 		if next.Nodes[i].Name == input.Name {
 			existingIndex = i
-			break
+		}
+		if input.PubKey != "" && next.Nodes[i].ID != input.Name && next.Nodes[i].PubKey == input.PubKey {
+			return nodeRegistrationResult{}, fmt.Errorf("%w: public key is already registered to node %q", errRegistrationValidation, next.Nodes[i].ID)
 		}
 	}
 	if assignedVPNIP == "" && existingIndex >= 0 {
@@ -607,7 +729,7 @@ func (s *Server) persistRegistry(reg *store.Registry) error {
 }
 
 func writeRegistrationError(w http.ResponseWriter, err error) {
-	if errors.Is(err, errVPNIPAllocation) {
+	if errors.Is(err, errVPNIPAllocation) || errors.Is(err, errRegistrationValidation) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -649,7 +771,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.RegisterRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -720,7 +842,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.MetricsRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -774,7 +896,7 @@ func (s *Server) handleNATProbe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.NATProbeRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -783,6 +905,12 @@ func (s *Server) handleNATProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authorizeNode(w, r, req.NodeID) {
+		return
+	}
+	if err := validateRegistrationInput(nodeRegistration{
+		Name: req.NodeID, PublicAddr: req.PublicAddr, NATType: req.NATType,
+	}); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -816,7 +944,7 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req api.DirectResultRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -993,10 +1121,20 @@ func (s *Server) handleFleetHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, api.FleetHistoryResponse{Nodes: nodes})
 }
 
-func decodeJSON(r *http.Request, v any) error {
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(v)
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request body must contain a single JSON object")
+		}
+		return fmt.Errorf("request body must contain a single JSON object: %w", err)
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

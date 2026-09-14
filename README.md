@@ -162,6 +162,10 @@ vpnctl controller token list --config controller.yaml      # list active
 vpnctl controller token revoke <token> --config controller.yaml
 ```
 
+Token creation and revocation take effect in a running controller without a
+restart. The commands fail instead of reporting success when the token file
+cannot be updated.
+
 ### Without mTLS
 
 If the `pki:` section is omitted from the controller config, vpnctl runs in plain HTTP mode with no authentication (backward compatible).

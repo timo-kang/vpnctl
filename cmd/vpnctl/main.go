@@ -293,10 +293,16 @@ func controllerToken(args []string) {
 
 	switch sub {
 	case "create":
-		token := ts.Create()
+		token, err := ts.Create()
+		if err != nil {
+			fatal(fmt.Errorf("create bootstrap token: %w", err))
+		}
 		fmt.Fprintln(os.Stdout, token)
 	case "list":
-		tokens := ts.List()
+		tokens, err := ts.List()
+		if err != nil {
+			fatal(fmt.Errorf("list bootstrap tokens: %w", err))
+		}
 		if len(tokens) == 0 {
 			fmt.Fprintln(os.Stdout, "no active tokens")
 			return
@@ -309,7 +315,9 @@ func controllerToken(args []string) {
 		if len(remaining) == 0 {
 			fatal(errors.New("token value is required"))
 		}
-		ts.Revoke(remaining[0])
+		if err := ts.Revoke(remaining[0]); err != nil {
+			fatal(fmt.Errorf("revoke bootstrap token: %w", err))
+		}
 		fmt.Fprintln(os.Stdout, "token revoked")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown token subcommand %q\n", sub)
