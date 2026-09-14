@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,6 +48,7 @@ type Server struct {
 	regPath string
 	mu      sync.Mutex
 	reg     *store.Registry
+	ipam    *ipam
 	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
 	// when multiple nodes submit samples concurrently.
 	metricsMu    sync.Mutex
@@ -86,6 +86,15 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 	if err := validateRegistryNodeMetadata(reg); err != nil {
 		return nil, fmt.Errorf("registry node metadata validation: %w", err)
 	}
+	allocator, err := newIPAM(cfg.VPNCIDR, cfg.WGAddress, cfg.ReservedVPNIPs)
+	if err != nil {
+		return nil, fmt.Errorf("IPAM configuration: %w", err)
+	}
+	ipamChanged, err := allocator.validateAndNormalizeRegistry(reg)
+	if err != nil {
+		return nil, fmt.Errorf("registry IPAM validation: %w", err)
+	}
+	changed = changed || ipamChanged
 	if changed {
 		if err := store.SaveRegistry(regPath, reg); err != nil {
 			return nil, err
@@ -95,6 +104,7 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 		cfg:          cfg,
 		regPath:      regPath,
 		reg:          reg,
+		ipam:         allocator,
 		wg:           wireguard.DefaultManager(),
 		saveRegistry: store.SaveRegistry,
 		directOK:     make(map[string]map[string]time.Time),
@@ -615,7 +625,6 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 		return nodeRegistrationResult{}, fmt.Errorf("%w: %v", errRegistrationValidation, err)
 	}
 	now := time.Now().UTC()
-	assignedVPNIP := input.VPNIP
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -624,22 +633,16 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 	next := cloneRegistry(s.reg)
 	existingIndex := -1
 	for i := range next.Nodes {
-		if next.Nodes[i].Name == input.Name {
+		if next.Nodes[i].ID == input.Name {
 			existingIndex = i
 		}
 		if input.PubKey != "" && next.Nodes[i].ID != input.Name && next.Nodes[i].PubKey == input.PubKey {
 			return nodeRegistrationResult{}, fmt.Errorf("%w: public key is already registered to node %q", errRegistrationValidation, next.Nodes[i].ID)
 		}
 	}
-	if assignedVPNIP == "" && existingIndex >= 0 {
-		assignedVPNIP = next.Nodes[existingIndex].VPNIP
-	}
-	if assignedVPNIP == "" {
-		var err error
-		assignedVPNIP, err = allocateVPNIP(s.cfg.VPNCIDR, next)
-		if err != nil {
-			return nodeRegistrationResult{}, fmt.Errorf("%w: %v", errVPNIPAllocation, err)
-		}
+	assignedVPNIP, err := s.ipam.lease(input.Name, input.VPNIP, next)
+	if err != nil {
+		return nodeRegistrationResult{}, fmt.Errorf("%w: %v", errVPNIPAllocation, err)
 	}
 
 	var nodeID string
@@ -1199,58 +1202,6 @@ func (s *Server) applyWG(peers []wireguard.Peer) error {
 		MTU:        s.cfg.MTU,
 	}
 	return s.wg.ApplyServer(serverCfg, peers)
-}
-
-func allocateVPNIP(cidr string, reg *store.Registry) (string, error) {
-	if cidr == "" {
-		return "", fmt.Errorf("vpn_cidr is required for allocation")
-	}
-	prefix, err := netip.ParsePrefix(cidr)
-	if err != nil {
-		return "", err
-	}
-	if !prefix.Addr().Is4() {
-		return "", fmt.Errorf("vpn_cidr must be IPv4")
-	}
-
-	used := map[netip.Addr]bool{}
-	for _, node := range reg.Nodes {
-		if node.VPNIP == "" {
-			continue
-		}
-		p, err := netip.ParsePrefix(node.VPNIP)
-		if err == nil {
-			used[p.Addr()] = true
-			continue
-		}
-		addr, err := netip.ParseAddr(node.VPNIP)
-		if err == nil {
-			used[addr] = true
-		}
-	}
-
-	base := prefix.Masked().Addr()
-	ones, bits := prefix.Bits(), 32
-	size := 1 << uint(bits-ones)
-	// Defensive: avoid accidentally iterating millions of addresses due to misconfiguration.
-	// This controller is intended for small-ish overlays (tens to low thousands of nodes).
-	if size > 1_048_576 {
-		return "", fmt.Errorf("vpn_cidr %s is too large (size=%d)", cidr, size)
-	}
-	for i := 1; i < size-1; i++ { // skip network/broadcast
-		addr := addIPv4(base, uint32(i))
-		if !used[addr] {
-			return addr.String() + "/32", nil
-		}
-	}
-	return "", fmt.Errorf("no available vpn_ip in %s", cidr)
-}
-
-func addIPv4(base netip.Addr, offset uint32) netip.Addr {
-	v := base.As4()
-	val := uint32(v[0])<<24 | uint32(v[1])<<16 | uint32(v[2])<<8 | uint32(v[3])
-	val += offset
-	return netip.AddrFrom4([4]byte{byte(val >> 24), byte(val >> 16), byte(val >> 8), byte(val)})
 }
 
 func (s *Server) statusPageData() statuspage.Data {

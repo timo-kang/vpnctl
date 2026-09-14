@@ -37,7 +37,8 @@ func TestHandleRegister_AllocationError_DoesNotHoldLock(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := config.ControllerConfig{
 		DataDir:     tmp,
-		VPNCIDR:     "not-a-cidr",
+		VPNCIDR:     "10.7.0.0/30",
+		WGAddress:   "10.7.0.1/30",
 		WGApply:     false,
 		Listen:      "127.0.0.1:0",
 		WGPort:      51820,
@@ -48,8 +49,9 @@ func TestHandleRegister_AllocationError_DoesNotHoldLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
+	s.reg.Nodes = []store.NodeInfo{{ID: "node-b", Name: "node-b", VPNIP: "10.7.0.2/32"}}
 
-	body, _ := json.Marshal(api.RegisterRequest{Name: "node-a", PubKey: "pub", VPNIP: ""})
+	body, _ := json.Marshal(api.RegisterRequest{Name: "node-a", PubKey: "pub"})
 	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	s.handleRegister(rec, req)
@@ -58,6 +60,7 @@ func TestHandleRegister_AllocationError_DoesNotHoldLock(t *testing.T) {
 	}
 
 	// If handleRegister returned while holding the lock, this would deadlock.
+	s.reg.Nodes = nil
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -76,45 +79,44 @@ func TestHandleRegister_AllocationError_DoesNotHoldLock(t *testing.T) {
 		t.Fatal("handleRegister likely deadlocked (registry lock not released)")
 	}
 
-	// Registry persisted.
-	regPath := filepath.Join(tmp, "registry.yaml")
-	reg, err := store.LoadRegistry(regPath)
+	reg, err := store.LoadRegistry(filepath.Join(tmp, "registry.yaml"))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
-	if len(reg.Nodes) != 1 {
-		t.Fatalf("nodes=%d", len(reg.Nodes))
-	}
-	if reg.Nodes[0].VPNIP != "10.7.0.2/32" {
-		t.Fatalf("vpn_ip=%q", reg.Nodes[0].VPNIP)
+	if len(reg.Nodes) != 1 || reg.Nodes[0].VPNIP != "10.7.0.2/32" {
+		t.Fatalf("persisted nodes=%+v", reg.Nodes)
 	}
 }
 
-func TestAllocateVPNIP_Unique(t *testing.T) {
+func TestIPAMAllocationSkipsUsedAddresses(t *testing.T) {
 	t.Parallel()
 
-	reg := &store.Registry{
-		Nodes: []store.NodeInfo{
-			{Name: "a", VPNIP: "10.7.0.2/32"},
-			{Name: "b", VPNIP: "10.7.0.3/32"},
-		},
-	}
-
-	ip, err := allocateVPNIP("10.7.0.0/24", reg)
+	allocator, err := newIPAM("10.7.0.0/24", "10.7.0.1/24", nil)
 	if err != nil {
-		t.Fatalf("allocateVPNIP: %v", err)
+		t.Fatalf("newIPAM: %v", err)
 	}
-	if ip == "10.7.0.2/32" || ip == "10.7.0.3/32" {
-		t.Fatalf("allocated used ip: %s", ip)
+	reg := &store.Registry{Nodes: []store.NodeInfo{
+		{ID: "a", Name: "a", VPNIP: "10.7.0.2/32"},
+		{ID: "b", Name: "b", VPNIP: "10.7.0.3/32"},
+	}}
+	ip, err := allocator.lease("c", "", reg)
+	if err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	if ip != "10.7.0.4/32" {
+		t.Fatalf("vpn_ip=%q", ip)
 	}
 }
 
-func TestAllocateVPNIP_RejectsHugeCIDR(t *testing.T) {
+func TestIPAMRejectsHugeCIDR(t *testing.T) {
 	t.Parallel()
 
-	_, err := allocateVPNIP("10.0.0.0/8", &store.Registry{})
-	if err == nil {
-		t.Fatalf("expected error")
+	allocator, err := newIPAM("10.0.0.0/8", "10.0.0.1/8", nil)
+	if err != nil {
+		t.Fatalf("newIPAM: %v", err)
+	}
+	if _, err := allocator.lease("node-a", "", &store.Registry{}); err == nil {
+		t.Fatal("expected error")
 	}
 }
 
@@ -977,6 +979,7 @@ func (*recordingWGRunner) Output(string, ...string) (string, error) {
 func TestReconcileWGAppliesPersistedRegistry(t *testing.T) {
 	s, err := NewServer(config.ControllerConfig{
 		DataDir:      t.TempDir(),
+		VPNCIDR:      "10.7.0.0/24",
 		WGInterface:  "wg0",
 		WGAddress:    "10.7.0.1/24",
 		WGPrivateKey: "server-private",
