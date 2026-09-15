@@ -297,7 +297,7 @@ func runUDPProbes(parent context.Context, phase func() string, emit func(probeEv
 			sequence++
 			e := probeEvent{Node: os.Getenv("VPNCTL_NODE"), Phase: stage, Kind: "udp", At: now}
 			pending[key] = e
-			_ = conn.SetWriteDeadline(now.Add(20 * time.Millisecond))
+			_ = conn.SetWriteDeadline(now.Add(500 * time.Millisecond))
 			if _, err := conn.WriteToUDP([]byte(key), &net.UDPAddr{IP: net.ParseIP("10.77.0.1"), Port: 9191}); err != nil {
 				finish(key, e, time.Now(), err)
 			}

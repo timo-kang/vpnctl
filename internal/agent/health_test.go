@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -156,6 +158,52 @@ func TestHubProbeAddress(t *testing.T) {
 			got := hubProbeAddress(tc.cfg)
 			if got != tc.expect {
 				t.Fatalf("hubProbeAddress()=%q, want %q", got, tc.expect)
+			}
+		})
+	}
+}
+
+func TestCheckTunnelHealth_CancelDuringRead(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprint(deadline), func(t *testing.T) {
+			conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if deadline {
+				var expire context.CancelFunc
+				ctx, expire = context.WithTimeout(ctx, 40*time.Millisecond)
+				defer expire()
+			}
+			done := make(chan error, 1)
+			go func() {
+				ok, err := checkTunnelHealth(ctx, conn.LocalAddr().String(), time.Minute)
+				if ok || err == nil {
+					err = fmt.Errorf("cancellation counted as tunnel result: ok=%v err=%v", ok, err)
+				}
+				done <- err
+			}()
+			conn.SetReadDeadline(time.Now().Add(time.Second))
+			if _, _, err := conn.ReadFrom(make([]byte, 512)); err != nil {
+				t.Fatal(err)
+			}
+			if !deadline {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				want := context.Canceled
+				if deadline {
+					want = context.DeadlineExceeded
+				}
+				if !errors.Is(err, want) {
+					t.Fatalf("want %v, got %v", want, err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("health check ignored cancellation during read")
 			}
 		})
 	}
