@@ -539,3 +539,19 @@ Panels: nodes online/offline, RTT time series, loss ratio, link quality table/ti
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
+
+### Kernel WireGuard reliability checks
+
+`make test-netns` builds the current CLI with the race detector and runs isolated
+Docker network namespaces with 1, 3, 8 and 32 nodes. It measures UDP/TCP application
+uplink and mTLS API availability during automatic renewal, CA rotation/rollback,
+revoked-credential replay, packet loss and controller/node restarts.
+
+Use `VPNCTL_NETNS_SIZES=1,8` to select fleet sizes, or pass `-test.count=3` to
+`./scripts/test-netns.sh` for repetitions. Results are saved under the printed
+`/tmp/vpnctl-netns-results.*` directory (or `VPNCTL_ARTIFACT_DIR`). See the
+[reproduction procedure and acceptance criteria](docs/validation/wireguard-pki-gate.md).
+
+A provisioned `node serve` restores its saved WireGuard path before contacting
+the controller, allowing a controller URL reachable only through the VPN. Initial
+enrollment still needs a provisioning path and a trusted CA bundle.

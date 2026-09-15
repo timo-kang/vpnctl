@@ -7,7 +7,6 @@ package integration
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,29 +25,17 @@ import (
 // It is gated behind -tags=integration and VPNCTL_INTEGRATION=1 to avoid
 // accidental local network disruption.
 func TestNetns_DirectInjection(t *testing.T) {
-	if os.Getenv("VPNCTL_INTEGRATION") != "1" {
-		t.Skip("set VPNCTL_INTEGRATION=1 to run")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("requires root")
-	}
-	if _, err := exec.LookPath("ip"); err != nil {
-		t.Skip("missing ip")
-	}
-	if _, err := exec.LookPath("wg"); err != nil {
-		t.Skip("missing wg")
-	}
+	requireNetwork(t)
 
 	tmp := t.TempDir()
-	bin := filepath.Join(tmp, "vpnctl")
-	run(t, ".", "go", "build", "-o", bin, "./cmd/vpnctl")
+	bin := integrationBinary(t)
 
 	// Namespaces and bridge (in root ns).
 	suffix := fmt.Sprintf("%d", os.Getpid())
 	nsCtrl := "vpnctl-ctrl-" + suffix
 	nsA := "vpnctl-a-" + suffix
 	nsB := "vpnctl-b-" + suffix
-	br := "vpnctl-br0-" + suffix
+	br := "vb" + suffix
 	t.Cleanup(func() {
 		_ = exec.Command("ip", "netns", "del", nsA).Run()
 		_ = exec.Command("ip", "netns", "del", nsB).Run()
@@ -72,9 +59,9 @@ func TestNetns_DirectInjection(t *testing.T) {
 		run(t, ".", "ip", "netns", "exec", ns, "ip", "addr", "add", ipCIDR, "dev", ifNs)
 		run(t, ".", "ip", "netns", "exec", ns, "ip", "link", "set", ifNs, "up")
 	}
-	connect(nsCtrl, "eth0", "veth-ctrl-"+suffix, "192.168.100.1/24")
-	connect(nsA, "eth0", "veth-a-"+suffix, "192.168.100.2/24")
-	connect(nsB, "eth0", "veth-b-"+suffix, "192.168.100.3/24")
+	connect(nsCtrl, "eth0", "vc"+suffix, "192.168.100.1/24")
+	connect(nsA, "eth0", "va"+suffix, "192.168.100.2/24")
+	connect(nsB, "eth0", "vv"+suffix, "192.168.100.3/24")
 
 	// Generate keys.
 	ctrlPriv, ctrlPub := wgKeyPair(t)
@@ -129,7 +116,7 @@ func TestNetns_DirectInjection(t *testing.T) {
 	if err := ctrlCmd.Start(); err != nil {
 		t.Fatalf("start controller: %v", err)
 	}
-	t.Cleanup(func() { _ = ctrlCmd.Process.Kill() })
+	t.Cleanup(func() { _ = ctrlCmd.Process.Kill(); _ = ctrlCmd.Wait() })
 
 	// Start nodes (serve: sync-config -> up -> run loop).
 	aCmd := exec.Command("ip", "netns", "exec", nsA, bin, "node", "serve", "--config", aPath, "--retry-delay", "200ms", "--retry-max-delay", "1s")
@@ -138,7 +125,7 @@ func TestNetns_DirectInjection(t *testing.T) {
 	if err := aCmd.Start(); err != nil {
 		t.Fatalf("start node-a: %v", err)
 	}
-	t.Cleanup(func() { _ = aCmd.Process.Kill() })
+	t.Cleanup(func() { _ = aCmd.Process.Kill(); _ = aCmd.Wait() })
 
 	bCmd := exec.Command("ip", "netns", "exec", nsB, bin, "node", "serve", "--config", bPath, "--retry-delay", "200ms", "--retry-max-delay", "1s")
 	bCmd.Stdout = os.Stdout
@@ -146,7 +133,7 @@ func TestNetns_DirectInjection(t *testing.T) {
 	if err := bCmd.Start(); err != nil {
 		t.Fatalf("start node-b: %v", err)
 	}
-	t.Cleanup(func() { _ = bCmd.Process.Kill() })
+	t.Cleanup(func() { _ = bCmd.Process.Kill(); _ = bCmd.Wait() })
 
 	// Wait until node-a has injected node-b as a direct WG peer.
 	deadline := time.Now().Add(8 * time.Second)
@@ -203,10 +190,4 @@ func runOut(t *testing.T, dir, name string, args ...string) []byte {
 		t.Fatalf("%s %v: %v\n%s", name, args, err, string(out))
 	}
 	return out
-}
-
-func init() {
-	// Prevent `go test` from running this package without context cancellation when executing
-	// long-running `node serve` processes, even though we hard-kill via Cleanup.
-	_ = context.Background()
 }

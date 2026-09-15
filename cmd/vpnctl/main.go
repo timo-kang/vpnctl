@@ -635,17 +635,35 @@ func nodeServe(args []string) {
 			fatal(errors.New("node config required"))
 		}
 		config.ApplyDefaults(&cfg)
+		if err := config.Validate(cfg); err != nil {
+			fatal(err)
+		}
 
+		tunnelRestored := false
+		// A provisioned node may reach its controller only through WireGuard.
+		// Restore the cached relay path before making any controller request.
+		// Incomplete first-time configurations still enroll/sync before WG up.
+		if _, err := wireguard.RenderNode(*cfg.Node); err == nil {
+			if err := upOnce(*configPath, &cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "restore cached tunnel failed: %v\n", err)
+				goto retry
+			}
+			tunnelRestored = true
+		}
 		if err := syncConfigOnce(ctx, *configPath, &cfg); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// A request deadline is a retryable network failure. Only cancellation
+			// of the owning process context should stop the supervisor.
+			if ctx.Err() != nil {
 				return
 			}
 			fmt.Fprintf(os.Stderr, "sync-config failed: %v\n", err)
 			goto retry
 		}
-		if err := upOnce(*configPath, &cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "wg up failed: %v\n", err)
-			goto retry
+		if !tunnelRestored {
+			if err := upOnce(*configPath, &cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "wg up failed: %v\n", err)
+				goto retry
+			}
 		}
 
 		if err := agent.Run(ctx, *cfg.Node); err != nil {
