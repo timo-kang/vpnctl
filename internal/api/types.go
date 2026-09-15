@@ -118,6 +118,7 @@ type BootstrapRequest struct {
 
 // BootstrapResponse returns the CA cert and signed client cert.
 type BootstrapResponse struct {
+	Generation uint64 `json:"generation"`
 	CACert     string `json:"ca_cert"`     // PEM
 	ClientCert string `json:"client_cert"` // PEM
 	NodeID     string `json:"node_id"`

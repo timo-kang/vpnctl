@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"net/url"
@@ -266,11 +267,18 @@ func signCSR(ca *x509.Certificate, caKey *ecdsa.PrivateKey, csrPEM []byte, nodeI
 	}
 
 	now := time.Now()
+	expires := now.Add(expiry)
+	if ca.NotAfter.Before(expires) {
+		expires = ca.NotAfter
+	}
+	if nodeID != "" && (expiry <= 0 || !expires.After(now.Add(time.Second))) {
+		return nil, fmt.Errorf("invalid lifetime or signing CA expires within one second")
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      subject,
-		NotBefore:    now,
-		NotAfter:     now.Add(expiry),
+		NotBefore:    now.Add(-time.Minute),
+		NotAfter:     expires,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 		URIs:         uris,

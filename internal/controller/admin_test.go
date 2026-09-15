@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -58,19 +59,14 @@ func testAdminServer(t *testing.T, dir string) (*Server, func()) {
 
 func testTLSAPI(t *testing.T, s *Server) (*httptest.Server, *api.Client, *tls.Config) {
 	t.Helper()
-	tlsCfg, err := pki.ServerTLSConfig(filepath.Join(s.pkiDir, "ca.crt"), filepath.Join(s.pkiDir, "server.crt"), filepath.Join(s.pkiDir, "server.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
 	h := httptest.NewUnstartedServer(s.httpHandler())
-	h.TLS = tlsCfg
+	h.TLS = s.authority.DynamicTLSConfig()
 	h.StartTLS()
 	t.Cleanup(h.Close)
-	clientCfg, err := pki.ClientTLSConfig(filepath.Join(s.pkiDir, "ca.crt"), "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM([]byte(s.authority.Status().CACert))
+	clientCfg := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}
+
 	return h, api.NewTLSClient(h.URL, clientCfg), clientCfg
 }
 

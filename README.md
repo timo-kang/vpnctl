@@ -131,6 +131,10 @@ controller:
     ca_expiry: "87600h"      # 10 years
     server_expiry: "8760h"   # 1 year
     client_expiry: "8760h"   # 1 year
+    server_renew_before: "720h"
+    client_renew_before: "720h"
+    check_interval: "1m"
+    ca_overlap: "24h"
     server_sans:             # SANs for the server cert (required if listen is 0.0.0.0)
       - "controller.example.com"
       - "10.10.10.1"
@@ -148,10 +152,18 @@ $ vpnctl controller init --config controller.yaml
 Bootstrap token: vpnctl-bootstrap-a1b2c3d4e5f6...
 ```
 
-3. Join nodes using the bootstrap token:
+3. Export the public CA bundle on the controller host, then deliver it to each
+node over an authenticated provisioning channel (for example, SSH with a verified
+host key). Bootstrap requires this trust anchor before sending the token:
 
 ```bash
-$ vpnctl node join --config node.yaml --token vpnctl-bootstrap-a1b2c3d4e5f6...
+$ vpnctl controller pki trust --config controller.yaml > controller-ca.pem
+```
+
+Join the node with the token and the provisioned bundle:
+
+```bash
+$ vpnctl node join --config node.yaml --token vpnctl-bootstrap-a1b2c3d4e5f6... --ca-cert controller-ca.pem
 bootstrap ok node_id=node-a vpn_ip=10.7.0.2/32 pki_dir=/etc/vpnctl/pki
 ```
 
@@ -174,11 +186,14 @@ certificate fingerprint. Re-enroll each warned node with its existing
 
 ```bash
 $ vpnctl controller token create --config controller.yaml
-$ vpnctl node join --config node.yaml --token <new-bootstrap-token>
+$ vpnctl node join --config node.yaml --token <new-bootstrap-token> --ca-cert controller-ca.pem
 ```
 
-Re-enrollment replaces `client.key` and `client.crt` in `node.pki_dir` and
-preserves the registered VPN IP. Restart the node process after re-enrollment.
+Re-enrollment atomically replaces `credentials.json` in `node.pki_dir` and
+preserves the registered VPN IP. Running clients reload complete credential
+changes on their next request. Legacy `ca.crt` / `client.crt` / `client.key` files
+are imported on the first successful PKI sync. A configured `pki_dir` requires
+HTTPS and valid credentials; it never falls back to plain HTTP.
 If `node.name` must change, enroll it as a new identity instead of reusing the
 old certificate.
 
@@ -213,7 +228,8 @@ Historical CSV samples remain available. Repeated removal of an already removed
 identity succeeds. Existing certificates for that identity cannot access any
 protected node/fleet API; bootstrap and plain-mode registration/reporting also
 reject the removed identity. Enroll a new `node.name` to replace the device.
-Individual certificate serial revocation and CA rotation are separate PKI work.
+Individual certificate revocation, renewal and CA rotation are managed by
+`controller pki`; see the lifecycle section below.
 
 With `wg_apply: true`, removal replaces the controller's WireGuard peer set
 before acknowledging success. Apply or registry-save failure returns an error
@@ -257,6 +273,61 @@ A management timeout does not establish whether a mutation committed. Inspect
 `controller status` or `token list --json`; removal and revocation can safely be
 retried. Token creation retries may create another token, so inspect and revoke
 any unused token after a lost response.
+
+### Certificate lifecycle
+
+`node run` and `node serve` automatically refresh trust and renew their client
+certificate before expiry. The controller renews its server certificate and
+loads the current certificate/trust snapshot at every new TLS handshake.
+Renewal defaults to the last third of the configured client/server lifetime;
+`client_renew_before` and `server_renew_before` override those windows. Windows
+must be at least one second and shorter than their lifetimes. `check_interval`
+controls controller maintenance and must be shorter than both windows.
+
+Node sync runs at most one minute apart and more often as expiry approaches.
+Failures use bounded exponential retry, capped at one minute and shortened by
+the remaining lifetime. The node persists a pending CSR/key before requesting
+renewal. Retries use the same CSR and recover the same signed certificate after
+response loss or process restart. A parent certificate can issue one renewal
+per signing CA, within its renewal window or immediately after a CA switch.
+An already expired or revoked certificate requires administrator-assisted
+bootstrap with a fresh token and a trusted CA bundle.
+
+```bash
+vpnctl controller pki status --config controller.yaml
+vpnctl controller pki revoke --fingerprint <sha256> --config controller.yaml
+vpnctl controller pki ca-prepare --config controller.yaml
+vpnctl controller pki ca-activate --config controller.yaml
+vpnctl controller pki ca-retire --config controller.yaml
+vpnctl controller pki ca-rollback --config controller.yaml
+```
+
+`status` lists identity, serial, fingerprint, validity, revocation, trust generation
+and per-node acknowledgements. Certificate revocation takes effect on every
+protected API, including already established TLS connections. Other certificates
+for the same identity remain valid; use `remove-node` for a lost or compromised
+device.
+
+CA replacement is staged: prepare publishes both roots while continuing to sign
+with the old one; activate requires all registered nodes to acknowledge persisted
+trust; retire requires the configured overlap period and acknowledgements using
+the active CA's client certificates. Missing or expired acknowledgements block
+progress. Rollback before activation cancels preparation. Rollback after activation
+switches signing back while retaining both roots until nodes have migrated back
+and the overlap can be retired. CA retirement is an explicit operator action.
+
+```bash
+vpnctl controller pki backup --config controller.yaml --out controller-backup.json
+vpnctl controller pki restore --file controller-backup.json \
+  --data-dir /var/lib/vpnctl-restored --config-out restored-controller.yaml
+```
+
+Backups include controller configuration, registry, token history and the complete
+PKI authority/revocation/renewal state. They contain private keys and are written
+with mode `0600`. Restore requires a fresh directory and prevents startup until
+all files are installed; an interrupted restore can resume with the same backup.
+The [PKI runbook](docs/pki-lifecycle.md) covers rollout gates, recovery, key exposure,
+legacy migration, metrics and the exact availability guarantees.
 
 ### Without mTLS
 

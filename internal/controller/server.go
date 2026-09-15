@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -61,12 +60,19 @@ type Server struct {
 	directOK         map[string]map[string]time.Time // node_id -> peer_id -> last success
 	probeResponder   *direct.Responder
 	tokenStore       *pki.TokenStore
+	authority        *pki.Authority
 	pkiDir           string
 	legacyCertLogged sync.Map
 }
 
 // NewServer constructs a controller server.
 func NewServer(cfg config.ControllerConfig) (*Server, error) {
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "restore.pending")); err == nil {
+		return nil, fmt.Errorf("controller restore is incomplete; resume with the same backup")
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
 	regPath := filepath.Join(cfg.DataDir, "registry.yaml")
 	reg, err := store.LoadRegistry(regPath)
 	if err != nil {
@@ -133,60 +139,20 @@ func (s *Server) InitPKI() (string, error) {
 	}
 
 	pkiDir := filepath.Join(s.cfg.DataDir, "pki")
-	if err := os.MkdirAll(pkiDir, 0o755); err != nil {
+	if err := os.MkdirAll(pkiDir, 0o700); err != nil {
 		return "", fmt.Errorf("create pki dir: %w", err)
 	}
 	s.pkiDir = pkiDir
 
-	caKeyPath := filepath.Join(pkiDir, "ca.key")
-	caCertPath := filepath.Join(pkiDir, "ca.crt")
-
-	// Generate CA if it doesn't exist.
-	if _, err := os.Stat(caCertPath); os.IsNotExist(err) {
-		caExpiry, err := time.ParseDuration(s.cfg.PKI.CAExpiry)
-		if err != nil {
-			return "", fmt.Errorf("parse ca_expiry: %w", err)
-		}
-		if err := pki.GenerateCA(caKeyPath, caCertPath, caExpiry); err != nil {
-			return "", fmt.Errorf("generate CA: %w", err)
-		}
-		slog.Info("generated CA certificate", "path", caCertPath)
+	policy, err := controllerPKIPolicy(s.cfg)
+	if err != nil {
+		return "", err
 	}
-
-	serverKeyPath := filepath.Join(pkiDir, "server.key")
-	serverCertPath := filepath.Join(pkiDir, "server.crt")
-
-	// Determine desired SANs: explicit config takes precedence; otherwise derive from listen addr.
-	desiredSANs := s.cfg.PKI.ServerSANs
-	if len(desiredSANs) == 0 {
-		desiredSANs = extractSANs(s.cfg.Listen)
+	authority, err := pki.OpenAuthority(pkiDir, policy)
+	if err != nil {
+		return "", fmt.Errorf("initialize certificate authority: %w", err)
 	}
-
-	// Generate server cert if missing, or regenerate if existing SANs don't match desired.
-	regenerate := false
-	if _, err := os.Stat(serverCertPath); os.IsNotExist(err) {
-		regenerate = true
-	} else {
-		existing, err := pki.LoadCert(serverCertPath)
-		if err != nil {
-			slog.Warn("could not load existing server cert, regenerating", "err", err)
-			regenerate = true
-		} else if !sansEqual(pki.CertSANs(existing), desiredSANs) {
-			slog.Info("server cert SANs changed, regenerating", "existing", pki.CertSANs(existing), "desired", desiredSANs)
-			regenerate = true
-		}
-	}
-
-	if regenerate {
-		serverExpiry, err := time.ParseDuration(s.cfg.PKI.ServerExpiry)
-		if err != nil {
-			return "", fmt.Errorf("parse server_expiry: %w", err)
-		}
-		if err := pki.GenerateServerCert(caCertPath, caKeyPath, serverKeyPath, serverCertPath, desiredSANs, serverExpiry); err != nil {
-			return "", fmt.Errorf("generate server cert: %w", err)
-		}
-		slog.Info("generated server certificate", "path", serverCertPath, "sans", desiredSANs)
-	}
+	s.authority = authority
 
 	// Open token store.
 	tokenPath := filepath.Join(pkiDir, "bootstrap-tokens.json")
@@ -246,7 +212,7 @@ func extractSANs(listen string) []string {
 
 // ListenAndServe runs the HTTP server.
 func (s *Server) ListenAndServe() error {
-	if s.cfg.PKI != nil && s.pkiDir == "" {
+	if s.cfg.PKI != nil && s.authority == nil {
 		return fmt.Errorf("controller PKI is configured but not initialized")
 	}
 	if s.cfg.WGApply {
@@ -279,19 +245,10 @@ func (s *Server) ListenAndServe() error {
 	}
 
 	if s.mtlsEnabled() {
-		tlsCfg, err := pki.ServerTLSConfig(
-			filepath.Join(s.pkiDir, "ca.crt"),
-			filepath.Join(s.pkiDir, "server.crt"),
-			filepath.Join(s.pkiDir, "server.key"),
-		)
-		if err != nil {
-			return fmt.Errorf("server TLS config: %w", err)
-		}
-		// Allow /bootstrap to work without a client cert. The
-		// requireClientCert middleware enforces client certs for all
-		// other endpoints.
-		tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
-		server.TLSConfig = tlsCfg
+		server.TLSConfig = s.authority.DynamicTLSConfig()
+		stopPKI := s.startPKIMaintenance()
+		defer stopPKI()
+
 		slog.Info("controller listening (mTLS)", "addr", s.cfg.Listen)
 		return server.ListenAndServeTLS("", "")
 	}
@@ -304,6 +261,9 @@ func (s *Server) ListenAndServe() error {
 func (s *Server) httpHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/bootstrap", s.handleBootstrap)
+	mux.HandleFunc("/pki/trust", s.requireClientCert(s.handlePKITrust))
+	mux.HandleFunc("/pki/renew", s.requireClientCert(s.handlePKIRenew))
+	mux.HandleFunc("/pki/ack", s.requireClientCert(s.handlePKIAck))
 	mux.HandleFunc("/register", s.requireClientCert(s.handleRegister))
 	mux.HandleFunc("/candidates", s.requireClientCert(s.handleCandidates))
 	mux.HandleFunc("/metrics", s.requireClientCert(s.handleMetrics))
@@ -376,6 +336,18 @@ func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 		if !s.nodeRegistered(identity) {
 			writeJSONError(w, http.StatusForbidden, "authenticated node is not registered")
 			return
+		}
+		if s.authority != nil {
+			if err := s.authority.Observe(cert, identity); err != nil {
+				code := http.StatusServiceUnavailable
+				if errors.Is(err, pki.ErrCertificateDenied) {
+					code = http.StatusForbidden
+				}
+				slog.Warn("certificate authorization denied", "node_id", identity, "fingerprint", certificateFingerprint(cert), "err", err)
+				metrics.PKIEventsTotal.WithLabelValues("controller", "authorize", "denied").Inc()
+				writeJSONError(w, code, "certificate authorization failed")
+				return
+			}
 		}
 		if legacy {
 			fingerprint := certificateFingerprint(cert)
@@ -512,39 +484,27 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load CA and sign the CSR.
-	caKeyPath := filepath.Join(s.pkiDir, "ca.key")
-	caCertPath := filepath.Join(s.pkiDir, "ca.crt")
-	caCert, caKey, err := pki.LoadCA(caKeyPath, caCertPath)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to load CA: "+err.Error())
+	if s.authority == nil {
+		writeJSONError(w, 503, "certificate authority unavailable")
 		return
 	}
-
-	clientExpiry, err := time.ParseDuration(s.cfg.PKI.ClientExpiry)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "invalid client_expiry: "+err.Error())
+	if err := pki.ValidateCSR([]byte(req.CSR)); err != nil {
+		writeJSONError(w, 400, "invalid CSR")
 		return
 	}
-
-	signedCert, err := pki.SignNodeCSR(caCert, caKey, []byte(req.CSR), req.Name, clientExpiry)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "failed to sign CSR: "+err.Error())
-		return
-	}
-
-	// Read CA cert PEM for the response.
-	caCertPEM, err := os.ReadFile(caCertPath)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to read CA cert: "+err.Error())
-		return
-	}
+	var signedCert string
+	var issuedState pki.AuthorityStatus
 
 	// Persist the registration before returning credentials to the node.
 	var result nodeRegistrationResult
 	err = s.tokenStore.Use(req.Token, req.Name, func() error {
 		var registrationErr error
 		result, registrationErr = s.registerNode(nodeRegistration{Name: req.Name}, s.cfg.WGApply)
+		if registrationErr != nil {
+			return registrationErr
+		}
+		signedCert, issuedState, registrationErr = s.authority.Issue([]byte(req.CSR), req.Name)
+		s.logPKIResult("issue", req.Name, registrationErr)
 		return registrationErr
 	})
 	if errors.Is(err, pki.ErrInvalidToken) {
@@ -557,8 +517,9 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, api.BootstrapResponse{
-		CACert:     string(caCertPEM),
-		ClientCert: string(signedCert),
+		CACert:     issuedState.CACert,
+		Generation: issuedState.Generation,
+		ClientCert: signedCert,
 		NodeID:     result.NodeID,
 		VPNIP:      result.VPNIP,
 	})
