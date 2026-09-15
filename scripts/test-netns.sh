@@ -14,12 +14,22 @@ trap 'exit 143' TERM
 artifact_dir=${VPNCTL_ARTIFACT_DIR:-$(mktemp -d /tmp/vpnctl-netns-results.XXXXXX)}
 mkdir -p "$artifact_dir"
 artifact_dir=$(cd "$artifact_dir" && pwd)
-# The container drops to read-only code; only this result directory is writable.
-go build -race -o "$build_dir/vpnctl" ./cmd/vpnctl
-go test -race -tags=integration -c -o "$build_dir/integration.test" ./tests/integration
+# Race overhead can saturate a small CI runner at 32 simultaneous TLS clients.
+# Keep the default for local stress; CI runs production builds plus a separate
+# full race job. Both profiles keep identical traffic/deadline assertions.
+build_flags=()
+case "${VPNCTL_RACE:-1}" in
+    1) build_flags=(-race) ;;
+    0) ;;
+    *) echo 'VPNCTL_RACE must be 0 or 1' >&2; exit 2 ;;
+esac
+docker_limits=()
+if [[ -n "${VPNCTL_TEST_CPUS:-}" ]]; then docker_limits=(--cpus "$VPNCTL_TEST_CPUS"); fi
+go build "${build_flags[@]}" -o "$build_dir/vpnctl" ./cmd/vpnctl
+go test "${build_flags[@]}" -tags=integration -c -o "$build_dir/integration.test" ./tests/integration
 docker build -t vpnctl-netns-test -f tests/integration/Dockerfile tests/integration
 echo "Network test results: $artifact_dir"
-docker run --rm --init --entrypoint /bin/sh --name "$container_name" --network none \
+docker run "${docker_limits[@]}" --rm --init --entrypoint /bin/sh --name "$container_name" --network none \
     --cap-add NET_ADMIN --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
     --mount "type=bind,src=$build_dir,dst=/test,readonly" \
     --mount "type=bind,src=$artifact_dir,dst=/results" \

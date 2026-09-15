@@ -146,7 +146,23 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		return nil
 	}
 	startAgent := func(n int) *networkProcess {
-		return startNetworkProcess(t, namespaces[n+1], filepath.Join(dir, fmt.Sprintf("node-%d.log", n)), nil, bin, "node", "serve", "--config", paths[n], "--retry-delay", "100ms", "--retry-max-delay", "1s")
+		t.Helper()
+		process := startNetworkProcess(t, namespaces[n+1], filepath.Join(dir, fmt.Sprintf("node-%d.log", n)), nil, bin, "node", "serve", "--config", paths[n], "--retry-delay", "100ms", "--retry-max-delay", "1s")
+		// Fleet API readiness does not prove that the agent has bound its UDP
+		// responder. An early client with an ephemeral port could take 51900.
+		eventually(t, 5*time.Second, "agent UDP responder ready", func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			out, err := netCommand(ctx, namespaces[n+1], "ss", "-H", "-lun", "sport", "=", ":51900").CombinedOutput()
+			if err != nil {
+				return err
+			}
+			if len(strings.TrimSpace(string(out))) == 0 {
+				return fmt.Errorf("agent has not bound its responder")
+			}
+			return nil
+		})
+		return process
 	}
 	for n := 0; n < size; n++ {
 		id := fmt.Sprintf("node-%d", n)
@@ -257,7 +273,9 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	eventually(t, 5*time.Second, "new enrollment over WG", func() error { return fleet(0) })
 	runFrozen := func(mode string) {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Fifty iterations retain their own 1s request budget. The batch
+		// timeout must cover the entire sequence on a small CI runner.
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		cmd := netCommand(ctx, namespaces[1], testBin, "-test.run=^TestNetworkWorker$")
 		cmd.Env = append(os.Environ(), "VPNCTL_WORKER="+mode, "VPNCTL_PKI="+frozenDir)

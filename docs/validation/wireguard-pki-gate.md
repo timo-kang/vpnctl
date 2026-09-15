@@ -26,6 +26,10 @@ VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-network-results \
 명시적으로 통합 검증을 요청했는데 권한이나 도구가 없으면 실패한다. `SKIP`을 성공으로
 보고하지 않는다. 일반 `go test ./...`에서는 이 커널 검증을 실행하지 않는다.
 GitHub Actions의 `M1 reliability`는 일반 race/vet/build와 커널 검증을 각각 실행한다.
+커널 CI는 `VPNCTL_RACE=0`으로 실제 배포 빌드를 사용한다. 기본값은 `VPNCTL_RACE=1`이며
+로컬 전체 규모 반복에는 race 계측을 포함한다. race의 CPU 비용 때문에 작은 CI runner에서
+32개 client의 TLS 처리량이 떨어지는 문제를 배포 성능과 구분한다. 트래픽·개별 요청 기한과
+실패 판정은 두 빌드에서 동일하다. `VPNCTL_TEST_CPUS=2`로 컨테이너 CPU를 제한할 수 있다.
 
 ## 네트워크와 절차
 
@@ -102,6 +106,14 @@ controller/API 복원과 손실 해제 후 API 복원은 5초, `wg0`가 사라�
    사용한다. 성공 결과만 캐시하지 않으므로 외부 drift와 삭제 장치 복구를 숨기지 않는다.
    [WireGuard tools 구현](https://git.zx2c4.com/wireguard-tools/tree/src/setconf.c),
    [Linux WireGuard 구현](https://github.com/torvalds/linux/blob/master/drivers/net/wireguard/netlink.c).
+
+6. **시험용 UDP 소켓과 agent 수신 포트 경합**: API 응답만 보고 agent가 준비됐다고
+   판단하면, 시험 클라이언트의 임시 UDP 포트가 51900을 먼저 차지할 수 있었다.
+   `ss`로 agent 수신 소켓이 바인딩된 뒤 프로브를 시작하도록 준비 판정을 강화했다.
+7. **CI의 계측 부하와 전체 반복 제한**: 작은 runner에서 race 계측을 적용한 32노드
+   TLS 요청이 지연됐다. 커널 CI에는 배포 빌드를 사용하고 별도 전체 race 작업을 유지한다.
+   같은 요청 기준의 2 CPU 배포 빌드 시험은 95,714건 실패 0건으로 통과했다.
+   폐기 인증서 50회 반복의 전체 시간 제한도 개별 1초 제한을 고려해 60초로 조정했다.
 
 ## 범위의 한계
 
