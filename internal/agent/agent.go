@@ -99,6 +99,13 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 				break
 			}
 			addr, nat, err := probeShared(ctx, shared, cfg.STUNServers, 5*time.Second)
+			// A slow STUN sweep can outlast its interval. Discard the queued
+			// tick so another blocking sweep cannot immediately starve the
+			// pending heartbeat and health checks.
+			stunTicker.Reset(time.Duration(cfg.STUNIntervalSec) * time.Second)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if err != nil {
 				slog.Warn("STUN probe failed", "err", err)
 				break

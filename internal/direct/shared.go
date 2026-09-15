@@ -6,7 +6,6 @@ package direct
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"strings"
 	"sync"
@@ -15,12 +14,21 @@ import (
 	"github.com/pion/stun/v3"
 )
 
+type peerProbe struct {
+	remote *net.UDPAddr
+	ack    chan struct{}
+}
+
 // Shared uses a single UDP socket for STUN and direct probes.
 type Shared struct {
 	conn       *net.UDPConn
+	ctx        context.Context
+	cancel     context.CancelFunc
+	done       chan struct{}
+	writeToken chan struct{}
 	mu         sync.Mutex
-	stunWriter io.Writer
-	pending    map[string]chan struct{}
+	stunConn   *stunConn
+	pending    map[string]*peerProbe
 }
 
 // ListenShared creates a shared UDP socket and starts the read loop.
@@ -29,18 +37,17 @@ func ListenShared(addr string) (*Shared, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return nil, err
 	}
-
-	shared := &Shared{conn: conn}
+	ctx, cancel := context.WithCancel(context.Background())
+	shared := &Shared{conn: conn, ctx: ctx, cancel: cancel, done: make(chan struct{}), writeToken: make(chan struct{}, 1)}
+	shared.writeToken <- struct{}{}
 	go shared.readLoop()
 	return shared, nil
 }
 
-// LocalAddr returns the local address for the shared socket.
 func (s *Shared) LocalAddr() string {
 	if s == nil || s.conn == nil {
 		return ""
@@ -48,188 +55,202 @@ func (s *Shared) LocalAddr() string {
 	return s.conn.LocalAddr().String()
 }
 
-// Close closes the shared socket.
+// Close interrupts pending requests, including DNS lookups, and joins the reader.
 func (s *Shared) Close() error {
 	if s == nil || s.conn == nil {
 		return nil
 	}
-	return s.conn.Close()
+	s.cancel()
+	err := s.conn.Close()
+	<-s.done
+	return err
 }
 
-// ProbeSTUN sends a STUN binding request using the shared socket.
-func (s *Shared) ProbeSTUN(ctx context.Context, server string, timeout time.Duration) (string, error) {
+func (s *Shared) requestContext(parent context.Context, timeout time.Duration) (context.Context, func()) {
+	ctx, cancel := probeContext(parent, timeout)
+	stop := context.AfterFunc(s.ctx, cancel)
+	if s.ctx.Err() != nil {
+		cancel()
+	}
+	return ctx, func() { stop(); cancel() }
+}
+
+func (s *Shared) requestError(ctx context.Context, err error) error {
+	if s.ctx.Err() != nil {
+		return net.ErrClosed
+	}
+	return contextError(ctx, err)
+}
+
+// Writes share a socket deadline. Serialize deadline changes and join a running
+// cancellation callback before another writer can acquire the socket.
+func (s *Shared) write(ctx context.Context, payload []byte, remote *net.UDPAddr) (int, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-s.writeToken:
+	}
+	defer func() { s.writeToken <- struct{}{} }()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	deadline, _ := ctx.Deadline()
+	if err := s.conn.SetWriteDeadline(deadline); err != nil {
+		return 0, err
+	}
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { s.conn.SetWriteDeadline(time.Now()); close(interrupted) })
+	n, err := s.conn.WriteToUDP(payload, remote)
+	if !stop() {
+		<-interrupted
+	}
+	return n, contextError(ctx, err)
+}
+
+// ProbeSTUN preserves the STUN client's retransmission and transaction handling.
+// The adapter owns only its queue; closing it never closes the shared UDP socket.
+func (s *Shared) ProbeSTUN(parent context.Context, server string, timeout time.Duration) (result string, err error) {
 	if s == nil || s.conn == nil {
 		return "", fmt.Errorf("shared socket not initialized")
 	}
-
-	server = strings.TrimSpace(server)
+	ctx, cancel := s.requestContext(parent, timeout)
+	defer cancel()
+	defer func() { err = s.requestError(ctx, err) }()
+	server = strings.TrimPrefix(strings.TrimSpace(server), "stun:")
 	if server == "" {
 		return "", fmt.Errorf("empty STUN server")
 	}
-	if strings.HasPrefix(server, "stun:") {
-		server = strings.TrimPrefix(server, "stun:")
-	}
-
-	stunAddr, err := net.ResolveUDPAddr("udp", server)
+	remote, err := resolveUDPAddr(ctx, server)
 	if err != nil {
 		return "", err
 	}
-
-	stunL, stunR := net.Pipe()
-	client, err := stun.NewClient(stunR, stun.WithNoConnClose())
-	if err != nil {
-		_ = stunL.Close()
-		_ = stunR.Close()
-		return "", err
-	}
-	defer func() {
-		_ = client.Close()
-		_ = stunL.Close()
-		_ = stunR.Close()
-	}()
-
+	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	adapter := &stunConn{shared: s, ctx: ctx, remote: remote, transaction: msg.TransactionID, packets: make(chan []byte, 1), closed: make(chan struct{})}
 	s.mu.Lock()
-	if s.stunWriter != nil {
+	if s.stunConn != nil {
 		s.mu.Unlock()
 		return "", fmt.Errorf("stun probe already in progress")
 	}
-	s.stunWriter = stunL
+	s.stunConn = adapter
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.stunWriter = nil
-		s.mu.Unlock()
-	}()
-
-	writeErr := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, err := stunL.Read(buf)
-			if err != nil {
-				writeErr <- err
-				return
-			}
-			if _, err := s.conn.WriteToUDP(buf[:n], stunAddr); err != nil {
-				writeErr <- err
-				return
-			}
-		}
-	}()
-
-	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
-	var xorAddr stun.XORMappedAddress
-	done := make(chan error, 1)
-	go func() {
-		done <- client.Do(msg, func(res stun.Event) {
-			if res.Error != nil {
-				return
-			}
-			_ = xorAddr.GetFrom(res.Message)
-		})
-	}()
-
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-
-	select {
-	case err := <-done:
-		if err != nil {
-			return "", err
-		}
-		if xorAddr.IP == nil {
-			return "", fmt.Errorf("stun response missing mapped address")
-		}
-		return xorAddr.String(), nil
-	case err := <-writeErr:
+	defer func() { s.mu.Lock(); s.stunConn = nil; s.mu.Unlock() }()
+	client, err := stun.NewClient(adapter)
+	if err != nil {
+		adapter.Close()
 		return "", err
+	}
+	defer client.Close()
+	type response struct {
+		address string
+		err     error
+	}
+	done := make(chan response, 1)
+	if err := client.Start(msg, func(event stun.Event) {
+		res := response{err: event.Error}
+		if res.err == nil && event.Message.Type != stun.BindingSuccess {
+			res.err = fmt.Errorf("STUN binding error response")
+		}
+		if res.err == nil {
+			var mapped stun.XORMappedAddress
+			res.err = mapped.GetFrom(event.Message)
+			if res.err == nil {
+				res.address = mapped.String()
+			}
+		}
+		// A shutdown/error callback must never wait for a caller that has returned.
+		select {
+		case done <- res:
+		default:
+		}
+	}); err != nil {
+		return "", err
+	}
+	select {
+	case res := <-done:
+		return res.address, res.err
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
 }
 
 func (s *Shared) readLoop() {
+	defer close(s.done)
+	defer s.cancel()
+	defer s.conn.Close()
 	buf := make([]byte, 2048)
 	for {
-		n, addr, err := s.conn.ReadFromUDP(buf)
+		n, remote, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
 			return
 		}
 		if stun.IsMessage(buf[:n]) {
 			s.mu.Lock()
-			w := s.stunWriter
+			adapter := s.stunConn
 			s.mu.Unlock()
-			if w != nil {
-				_, _ = w.Write(buf[:n])
+			if adapter != nil {
+				adapter.deliver(remote, buf[:n])
 			}
 			continue
 		}
-
 		msg := string(buf[:n])
 		if strings.HasPrefix(msg, ackPrefix) {
 			nonce := strings.TrimPrefix(msg, ackPrefix)
 			s.mu.Lock()
-			ch := s.pending[nonce]
-			if ch != nil {
+			pending := s.pending[nonce]
+			if pending != nil && sameUDPAddr(remote, pending.remote) {
 				delete(s.pending, nonce)
-				close(ch)
+				close(pending.ack)
 			}
 			s.mu.Unlock()
 			continue
 		}
-
-		handlePacket(s.conn, addr, buf[:n])
+		// Responder writes also use the serialized deadline so another probe's
+		// cancellation cannot accidentally poison subsequent replies.
+		var reply []byte
+		if strings.HasPrefix(msg, probePrefix) {
+			reply = []byte(ackPrefix + strings.TrimPrefix(msg, probePrefix))
+		}
+		if strings.HasPrefix(msg, echoPrefix) {
+			reply = buf[:n]
+		}
+		if reply != nil {
+			ctx, cancel := s.requestContext(s.ctx, 100*time.Millisecond)
+			_, _ = s.write(ctx, reply, remote)
+			cancel()
+		}
 	}
 }
 
-// ProbePeer sends a probe using the shared socket and waits for an ack.
-func (s *Shared) ProbePeer(ctx context.Context, peerAddr string, timeout time.Duration) (time.Duration, error) {
+func (s *Shared) ProbePeer(parent context.Context, peerAddr string, timeout time.Duration) (rtt time.Duration, err error) {
 	if s == nil || s.conn == nil {
 		return 0, fmt.Errorf("shared socket not initialized")
 	}
-	peerUDP, err := net.ResolveUDPAddr("udp", peerAddr)
+	ctx, cancel := s.requestContext(parent, timeout)
+	defer cancel()
+	defer func() { err = s.requestError(ctx, err) }()
+	remote, err := resolveUDPAddr(ctx, peerAddr)
 	if err != nil {
 		return 0, err
 	}
-
 	nonce, err := randomNonce(8)
 	if err != nil {
 		return 0, err
 	}
-	payload := []byte(probePrefix + nonce)
-
-	start := time.Now()
-	ch := make(chan struct{})
+	pending := &peerProbe{remote: remote, ack: make(chan struct{})}
 	s.mu.Lock()
 	if s.pending == nil {
-		s.pending = make(map[string]chan struct{})
+		s.pending = make(map[string]*peerProbe)
 	}
-	s.pending[nonce] = ch
+	s.pending[nonce] = pending
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		if pending := s.pending[nonce]; pending == ch {
-			delete(s.pending, nonce)
-		}
-		s.mu.Unlock()
-	}()
-	if _, err := s.conn.WriteToUDP(payload, peerUDP); err != nil {
+	defer func() { s.mu.Lock(); delete(s.pending, nonce); s.mu.Unlock() }()
+	start := time.Now()
+	if _, err := s.write(ctx, []byte(probePrefix+nonce), remote); err != nil {
 		return 0, err
 	}
-
-	var timer <-chan time.Time
-	if timeout > 0 {
-		timer = time.After(timeout)
-	}
-
 	select {
-	case <-ch:
+	case <-pending.ack:
 		return time.Since(start), nil
-	case <-timer:
-		return 0, fmt.Errorf("probe timeout")
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
