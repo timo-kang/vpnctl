@@ -164,7 +164,20 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, 404, err.Error())
 			return
 		}
+	case "pki.status", "pki.revoke", "ca.prepare", "ca.activate", "ca.retire", "ca.rollback", "pki.backup":
+		operation, target = req.Operation, "pki"
+		if req.Operation == "pki.revoke" {
+			target = req.Fingerprint
+		}
+		response, err = s.adminPKI(req)
+		if errors.Is(err, pki.ErrTransitionBlocked) {
+			result = "rejected"
+			writeJSONError(w, http.StatusConflict, err.Error())
+			return
+		}
 	case "token.create", "token.list", "token.revoke":
+		s.stateMu.RLock()
+		defer s.stateMu.RUnlock()
 		operation, target = req.Operation, "tokens"
 		if s.tokenStore == nil {
 			writeJSONError(w, 409, "PKI is not enabled")

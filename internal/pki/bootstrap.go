@@ -203,6 +203,14 @@ func (ts *TokenStore) reloadLocked() error {
 		return err
 	}
 
+	return ts.decode(data)
+}
+
+func ValidateTokenSnapshot(data []byte) error {
+	return (&TokenStore{}).decode(data)
+}
+
+func (ts *TokenStore) decode(data []byte) error {
 	tokens := make(map[string]TokenRecord)
 	if bytes.HasPrefix(bytes.TrimSpace(data), []byte("[")) {
 		var legacy []string

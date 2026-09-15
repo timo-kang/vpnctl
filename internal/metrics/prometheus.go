@@ -60,3 +60,10 @@ var (
 		Help: "Recent probe loss ratio (0.0 to 1.0)",
 	}, []string{"peer"})
 )
+
+var (
+	PKIEventsTotal   = promauto.NewCounterVec(prometheus.CounterOpts{Name: "vpnctl_pki_events_total", Help: "PKI operations by component, operation and result"}, []string{"component", "operation", "result"})
+	PKIExpirySeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{Name: "vpnctl_pki_expiry_seconds", Help: "Seconds until the current server, earliest trusted CA, or local client expires"}, []string{"kind"})
+	PKICertificates  = promauto.NewGaugeVec(prometheus.GaugeOpts{Name: "vpnctl_pki_certificates", Help: "Tracked client certificates by current status"}, []string{"status"})
+	PKIOverlap       = promauto.NewGauge(prometheus.GaugeOpts{Name: "vpnctl_pki_ca_overlap", Help: "One while a staged CA transition is in progress"})
+)

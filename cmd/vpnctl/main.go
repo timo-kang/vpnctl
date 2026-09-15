@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"crypto/tls"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -56,7 +55,9 @@ Usage:
   vpnctl controller init --config <path>
   vpnctl controller status --config <path>
   vpnctl controller token create|list|revoke --config <path>
-  vpnctl node join --config <path> [--token <bootstrap-token>]
+  vpnctl controller pki status|trust|revoke|ca-prepare|ca-activate|ca-retire|ca-rollback|backup --config <path>
+  vpnctl controller pki restore --file <backup> --data-dir <fresh-dir> --config-out <path>
+  vpnctl node join --config <path> [--token <bootstrap-token> --ca-cert <trusted-ca.pem>]
   vpnctl node serve --config <path>
   vpnctl node run --config <path>
   vpnctl node sync-config --config <path>
@@ -165,6 +166,10 @@ func handleController(args []string) {
 		controllerToken(args[1:])
 	case "remove-node":
 		controllerRemoveNode(args[1:])
+	case "pki":
+		if err := runControllerPKI(args[1:]); err != nil {
+			fatal(err)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown controller subcommand %q\n", args[0])
 		os.Exit(2)
@@ -402,6 +407,7 @@ func nodeJoin(args []string) {
 	directMode := fs.String("direct", "", "direct mode: auto|off")
 	stunList := fs.String("stun", "", "comma-separated STUN servers")
 	token := fs.String("token", "", "bootstrap token for mTLS enrollment")
+	caPath := fs.String("ca-cert", "", "trusted controller CA bundle, obtained out of band")
 	_ = fs.Parse(args)
 
 	cfg, err := loadConfig(*configPath)
@@ -429,15 +435,20 @@ func nodeJoin(args []string) {
 			fatal(fmt.Errorf("generate CSR: %w", err))
 		}
 
-		// Use an insecure TLS client for bootstrap — we don't have the CA cert yet.
+		// Bootstrap must authenticate the controller before disclosing the token.
+		if *caPath == "" {
+			fatal(errors.New("--ca-cert is required for authenticated bootstrap"))
+		}
+		tlsCfg, err := pki.ClientTLSConfig(*caPath, "", "")
+		if err != nil {
+			fatal(fmt.Errorf("bootstrap trust: %w", err))
+		}
 		baseURL := normalizeBootstrapURL(cfg.Node.Controller)
-		insecureClient := api.NewTLSClient(baseURL, &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // bootstrap phase
-			MinVersion:         tls.VersionTLS13,
-		})
+		bootstrapClient := api.NewTLSClient(baseURL, tlsCfg)
+		defer bootstrapClient.CloseIdleConnections()
 
 		ctx := context.Background()
-		resp, err := insecureClient.Bootstrap(ctx, api.BootstrapRequest{
+		resp, err := bootstrapClient.Bootstrap(ctx, api.BootstrapRequest{
 			Token: *token,
 			Name:  cfg.Node.Name,
 			CSR:   string(csrPEM),
@@ -451,17 +462,14 @@ func nodeJoin(args []string) {
 		if pkiDir == "" {
 			pkiDir = filepath.Join(filepath.Dir(*configPath), "pki")
 		}
-		if err := os.MkdirAll(pkiDir, 0o755); err != nil {
+		credentials := pki.Credentials{Version: 1, Generation: resp.Generation, CACert: resp.CACert, ClientCert: resp.ClientCert, ClientKey: string(keyPEM)}
+		if resp.NodeID != cfg.Node.Name {
+			fatal(errors.New("bootstrap response identity mismatch"))
+		}
+		if err := credentials.ValidateForInstall(cfg.Node.Name); err != nil {
 			fatal(err)
 		}
-
-		if err := os.WriteFile(filepath.Join(pkiDir, "ca.crt"), []byte(resp.CACert), 0o644); err != nil {
-			fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(pkiDir, "client.key"), keyPEM, 0o600); err != nil {
-			fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(pkiDir, "client.crt"), []byte(resp.ClientCert), 0o644); err != nil {
+		if err := pki.SaveCredentials(pkiDir, credentials, ""); err != nil {
 			fatal(err)
 		}
 
@@ -1613,32 +1621,10 @@ func normalizeBootstrapURL(addr string) string {
 
 // newAPIClient creates an API client, using mTLS if PKI credentials exist.
 func newAPIClient(cfg *config.NodeConfig) *api.Client {
-	baseURL := normalizeBaseURL(cfg.Controller)
-
 	if cfg.PKIDir != "" {
-		caCert := filepath.Join(cfg.PKIDir, "ca.crt")
-		clientCert := filepath.Join(cfg.PKIDir, "client.crt")
-		clientKey := filepath.Join(cfg.PKIDir, "client.key")
-
-		// Check if all cert files exist.
-		if fileExists(caCert) && fileExists(clientCert) && fileExists(clientKey) {
-			tlsCfg, err := pki.ClientTLSConfig(caCert, clientCert, clientKey)
-			if err != nil {
-				slog.Warn("mTLS config failed, falling back to plain HTTP", "err", err)
-				return api.NewClient(baseURL)
-			}
-			// Switch to HTTPS.
-			baseURL = normalizeBootstrapURL(cfg.Controller)
-			return api.NewTLSClient(baseURL, tlsCfg)
-		}
+		return api.NewCredentialClient(cfg.Controller, cfg.PKIDir)
 	}
-
-	return api.NewClient(baseURL)
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+	return api.NewClient(normalizeBaseURL(cfg.Controller))
 }
 
 func selectPeer(peer string, candidates []api.PeerCandidate) (string, string) {
