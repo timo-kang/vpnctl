@@ -3,6 +3,15 @@
 기준: PR #33 병합 후 `main`의 `f8a5b51` 위에서 구현한 `feat/pki-lifecycle`.
 검증일: 2026-09-15. Linux 일반 사용자 환경, Go race detector 사용.
 
+## 후속 커널 검증
+
+초기 검증에서 남겨 둔 WireGuard 항목은 Docker의 격리 network namespace를 이용해
+후속 검증했다. 실제 agent·커널 WireGuard·UDP/TCP application·VPN 경유 HTTPS로
+1/3/8/32노드를 구성했다. 재시작 복구와 중복 WG 적용 결함 수정도 포함한다.
+[후속 절차·판정 기준](wireguard-pki-gate.md),
+[PR #36의 최종 측정 결과](https://github.com/timo-kang/vpnctl/pull/36)를 참고한다.
+아래 표와 실행 수치는 PR #34 당시의 제어 API 검증 기록이다.
+
 ## 완료 기준별 상태
 
 | #12 기준 | 현재 근거 | 판정 |

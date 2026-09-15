@@ -1,0 +1,50 @@
+name: M1 reliability
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go race, vet and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: go build ./cmd/vpnctl
+
+  wireguard:
+    name: Kernel WireGuard and PKI lifecycle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Isolated namespaces, real processes, variable fleet and fault injection
+        env:
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-network-results
+          VPNCTL_RACE: '0'
+        run: ./scripts/test-netns.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: wireguard-measurements
+          path: ${{ runner.temp }}/vpnctl-network-results
+          if-no-files-found: warn
+          retention-days: 14

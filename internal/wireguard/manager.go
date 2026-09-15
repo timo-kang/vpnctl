@@ -217,6 +217,11 @@ func (m *Manager) interfaceExists(iface string) bool {
 }
 
 func (m *Manager) syncConf(iface string, content string) error {
+	// wg syncconf preserves peers but still reapplies their AllowedIPs. Avoid
+	// replacing unchanged routing entries on every heartbeat and restart.
+	if current, err := m.output("wg", "showconf", iface); err == nil && sameSetConf(content, current) {
+		return nil
+	}
 	tmp, err := os.CreateTemp("", "vpnctl-wg-*.conf")
 	if err != nil {
 		return err

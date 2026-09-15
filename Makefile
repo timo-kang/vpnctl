@@ -3,13 +3,16 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD   ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD)
 
-.PHONY: build test clean docker
+.PHONY: build test test-netns clean docker
 
 build:
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o vpnctl ./cmd/vpnctl
 
 test:
 	go test ./...
+
+test-netns:
+	./scripts/test-netns.sh
 
 clean:
 	rm -f vpnctl
