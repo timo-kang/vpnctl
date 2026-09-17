@@ -4,11 +4,12 @@
 package peersource
 
 import (
+	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+	"vpnctl/internal/execx"
 )
 
 const defaultProbePort = 51900
@@ -17,6 +18,7 @@ const defaultProbePort = 51900
 type WgSource struct {
 	iface     string
 	probePort int
+	runner    execx.ContextRunner
 }
 
 // NewWgSource returns a WgSource for the given interface.
@@ -25,7 +27,7 @@ func NewWgSource(iface string, probePort int) *WgSource {
 	if probePort <= 0 {
 		probePort = defaultProbePort
 	}
-	return &WgSource{iface: iface, probePort: probePort}
+	return &WgSource{iface: iface, probePort: probePort, runner: execx.NewOSRunner(nil, nil)}
 }
 
 // InterfaceName returns the WireGuard interface name.
@@ -38,28 +40,19 @@ func (s *WgSource) SelfIP() string {
 }
 
 // Discover runs `wg show <iface> dump` and returns the parsed set of peers.
-func (s *WgSource) Discover() ([]Peer, error) {
-	out, err := wgShowDump(s.iface)
+func (s *WgSource) Discover() ([]Peer, error) { return s.DiscoverContext(context.Background()) }
+
+func (s *WgSource) DiscoverContext(ctx context.Context) ([]Peer, error) {
+	out, err := s.runner.OutputContext(ctx, "wg", "show", s.iface, "dump")
 	if err != nil {
 		return nil, fmt.Errorf("wg show %s dump: %w", s.iface, err)
 	}
 	return parseWgDump(out, s.probePort), nil
 }
 
-// wgShowDump executes `wg show <iface> dump` and returns the raw output.
-func wgShowDump(iface string) (string, error) {
-	cmd := exec.Command("wg", "show", iface, "dump")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
 // detectSelfIP reads the first IPv4 address on the given interface via `ip -4 addr show dev <iface>`.
 func detectSelfIP(iface string) (string, error) {
-	cmd := exec.Command("ip", "-4", "addr", "show", "dev", iface)
-	out, err := cmd.Output()
+	out, err := execx.NewOSRunner(nil, nil).Output("ip", "-4", "addr", "show", "dev", iface)
 	if err != nil {
 		return "", err
 	}

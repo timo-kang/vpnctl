@@ -4,11 +4,14 @@
 package wireguard
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"vpnctl/internal/config"
 	"vpnctl/internal/execx"
@@ -16,14 +19,15 @@ import (
 
 // Manager executes ip/wg commands. It is injectable for unit tests.
 type Manager struct {
-	r execx.Runner
+	r   execx.Runner
+	ctx context.Context
 }
 
 func NewManager(r execx.Runner) *Manager {
 	if r == nil {
 		r = execx.NewOSRunner(os.Stdout, os.Stderr)
 	}
-	return &Manager{r: r}
+	return &Manager{r: r, ctx: context.Background()}
 }
 
 var defaultManager = NewManager(execx.NewOSRunner(os.Stdout, os.Stderr))
@@ -32,8 +36,28 @@ func DefaultManager() *Manager {
 	return defaultManager
 }
 
+// WithContext returns an independent view, safe to use alongside the original.
+func (m *Manager) WithContext(ctx context.Context) *Manager {
+	return &Manager{r: m.r, ctx: ctx}
+}
+
+// A mutation has a total budget in addition to individual command timeouts.
+// Controller rollback obtains a fresh budget and is never tied to an HTTP client.
+const OperationTimeout = 30 * time.Second
+
+func (m *Manager) operation() (*Manager, context.CancelFunc) {
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, OperationTimeout)
+	return m.WithContext(ctx), cancel
+}
+
 // Up brings up the WireGuard interface using ip + wg syncconf.
 func (m *Manager) Up(cfg config.NodeConfig, setConf string) error {
+	m, cancel := m.operation()
+	defer cancel()
 	if cfg.WGInterface == "" {
 		return fmt.Errorf("wg_interface is required")
 	}
@@ -78,6 +102,8 @@ func (m *Manager) Up(cfg config.NodeConfig, setConf string) error {
 
 // Down removes the WireGuard interface.
 func (m *Manager) Down(cfg config.NodeConfig) error {
+	m, cancel := m.operation()
+	defer cancel()
 	if config.PolicyRoutingEnabled(&cfg) {
 		_ = m.flushPolicyTable(cfg.PolicyRoutingTable)
 		_ = m.deletePolicyRule(cfg.PolicyRoutingPriority, cfg.PolicyRoutingTable, cfg.PolicyRoutingCIDR)
@@ -122,6 +148,8 @@ func (m *Manager) Status(iface string) (string, error) {
 
 // ApplyPeers updates WireGuard peers and policy routes for direct paths.
 func (m *Manager) ApplyPeers(cfg config.NodeConfig, peers []Peer) error {
+	m, cancel := m.operation()
+	defer cancel()
 	setConf, err := RenderSetConf(cfg, peers)
 	if err != nil {
 		return err
@@ -168,6 +196,8 @@ func (m *Manager) installPolicyBaselineRoutes(cfg config.NodeConfig) error {
 
 // ApplyServer ensures the interface is up and syncs peers (controller side).
 func (m *Manager) ApplyServer(cfg ServerConfig, peers []Peer) error {
+	m, cancel := m.operation()
+	defer cancel()
 	if cfg.Interface == "" {
 		return fmt.Errorf("wg_interface is required")
 	}
@@ -197,8 +227,10 @@ func (m *Manager) ApplyServer(cfg ServerConfig, peers []Peer) error {
 }
 
 func (m *Manager) ensureInterface(iface string) error {
-	if m.interfaceExists(iface) {
+	if _, err := m.output("ip", "link", "show", "dev", iface); err == nil {
 		return nil
+	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 	err := m.run("ip", "link", "add", "dev", iface, "type", "wireguard")
 	if err == nil {
@@ -211,16 +243,13 @@ func (m *Manager) ensureInterface(iface string) error {
 	return err
 }
 
-func (m *Manager) interfaceExists(iface string) bool {
-	_, err := m.output("ip", "link", "show", "dev", iface)
-	return err == nil
-}
-
 func (m *Manager) syncConf(iface string, content string) error {
 	// wg syncconf preserves peers but still reapplies their AllowedIPs. Avoid
 	// replacing unchanged routing entries on every heartbeat and restart.
 	if current, err := m.output("wg", "showconf", iface); err == nil && sameSetConf(content, current) {
 		return nil
+	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 	tmp, err := os.CreateTemp("", "vpnctl-wg-*.conf")
 	if err != nil {
@@ -285,12 +314,24 @@ func (m *Manager) run(name string, args ...string) error {
 	if m == nil || m.r == nil {
 		return fmt.Errorf("runner not initialized")
 	}
+	if m.ctx != nil && m.ctx.Err() != nil {
+		return m.ctx.Err()
+	}
+	if runner, ok := m.r.(execx.ContextRunner); ok {
+		return runner.RunContext(m.ctx, name, args...)
+	}
 	return m.r.Run(name, args...)
 }
 
 func (m *Manager) output(name string, args ...string) (string, error) {
 	if m == nil || m.r == nil {
 		return "", fmt.Errorf("runner not initialized")
+	}
+	if m.ctx != nil && m.ctx.Err() != nil {
+		return "", m.ctx.Err()
+	}
+	if runner, ok := m.r.(execx.ContextRunner); ok {
+		return runner.OutputContext(m.ctx, name, args...)
 	}
 	return m.r.Output(name, args...)
 }

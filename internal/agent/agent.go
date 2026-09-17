@@ -217,7 +217,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 				if !peersEqual(activePeers, desired) {
 					peerList := peersFromMap(desired)
 					slog.Info("injecting wg peers", "count", len(peerList))
-					if err := wireguard.ApplyPeers(cfg, peerList); err != nil {
+					if err := wireguard.DefaultManager().WithContext(ctx).ApplyPeers(cfg, peerList); err != nil {
 						slog.Error("apply peers failed", "err", err)
 					} else {
 						slog.Info("wg peers injected", "count", len(peerList))

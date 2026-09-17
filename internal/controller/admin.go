@@ -79,6 +79,14 @@ func localActor(conn net.Conn) (string, bool) {
 // startAdmin requires ownership established by AcquireStateLock. A leftover
 // socket from a crashed owner is safe to unlink while holding that lock.
 func (s *Server) startAdmin() (func(), error) {
+	service, err := s.startAdminService()
+	if err != nil {
+		return nil, err
+	}
+	return service.stop, nil
+}
+
+func (s *Server) startAdminService() (*managedHTTP, error) {
 	path := api.AdminSocketPath(s.cfg.DataDir)
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
@@ -109,19 +117,7 @@ func (s *Server) startAdmin() (func(), error) {
 			return ctx
 		},
 	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("admin IPC stopped", "err", err)
-		}
-	}()
-	return func() {
-		// Keep controller ownership until admitted mutations have finished. Close
-		// alone only stops connections and could leave handlers writing old state.
-		_ = server.Shutdown(context.Background())
-		<-done
-	}, nil
+	return startHTTP(server, listener, false), nil
 }
 
 func tokenAuditID(token string) string {

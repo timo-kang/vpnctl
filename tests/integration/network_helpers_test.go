@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -155,4 +156,32 @@ func newNamespaces(t *testing.T, size int) []string {
 		netOutput(t, ns, "ip", "link", "set", "eth0", "up")
 	}
 	return namespaces
+}
+
+func (p *networkProcess) terminate(t *testing.T) {
+	t.Helper()
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	p.finishWithin(t, 12*time.Second)
+}
+
+func (p *networkProcess) finishWithin(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	if p.stopped {
+		t.Fatal("process already stopped")
+	}
+	p.stopped = true
+	done := make(chan error, 1)
+	go func() { done <- p.cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("process failed: %v (log: %s)", err, p.log)
+		}
+	case <-time.After(timeout):
+		_ = p.cmd.Process.Kill()
+		<-done
+		t.Fatal("process did not exit within", timeout)
+	}
 }

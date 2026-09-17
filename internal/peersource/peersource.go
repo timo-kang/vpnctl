@@ -5,7 +5,10 @@
 // from various backends (live interface, config file, etc.).
 package peersource
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Peer holds the observable attributes of a single WireGuard peer.
 type Peer struct {
@@ -31,4 +34,18 @@ type PeerSource interface {
 	SelfIP() string
 	// InterfaceName returns the WireGuard interface name.
 	InterfaceName() string
+}
+
+// Discover uses owner cancellation when a source supports it. File sources keep
+// the existing contract; their filesystem errors are still returned to callers.
+func Discover(ctx context.Context, source PeerSource) ([]Peer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if source, ok := source.(interface {
+		DiscoverContext(context.Context) ([]Peer, error)
+	}); ok {
+		return source.DiscoverContext(ctx)
+	}
+	return source.Discover()
 }
