@@ -46,6 +46,8 @@ type Server struct {
 	cfg     config.ControllerConfig
 	regPath string
 	mu      sync.Mutex
+	// mutationMu serializes registry writers while mu only protects published state.
+	mutationMu sync.Mutex
 	// stateMu drains admitted requests before removal, including metric writes.
 	stateMu sync.RWMutex
 	reg     *store.Registry
@@ -295,7 +297,7 @@ func (s *Server) httpHandler() http.Handler {
 	// Status page — simple HTML dashboard, no auth required.
 	mux.HandleFunc("/status", statuspage.Handler(s.statusPageData))
 
-	return mux
+	return observeHTTP(mux)
 }
 
 // StartProbeResponder starts a UDP probe responder for health checks.
@@ -329,7 +331,9 @@ type authenticatedNode struct {
 // authorizeNode to bind the authenticated identity to the requested resource.
 func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		admissionStart := time.Now()
 		s.stateMu.RLock()
+		observeStage("api", "admission_wait", admissionStart)
 		defer s.stateMu.RUnlock()
 		if !s.mtlsEnabled() {
 			next(w, r)
@@ -356,7 +360,10 @@ func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if s.authority != nil {
-			if err := s.authority.Observe(cert, identity); err != nil {
+			authStart := time.Now()
+			authErr := s.authority.Observe(cert, identity)
+			observeStage("api", "certificate_authorize", authStart)
+			if err := authErr; err != nil {
 				code := http.StatusServiceUnavailable
 				if errors.Is(err, pki.ErrCertificateDenied) {
 					code = http.StatusForbidden
@@ -432,7 +439,9 @@ func (s *Server) authorizeNode(w http.ResponseWriter, r *http.Request, claimedNo
 }
 
 func (s *Server) nodeRegistered(nodeID string) bool {
+	start := time.Now()
 	s.mu.Lock()
+	observeStage("identity", "registry_wait", start)
 	defer s.mu.Unlock()
 	for _, node := range s.reg.Nodes {
 		if node.ID == nodeID {
@@ -651,8 +660,11 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 	if err := validateRegistrationInput(input); err != nil {
 		return nodeRegistrationResult{}, fmt.Errorf("%w: %v", errRegistrationValidation, err)
 	}
+	start := time.Now()
+	s.mutationMu.Lock()
+	observeStage("register", "writer_wait", start)
+	defer s.mutationMu.Unlock()
 	now := time.Now().UTC()
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -724,34 +736,51 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 	}, nil
 }
 
-// commitRegistryLocked applies the replacement before persistence and restores
-// the previous dataplane on any failure. Caller owns s.mu.
+// commitRegistryLocked is called with mutationMu and mu held. It temporarily
+// releases mu during external I/O so readers can use the last durable state.
+// Writers remain serialized, including NAT updates and node removal; publication
+// and all caller-side volatile state changes still occur with mu held.
 func (s *Server) commitRegistryLocked(next *store.Registry, autoApply bool) error {
 	previous := s.reg
+	err := func() error {
+		s.mu.Unlock()
+		defer s.mu.Lock() // restore the caller's lock even if an injected writer panics
+		return s.applyAndPersist(previous, next, autoApply)
+	}()
+	if err == nil {
+		s.reg = next
+	}
+	return err
+}
+
+func (s *Server) applyAndPersist(previous, next *store.Registry, autoApply bool) error {
+	rollback := func(cause error) error {
+		start := time.Now()
+		err := s.applyWG(peersForWGRegistry(previous))
+		observeStage("transaction", "rollback", start)
+		if err != nil {
+			err = fmt.Errorf("rollback WireGuard registry: %w", err)
+		}
+		return errors.Join(cause, err)
+	}
 	if autoApply {
-		if err := s.applyWG(peersForWGRegistry(next)); err != nil {
-			applyErr := fmt.Errorf("apply WireGuard registry: %w", err)
-			rollbackErr := s.applyWG(peersForWGRegistry(previous))
-			if rollbackErr != nil {
-				rollbackErr = fmt.Errorf("rollback WireGuard registry: %w", rollbackErr)
-			}
-			return errors.Join(applyErr, rollbackErr)
+		start := time.Now()
+		err := s.applyWG(peersForWGRegistry(next))
+		observeStage("transaction", "apply", start)
+		if err != nil {
+			return rollback(fmt.Errorf("apply WireGuard registry: %w", err))
 		}
 	}
-
-	if err := s.persistRegistry(next); err != nil {
-		saveErr := fmt.Errorf("save registry: %w", err)
-		if !autoApply {
-			return saveErr
+	start := time.Now()
+	err := s.persistRegistry(next)
+	observeStage("transaction", "persist", start)
+	if err != nil {
+		err = fmt.Errorf("save registry: %w", err)
+		if autoApply {
+			return rollback(err)
 		}
-		rollbackErr := s.applyWG(peersForWGRegistry(previous))
-		if rollbackErr != nil {
-			rollbackErr = fmt.Errorf("rollback WireGuard registry after save failure: %w", rollbackErr)
-		}
-		return errors.Join(saveErr, rollbackErr)
+		return err
 	}
-
-	s.reg = next
 	return nil
 }
 
@@ -968,6 +997,8 @@ func (s *Server) handleNATProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -981,12 +1012,11 @@ func (s *Server) handleNATProbe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.persistRegistry(next); err != nil {
+	if err := s.commitRegistryLocked(next, false); err != nil {
 		slog.Error("NAT probe registry update failed", "node_id", req.NodeID, "err", err)
 		writeJSONError(w, http.StatusInternalServerError, "registry update failed")
 		return
 	}
-	s.reg = next
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1142,8 +1172,9 @@ func (s *Server) fillObservedEndpoints(peers []api.PeerCandidate) {
 }
 
 func (s *Server) handleFleetStatus(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	observeStage("fleet", "registry_wait", start)
 
 	var nodes []api.FleetNodeStatus
 	for _, node := range s.reg.Nodes {
@@ -1158,12 +1189,14 @@ func (s *Server) handleFleetStatus(w http.ResponseWriter, r *http.Request) {
 			LastSeen: lastSeen,
 		})
 	}
+	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, api.FleetStatusResponse{Nodes: nodes})
 }
 
 func (s *Server) handleFleetHistory(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	observeStage("fleet", "registry_wait", start)
 
 	var nodes []api.FleetNodeHistory
 	for _, node := range s.reg.Nodes {
@@ -1172,6 +1205,7 @@ func (s *Server) handleFleetHistory(w http.ResponseWriter, r *http.Request) {
 			Buckets: []api.FleetHistoryBucket{},
 		})
 	}
+	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, api.FleetHistoryResponse{Nodes: nodes})
 }
 

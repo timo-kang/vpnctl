@@ -15,8 +15,13 @@ import (
 
 func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 	var out api.AdminResponse
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
+	if req.Operation == "pki.status" {
+		s.stateMu.RLock()
+		defer s.stateMu.RUnlock()
+	} else {
+		s.stateMu.Lock()
+		defer s.stateMu.Unlock()
+	}
 	if s.authority == nil {
 		return out, fmt.Errorf("PKI disabled")
 	}

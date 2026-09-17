@@ -73,3 +73,10 @@ var SystemCommandSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Help:    "System command duration including startup and wait; command labels are ip, wg or other",
 	Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10},
 }, []string{"command", "result"})
+
+// Only fixed operation/stage names are used; never node IDs, paths or secrets.
+var ControllerStageSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "vpnctl_controller_stage_seconds",
+	Help:    "Controller handler, admission, registry wait, authorization and transaction duration",
+	Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5, 10, 30},
+}, []string{"operation", "stage"})

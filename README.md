@@ -558,6 +558,9 @@ Use `VPNCTL_NETNS_SIZES=1,8` to select fleet sizes, or pass `-test.count=3` to
 `./scripts/test-netns.sh` for repetitions. Results are saved under the printed
 `/tmp/vpnctl-netns-results.*` directory (or `VPNCTL_ARTIFACT_DIR`). See the
 [reproduction procedure and acceptance criteria](docs/validation/wireguard-pki-gate.md).
+The [API latency investigation](docs/validation/api-latency.md) describes the
+slow-reconciliation regression, HTTP stage traces, CPU/resource artifacts and
+the limits of the verified fleet sizes.
 
 A provisioned `node serve` restores its saved WireGuard path before contacting
 the controller, allowing a controller URL reachable only through the VPN. Initial
