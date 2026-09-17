@@ -24,6 +24,10 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race ./...
+      - name: Fleet history 32-node seven-day query and storage budget
+        env:
+          VPNCTL_HISTORY_SCALE: '1'
+        run: go test ./internal/history -run '^TestHistoryScale$' -count=1 -v
       - run: go vet ./...
       - run: go build ./cmd/vpnctl
 

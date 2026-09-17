@@ -4,6 +4,7 @@
 package metrics
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,5 +40,14 @@ func TestAppendCSV_WritesHeaderOnce(t *testing.T) {
 	}
 	if !strings.HasPrefix(lines[0], "timestamp,") {
 		t.Fatalf("missing header: %q", lines[0])
+	}
+}
+
+type failingCSVWriter struct{}
+
+func (failingCSVWriter) Write(p []byte) (int, error) { return 0, fmt.Errorf("storage failed") }
+func TestWriteCSVReturnsBufferedFlushFailure(t *testing.T) {
+	if e := WriteCSV(failingCSVWriter{}, nil); e == nil {
+		t.Fatal("buffered write failure was hidden")
 	}
 }

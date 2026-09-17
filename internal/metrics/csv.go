@@ -28,6 +28,7 @@ func WriteCSV(w io.Writer, items []model.Metric) error {
 		}
 	}
 
+	writer.Flush()
 	return writer.Error()
 }
 
@@ -63,6 +64,7 @@ func AppendCSV(path string, items []model.Metric) error {
 		}
 	}
 
+	writer.Flush()
 	return writer.Error()
 }
 

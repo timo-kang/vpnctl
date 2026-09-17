@@ -113,3 +113,9 @@ NAT binding은 연결 추적 상태에 남는다. 규칙을 제거해도 기존 
 WG MTU와 앱 UDP 크기/재전송도 배포 계약에 포함한다. 현재 큰 UDP sandbox 검사는
 명시적 IPv4 분할 조건이다. 기본 PMTU의 무손실이나 모든 NAT의 fragment 처리를
 보장하지 않는다. 실제 LTE/Wi-Fi, IPv6와 다중 relay 전환은 별도 검증 대상이다.
+
+## 중앙 관측 저장소
+
+controller의 `data_dir/history.db`를 로컬 영속 volume에 포함한다. 용량·수집·nullable API 전환·
+정지 후 backup/restore 명령은 [fleet 관측 계약](../validation/fleet-history.md)을 따른다.
+PKI 백업과 history 백업은 별도 산출물이며 같은 registry identity로 함께 복원한다.

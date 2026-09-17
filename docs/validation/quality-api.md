@@ -11,7 +11,8 @@ API, TUI, `--watch`, Prometheus는 동일한 Monitor snapshot의 계산 결과�
 기존 API/화면의 마지막 probe 한 번과 Prometheus의 SQLite 1분 통계 혼용을 제거했다.
 현재 값은 프로세스 시작 후 모은 표본으로 계산하며, SQLite는 history 저장소다.
 저장 오류는 `storage_error`로 표시하고 현재 network 품질 계산에 실패 표본으로 더하지 않는다.
-기존 `fleet status/history` 및 중앙 fleet API의 통일은 후속 #15 범위다.
+중앙 fleet API/CLI/상태 페이지의 연결과 영속 저장은 [fleet 관측 계약 v2](fleet-history.md)를 따른다.
+독립 monitor의 DB와 중앙 DB는 별개이며 자동 업로드하지 않는다.
 
 예시(최근 10회 중 8회 성공, 2회 실패):
 

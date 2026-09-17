@@ -164,3 +164,32 @@ func TestStore_Summary(t *testing.T) {
 		t.Errorf("MaxRTTus: want 2000, got %d", sum.MaxRTTus)
 	}
 }
+
+func TestStoreExcludesFutureAndDoesNotCountFailedRTT(t *testing.T) {
+	s, e := OpenStore(filepath.Join(t.TempDir(), "monitor.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	now := time.Now()
+	for _, r := range []ProbeResult{
+		{Timestamp: now.Add(-time.Second), PeerKey: "peer", PeerIP: "10.0.0.1", Success: false},
+		{Timestamp: now.Add(time.Hour), PeerKey: "peer", PeerIP: "10.0.0.1", Success: true, RTTus: 99999},
+	} {
+		if e = s.Insert(r); e != nil {
+			t.Fatal(e)
+		}
+	}
+	rows, e := s.Query("peer", time.Minute)
+	if e != nil || len(rows) != 1 {
+		t.Fatal(rows, e)
+	}
+	all, e := s.QueryAll(time.Minute)
+	if e != nil || len(all) != 1 {
+		t.Fatal(all, e)
+	}
+	sums, e := s.Summarize(time.Minute)
+	if e != nil || len(sums) != 1 || sums[0].Count != 1 || sums[0].SuccessCount != 0 || sums[0].LossPct != 100 {
+		t.Fatal(sums, e)
+	}
+}

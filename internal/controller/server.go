@@ -27,6 +27,7 @@ import (
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
+	"vpnctl/internal/history"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/pki"
 	"vpnctl/internal/statuspage"
@@ -54,6 +55,7 @@ type Server struct {
 	stateMu sync.RWMutex
 	reg     *store.Registry
 	ipam    *ipam
+	history history.Storage
 	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
 	// when multiple nodes submit samples concurrently.
 	metricsMu         sync.Mutex
@@ -126,8 +128,13 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 	if err := markRegistryInitialized(cfg.DataDir); err != nil {
 		return nil, err
 	}
+	historyStore, err := history.Open(filepath.Join(cfg.DataDir, "history.db"), time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("open fleet history: %w", err)
+	}
 	return &Server{
 		cfg:          cfg,
+		history:      historyStore,
 		regPath:      regPath,
 		reg:          reg,
 		ipam:         allocator,
@@ -259,6 +266,8 @@ func (s *Server) ListenAndServeContext(ctx context.Context) error {
 		stopPKI := s.startPKIMaintenance()
 		defer stopPKI()
 	}
+	stopHistory := s.startHistoryMaintenance()
+	defer stopHistory()
 	server := &http.Server{
 		Handler: s.httpHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20,
@@ -297,7 +306,7 @@ func (s *Server) httpHandler() http.Handler {
 	mux.HandleFunc("/direct-result", s.requireClientCert(s.handleDirectResult))
 	mux.HandleFunc("/wg-config", s.requireClientCert(s.handleWGConfig))
 	mux.HandleFunc("/fleet/status", s.requireClientCert(s.handleFleetStatus))
-	mux.HandleFunc("/fleet/history", s.requireClientCert(s.handleFleetHistory))
+	mux.HandleFunc("/fleet/history", s.handleAuthorizedFleetHistory)
 	// Prometheus metrics endpoint — no client cert required so Prometheus can scrape without mTLS.
 	mux.Handle("/prom/metrics", promhttp.Handler())
 	// Status page — simple HTML dashboard, no auth required.
@@ -988,6 +997,14 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeNode(w, r, req.NodeID) {
 		return
 	}
+	if len(req.Observations) > 0 {
+		s.handleObservations(w, r, req)
+		return
+	}
+	if len(req.Samples) > history.MaxBatch {
+		writeJSONError(w, http.StatusBadRequest, "metrics batch exceeds 256 samples")
+		return
+	}
 	if len(req.Samples) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -1012,6 +1029,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Warning", `299 vpnctl "Legacy summary metrics do not establish fleet quality; submit observations"`)
 	// AppendCSV is not safe for concurrent use across processes/goroutines because
 	// CSV writes are buffered and can interleave. Serialize appends in-process.
 	s.metricsMu.Lock()
@@ -1229,26 +1247,11 @@ func (s *Server) fillObservedEndpoints(peers []api.PeerCandidate) {
 }
 
 func (s *Server) handleFleetStatus(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	s.mu.Lock()
-	observeStage("fleet", "registry_wait", start)
-
-	var nodes []api.FleetNodeStatus
-	for _, node := range s.reg.Nodes {
-		lastSeen := ""
-		if !node.LastSeenAt.IsZero() {
-			lastSeen = node.LastSeenAt.Format(time.RFC3339)
-		}
-		nodes = append(nodes, api.FleetNodeStatus{
-			Status:   fleetNodeState(node, time.Now()),
-			Name:     node.Name,
-			VPNIP:    node.VPNIP,
-			NATType:  node.NATType,
-			LastSeen: lastSeen,
-		})
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
 	}
-	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, api.FleetStatusResponse{Nodes: nodes})
+	writeJSON(w, http.StatusOK, s.fleetSnapshot())
 }
 
 // Enrollment completion and recent contact are separate facts. In particular,
@@ -1260,26 +1263,10 @@ func fleetNodeState(node store.NodeInfo, now time.Time) string {
 	if node.LastSeenAt.IsZero() && node.PubKey == "" {
 		return "enrolled"
 	}
-	if node.LastSeenAt.IsZero() || now.Sub(node.LastSeenAt) >= 60*time.Second {
+	if node.LastSeenAt.IsZero() || node.LastSeenAt.After(now) || now.Sub(node.LastSeenAt) >= 60*time.Second {
 		return "offline"
 	}
 	return "online"
-}
-
-func (s *Server) handleFleetHistory(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	s.mu.Lock()
-	observeStage("fleet", "registry_wait", start)
-
-	var nodes []api.FleetNodeHistory
-	for _, node := range s.reg.Nodes {
-		nodes = append(nodes, api.FleetNodeHistory{
-			Name:    node.Name,
-			Buckets: []api.FleetHistoryBucket{},
-		})
-	}
-	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, api.FleetHistoryResponse{Nodes: nodes})
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
@@ -1367,42 +1354,18 @@ func (s *Server) applyWGContext(ctx context.Context, peers []wireguard.Peer) err
 }
 
 func (s *Server) statusPageData() statuspage.Data {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data := statuspage.Data{Title: "vpnctl"}
-	for _, n := range s.reg.Nodes {
-		online := !n.EnrollmentPending && time.Since(n.LastSeenAt) < 60*time.Second
-		quality := "offline"
-		if online {
-			quality = "good"
-		}
-		lastSeen := "never"
-		if !n.LastSeenAt.IsZero() {
-			d := time.Since(n.LastSeenAt)
-			switch {
-			case d < time.Minute:
-				lastSeen = fmt.Sprintf("%ds ago", int(d.Seconds()))
-			case d < time.Hour:
-				lastSeen = fmt.Sprintf("%dm ago", int(d.Minutes()))
-			default:
-				lastSeen = fmt.Sprintf("%dh ago", int(d.Hours()))
-			}
-		}
+	snapshot := s.fleetSnapshot()
+	data := statuspage.Data{Title: "vpnctl", TotalCount: len(snapshot.Nodes)}
+	for _, n := range snapshot.Nodes {
+		online := n.Status == "online"
 		data.Nodes = append(data.Nodes, statuspage.NodeStatus{
-			Name:     n.Name,
-			VPNIP:    n.VPNIP,
-			NATType:  n.NATType,
-			LastSeen: lastSeen,
-			Online:   online,
-			Quality:  quality,
-			RTTMs:    "-",
-			LossPct:  "-",
+			Name: n.Name, VPNIP: n.VPNIP, NATType: n.NATType, LastSeen: n.LastSeen,
+			Online: online, Status: n.Status, Quality: n.Quality, RTTMs: history.FormatNumber(n.RTTMs), LossPct: history.FormatNumber(n.LossPct),
+			Peer: n.PeerID, Path: n.Path, Relay: n.RelayID, Uplink: n.Uplink, Stale: n.Stale, Reason: n.ErrorReason,
 		})
 		if online {
 			data.OnlineCount++
 		}
 	}
-	data.TotalCount = len(s.reg.Nodes)
 	return data
 }
