@@ -68,6 +68,7 @@ func TestNetns_PKILifecycleUplink(t *testing.T) {
 
 func testPKINetwork(t *testing.T, bin string, size int) {
 	namespaces := newNamespaces(t, size)
+	uplink := newRelayUplink(t, namespaces[0])
 	// Private keys and bootstrap tokens only live in temporary container storage.
 	dir := t.TempDir()
 	resultRoot := os.Getenv("VPNCTL_ARTIFACT_DIR")
@@ -86,7 +87,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		Listen: "0.0.0.0:8443", DataDir: ctrlDir, VPNCIDR: "10.77.0.0/24",
 		WGApply: true, WGInterface: "wg0", WGPort: 51820, MTU: 1280, WGAddress: "10.77.0.1/24",
 		WGPrivateKey: ctrlPrivate, ServerPublicKey: ctrlPublic, ServerEndpoint: "192.0.2.1:51820",
-		ServerAllowedIPs: []string{"10.77.0.0/24"}, ServerKeepaliveSec: 1,
+		ServerAllowedIPs: []string{"10.77.0.0/24", relayTargetIP + "/32"}, ServerKeepaliveSec: 1,
 		PKI: &config.PKIConfig{CAExpiry: "10m", ServerExpiry: "10s", ClientExpiry: "30s", ServerRenewBefore: "7s", ClientRenewBefore: "20s", CheckInterval: "100ms", CAOverlap: "2s", ServerSANs: []string{"192.0.2.1", "10.77.0.1"}},
 	}}
 	if err := config.Save(ctrlPath, controllerCfg); err != nil {
@@ -120,7 +121,16 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	startNetworkProcess(t, namespaces[0], filepath.Join(dir, "echo.log"), []string{"VPNCTL_WORKER=echo"}, testBin, "-test.run=^TestNetworkWorker$")
+	echo := startNetworkProcess(t, uplink.server, filepath.Join(dir, "echo.log"), []string{
+		"VPNCTL_WORKER=echo", "VPNCTL_UPLINK_ADDR=" + relayTargetIP, "VPNCTL_ECHO_FRAGMENT=1",
+		"VPNCTL_ECHO_OBSERVATIONS=" + filepath.Join(results, "uplink-sources.jsonl"),
+	}, testBin, "-test.run=^TestNetworkWorker$")
+	eventually(t, 5*time.Second, "separate uplink server", func() error {
+		if netOutput(t, uplink.server, "ss", "-H", "-lnt", "sport", "=", ":9191") == "" {
+			return fmt.Errorf("echo server not listening")
+		}
+		return nil
+	})
 	phaseFile := filepath.Join(dir, "phase")
 	mustWrite(t, phaseFile, "warmup")
 	stopResources := startResourceSampler(t, results, phaseFile)
@@ -204,10 +214,13 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		if !strings.Contains(route, "dev wg0") {
 			t.Fatal("uplink bypassed WG:", route)
 		}
+		if route := netOutput(t, namespaces[n+1], "ip", "route", "get", relayTargetIP); !strings.Contains(route, "dev wg0") {
+			t.Fatal("separate uplink server bypassed WG:", route)
+		}
 		agents[n] = startAgent(n)
 		eventually(t, 5*time.Second, "node API over WG", func() error { return fleet(n) })
 		probes[n] = startNetworkProcess(t, namespaces[n+1], filepath.Join(dir, id+"-probe.log"), []string{
-			"VPNCTL_WORKER=probe", "VPNCTL_NODE=" + id, "VPNCTL_PHASE=" + phaseFile, "VPNCTL_PKI=" + cfg.Node.PKIDir, "VPNCTL_EVENTS=" + filepath.Join(results, id+".jsonl"),
+			"VPNCTL_UPLINK_ADDR=" + relayTargetIP, "VPNCTL_WORKER=probe", "VPNCTL_NODE=" + id, "VPNCTL_PHASE=" + phaseFile, "VPNCTL_PKI=" + cfg.Node.PKIDir, "VPNCTL_EVENTS=" + filepath.Join(results, id+".jsonl"),
 		}, testBin, "-test.run=^TestNetworkWorker$")
 	}
 	telemetry := startNetworkProcess(t, namespaces[0], filepath.Join(dir, "telemetry.log"), []string{
@@ -437,6 +450,9 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		p.finish(t)
 	}
 	evaluateNetworkEvents(t, results, size)
+	uplink.verify(t, testBin, namespaces[1:], configs, results)
+	echo.stop()
+	verifyEchoSources(t, results, configs)
 }
 
 type probeSummary struct {

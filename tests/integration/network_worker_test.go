@@ -60,6 +60,8 @@ func TestNetworkWorker(t *testing.T) {
 		err = collectTelemetry()
 	case "probe":
 		err = runNetworkProbes()
+	case "relay-check":
+		err = runRelayCheck()
 	case "replay":
 		c := api.NewCredentialClient("https://10.77.0.1:8443", os.Getenv("VPNCTL_PKI"))
 		defer c.CloseIdleConnections()
@@ -107,12 +109,22 @@ func TestNetworkWorker(t *testing.T) {
 }
 
 func serveEcho() error {
-	udp, err := net.ListenPacket("udp4", "10.77.0.1:9191")
+	observe, closeObservations, err := echoObserver()
+	if err != nil {
+		return err
+	}
+	defer closeObservations()
+	udp, err := net.ListenPacket("udp4", echoEndpoint())
 	if err != nil {
 		return err
 	}
 	defer udp.Close()
-	tcp, err := net.Listen("tcp4", "10.77.0.1:9191")
+	if os.Getenv("VPNCTL_ECHO_FRAGMENT") == "1" {
+		if err := allowUDPFragmentation(udp.(*net.UDPConn)); err != nil {
+			return err
+		}
+	}
+	tcp, err := net.Listen("tcp4", echoEndpoint())
 	if err != nil {
 		return err
 	}
@@ -124,12 +136,22 @@ func serveEcho() error {
 			if err != nil {
 				return
 			}
-			_, _ = udp.WriteTo(buf[:n], addr)
+			if err := observe("udp", addr); err != nil {
+				_ = tcp.Close()
+				return
+			}
+			if _, err := udp.WriteTo(buf[:n], addr); err != nil {
+				fmt.Fprintf(os.Stderr, "udp echo reply bytes=%d: %v\n", n, err)
+			}
 		}
 	}()
 	for {
 		conn, err := tcp.Accept()
 		if err != nil {
+			return err
+		}
+		if err := observe("tcp", conn.RemoteAddr()); err != nil {
+			conn.Close()
 			return err
 		}
 		go func() { defer conn.Close(); _, _ = io.Copy(conn, conn) }()
@@ -210,7 +232,7 @@ func runNetworkProbes() error {
 				} else {
 					if conn == nil {
 						d := net.Dialer{Timeout: 500 * time.Millisecond}
-						conn, probeErr = d.DialContext(ctx, kind+"4", "10.77.0.1:9191")
+						conn, probeErr = d.DialContext(ctx, kind+"4", echoEndpoint())
 						if probeErr == nil && kind == "tcp" {
 							e.Reconnected = connectedBefore
 							connectedBefore = true
@@ -251,6 +273,10 @@ func runNetworkProbes() error {
 // Keep UDP sends independent of receive timeouts so a loss burst does not reduce
 // the sampling rate and make the measured packet-loss ratio look artificially low.
 func runUDPProbes(parent context.Context, phase func() string, emit func(probeEvent)) error {
+	target, err := net.ResolveUDPAddr("udp4", echoEndpoint())
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(parent)
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {
@@ -271,7 +297,7 @@ func runUDPProbes(parent context.Context, phase func() string, emit func(probeEv
 			if err != nil {
 				return
 			}
-			if !from.IP.Equal(net.ParseIP("10.77.0.1")) || from.Port != 9191 {
+			if !from.IP.Equal(target.IP) || from.Port != target.Port {
 				continue
 			}
 			select {
@@ -326,7 +352,7 @@ func runUDPProbes(parent context.Context, phase func() string, emit func(probeEv
 			e := probeEvent{Node: os.Getenv("VPNCTL_NODE"), Phase: stage, Kind: "udp", At: now}
 			pending[key] = e
 			_ = conn.SetWriteDeadline(now.Add(500 * time.Millisecond))
-			if _, err := conn.WriteToUDP([]byte(key), &net.UDPAddr{IP: net.ParseIP("10.77.0.1"), Port: 9191}); err != nil {
+			if _, err := conn.WriteToUDP([]byte(key), target); err != nil {
 				finish(key, e, time.Now(), err)
 			}
 		}

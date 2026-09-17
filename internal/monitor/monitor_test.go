@@ -5,6 +5,7 @@ package monitor
 
 import (
 	"context"
+	"net"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -30,15 +31,15 @@ func TestMonitor_RunCollectsProbes(t *testing.T) {
 	}
 	defer store.Close()
 
-	// Use 127.0.0.1 so UDP probes fail fast (ICMP port-unreachable) without
-	// blocking for the full 2-second probe timeout. A non-local VPN address
-	// like 10.7.0.2 would time out since there is no WireGuard interface.
+	// A controlled negative responder avoids assumptions about an unused
+	// fixed port or ICMP delivery on a busy runner.
+	port := negativeProbeResponder(t)
 	src := &fakePeerSource{
 		peers: []peersource.Peer{
 			{
 				PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 				VPNIP:     "127.0.0.1",
-				ProbePort: 19999,
+				ProbePort: port,
 				Name:      "peer-1",
 			},
 		},
@@ -50,10 +51,7 @@ func TestMonitor_RunCollectsProbes(t *testing.T) {
 		Interval: 100 * time.Millisecond,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
-	defer cancel()
-
-	m.Run(ctx)
+	runUntilSnapshots(t, m, 2)
 
 	results, err := store.QueryAll(5 * time.Minute)
 	if err != nil {
@@ -70,7 +68,7 @@ func TestMonitor_RunCollectsProbes(t *testing.T) {
 			t.Errorf("PeerKey: want %q, got %q", peerKey, r.PeerKey)
 		}
 		if r.Success {
-			t.Errorf("expected Success=false (no UDP responder), got true")
+			t.Errorf("expected Success=false (invalid echo response), got true")
 		}
 	}
 }
@@ -87,12 +85,13 @@ func TestMonitor_DefaultInterval(t *testing.T) {
 }
 
 func TestMonitor_Subscribe(t *testing.T) {
+	port := negativeProbeResponder(t)
 	src := &fakePeerSource{
 		peers: []peersource.Peer{
 			{
 				PublicKey: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
 				VPNIP:     "127.0.0.1",
-				ProbePort: 51901,
+				ProbePort: port,
 				Name:      "peer-2",
 			},
 		},
@@ -103,24 +102,14 @@ func TestMonitor_Subscribe(t *testing.T) {
 		Interval: 50 * time.Millisecond,
 	})
 
-	ch := m.Subscribe()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	go m.Run(ctx)
-
-	select {
-	case snap := <-ch:
-		if len(snap.Peers) != 1 {
-			t.Errorf("expected 1 peer in snapshot, got %d", len(snap.Peers))
-		}
-		if snap.Time.IsZero() {
-			t.Errorf("snapshot time should not be zero")
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Error("timeout waiting for snapshot on subscriber channel")
+	snap := runUntilSnapshots(t, m, 1)
+	if len(snap.Peers) != 1 {
+		t.Errorf("expected 1 peer in snapshot, got %d", len(snap.Peers))
 	}
+	if snap.Time.IsZero() {
+		t.Error("snapshot time should not be zero")
+	}
+
 }
 
 func TestFilterPeers(t *testing.T) {
@@ -180,4 +169,48 @@ func TestSnapshotPublicationIsConcurrentAndIsolated(t *testing.T) {
 	if m.Latest().Peers[0].Peer.Name != "published" {
 		t.Fatal("reader mutated published state")
 	}
+}
+
+// Wait for the behavior being tested, not a count inferred from elapsed ticker
+// intervals. The deadline is a hang guard; production probe budgets are intact.
+func runUntilSnapshots(t *testing.T, m *Monitor, count int) Snapshot {
+	t.Helper()
+	ch := m.Subscribe()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	done := make(chan struct{})
+	go func() { defer close(done); m.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	var last Snapshot
+	for i := 0; i < count; i++ {
+		select {
+		case last = <-ch:
+		case <-ctx.Done():
+			t.Fatalf("monitor published only %d/%d snapshots: %v", i, count, ctx.Err())
+		}
+	}
+	return last
+}
+
+func negativeProbeResponder(t *testing.T) int {
+	t.Helper()
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 2048)
+		for {
+			_, addr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if _, err := conn.WriteToUDP([]byte("invalid-echo"), addr); err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { conn.Close(); <-done })
+	return conn.LocalAddr().(*net.UDPAddr).Port
 }

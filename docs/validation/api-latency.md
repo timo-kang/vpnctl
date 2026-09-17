@@ -154,3 +154,29 @@ of the registry lock after injected writer panic.
 No raw credential, temporary runtime registry, or user configuration is committed.
 The verified size/load envelope and any further CI failures belong to #39;
 one passing run is not a universal latency or production capacity guarantee.
+
+## Rejected CA commands and admission draining (#51)
+
+The first external-uplink CI for PR #50
+([35183232152](https://github.com/timo-kang/vpnctl/actions/runs/35183232152)) failed
+68 HTTPS requests in the 32-node rotation phase. All 68 completed TLS and wrote
+their request, with no first response byte. Controller telemetry showed admission
+wait dominating the fleet-handler delay. CPU/IO pressure was present; CPU quota
+throttling was zero. Application UDP/TCP and all new relay fault checks passed.
+This run remains a failure, and triggered reopening the M1 gate.
+
+`adminPKI` requested the exclusive admission lock even for duplicate prepare or
+activate/retire attempts whose prerequisites were not met. A waiting RWMutex
+writer blocks new readers while previously admitted registry work drains. The
+regression holds a registry save and repeatedly issues an impossible prepare:
+before the fix all 32 authenticated fleet reads exceed one second; after the fix
+all reads finish while the save remains blocked. The rejected operations finish
+without requiring that admitted mutation to drain.
+
+CA commands now perform a read-only preflight. Actual transitions still acquire
+exclusive admission, recollect confirmed identities and repeat every check under
+the authority write lock. A successful preflight cannot authorize a later state:
+tests cover revocation after preflight, duplicate prepare, minimum overlap and a
+new confirmed node arriving while the administrator waits for admission. The fix
+does not relax request deadlines, trust/ack gates, revocation ordering or storage
+semantics. It does not identify every cause of the older unprofiled 287 failures.

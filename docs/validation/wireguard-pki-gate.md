@@ -1,4 +1,7 @@
-# M1: 실제 WireGuard uplink와 인증서 수명주기 검증
+# WireGuard uplink와 인증서 수명주기 검증
+
+M1 완료 당시(`784ca70`) 목적지는 controller 자체였다. #49에서 별도 target server로
+확장했으며 [sandbox 구성·중계 장애 기준](network-sandbox.md)을 함께 적용한다.
 
 ## 실행 환경과 재현
 
@@ -37,9 +40,10 @@ GitHub Actions의 `M1 reliability`는 일반 race/vet/build와 커널 검증을 
   노드마다 독립적인 커널 `wg0`와 실제 `vpnctl node serve` 프로세스를 사용한다.
 - 가입·최초 설정 동기화 때만 provisioning 주소로 controller를 호출한다. 이후
   controller URL을 `https://10.77.0.1:8443`으로 바꾸고 VPN 주소로만 관리한다.
-- 애플리케이션 echo 서버는 controller 네임스페이스의 **VPN 주소에만** bind한다.
-  노드에 기본 경로와 인터넷 연결은 없다. `ip route get` 및 WireGuard의 handshake,
-  transfer counter로 애플리케이션 트래픽이 실제 터널을 통과했는지 확인한다.
+- 애플리케이션 echo 서버는 별도 namespace의 `198.18.0.2:9191`에만 bind한다.
+  relay의 전용 uplink 링크와 forwarding을 통과해야 한다. 노드에 기본 경로와
+  인터넷 연결은 없다. `ip route get`, WireGuard handshake/transfer, relay firewall
+  counter 및 target에서 관측한 source IP로 실제 중계 경로를 확인한다.
 - 노드마다 policy routing을 번갈아 켜고 끈다. 재시작 후에도 주소·공개키·peer·
   AllowedIPs·IPv4 경로·rule이 유지되는지 확인한다.
 - client 인증서는 30초, server 인증서는 10초이며 renewal window는 각각 20초/7초다.
@@ -119,7 +123,8 @@ controller/API 복원과 손실 해제 후 API 복원은 5초, `wg0`가 사라�
 
 단일 controller/relay 경유 uplink에 대한 소프트웨어·커널 통합 검증이다. LTE 모뎀이나
 직접 서버 연결이 없는 로봇도 사용할 수 있는 VPN 경로의 기본 생명주기를 검사한다.
-실제 로봇 이동, 무선 링크 품질, NAT 조합, 다중 relay 선택·전환, 다른 네트워크로의
+별도 서버로의 반환 route와 scoped SNAT는 추가 검증하지만, 실제 로봇 이동,
+무선 링크 품질, 다양한 NAT 조합, 다중 relay 선택·전환, 다른 네트워크로의
 handoff는 M3에서 별도 검증해야 한다. VPN peer까지의 underlay 연결 자체는 필요하다.
 네트워크 단절이 인증서 잔여 수명을 넘는 상황의 무인 재가입은 보장하지 않는다.
 갱신 응답 저장 후 유실 및 CSR 복구는 기존 [PKI 통합 검증](pki-lifecycle.md)에서 다룬다.
