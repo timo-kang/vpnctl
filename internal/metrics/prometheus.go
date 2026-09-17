@@ -29,17 +29,7 @@ var (
 		Help: "Number of peer pairs with P2P readiness confirmed",
 	})
 
-	// Node-side metrics (used by monitor)
-	ProbeRTTSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "vpnctl_probe_rtt_seconds",
-		Help: "Last probe round-trip time in seconds",
-	}, []string{"peer"})
-
-	ProbeSuccess = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "vpnctl_probe_success",
-		Help: "Last probe success (1) or failure (0)",
-	}, []string{"peer"})
-
+	// Cumulative node-side measurements; live gauges are collected from Monitor.
 	ProbeTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "vpnctl_probe_total",
 		Help: "Total probe attempts",
@@ -49,16 +39,6 @@ var (
 		Name: "vpnctl_health_failures",
 		Help: "Current consecutive health check failures",
 	})
-
-	LinkQualityLevel = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "vpnctl_link_quality",
-		Help: "Link quality level (3=good, 2=degraded, 1=poor, 0=offline)",
-	}, []string{"peer"})
-
-	ProbeLossRatio = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "vpnctl_probe_loss_ratio",
-		Help: "Recent probe loss ratio (0.0 to 1.0)",
-	}, []string{"peer"})
 )
 
 var (

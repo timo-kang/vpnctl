@@ -20,6 +20,7 @@ import (
 
 	"net/http"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"vpnctl/internal/addrutil"
@@ -2058,7 +2059,18 @@ func handleMonitor(args []string) {
 	retention := fs.Duration("retention", 7*24*time.Hour, "data retention period")
 	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
 	metricsPort := fs.Int("metrics-port", 0, "Prometheus metrics port (0 = disabled)")
+	qualityWindow := fs.Duration("quality-window", time.Minute, "trailing quality window")
+	staleAfter := fs.Duration("quality-stale-after", 0, "maximum observation age (default: 3*interval + 2s, capped by window)")
+	minSamples := fs.Int("quality-min-samples", 3, "minimum samples before quality is known")
+	recoverySamples := fs.Int("quality-recovery-samples", 3, "consecutive improved samples before quality recovers")
+	goodRTT := fs.Float64("quality-good-rtt-ms", 50, "good quality maximum mean RTT in milliseconds")
+	goodLoss := fs.Float64("quality-good-loss-pct", 2, "good quality maximum loss percentage")
+	degradedRTT := fs.Float64("quality-degraded-rtt-ms", 200, "degraded quality maximum mean RTT in milliseconds")
+	degradedLoss := fs.Float64("quality-degraded-loss-pct", 10, "degraded quality maximum loss percentage")
 	_ = fs.Parse(args)
+	if *interval <= 0 || *qualityWindow <= 0 || *minSamples <= 0 || *recoverySamples <= 0 || *staleAfter < 0 {
+		fatal(errors.New("monitor quality durations and sample counts must be positive"))
+	}
 
 	if *iface == "" {
 		fmt.Fprintln(os.Stderr, "error: --interface is required")
@@ -2080,46 +2092,45 @@ func handleMonitor(args []string) {
 	}
 	defer store.Close()
 
-	if removed, err := store.Cleanup(*retention); err == nil && removed > 0 {
-		fmt.Fprintf(os.Stderr, "cleaned up %d old probe records\n", removed)
-	}
-
 	var peerFilter []string
 	if *peersFlag != "" {
 		peerFilter = strings.Split(*peersFlag, ",")
 	}
 
-	mon := monitor.New(monitor.Config{
+	mon, err := monitor.New(monitor.Config{
 		Source:   src,
 		Store:    store,
 		Interval: *interval,
 		Peers:    peerFilter,
+		Quality: monitor.QualityConfig{
+			Window:          *qualityWindow,
+			StaleAfter:      *staleAfter,
+			MinSamples:      *minSamples,
+			RecoverySamples: *recoverySamples,
+			Thresholds: &monitor.QualityThresholds{
+				GoodMaxRTTMs:       *goodRTT,
+				GoodMaxLossPct:     *goodLoss,
+				DegradedMaxRTTMs:   *degradedRTT,
+				DegradedMaxLossPct: *degradedLoss,
+			},
+		},
 	})
+
+	if err != nil {
+		fatal(err)
+	}
+
+	if removed, err := store.Cleanup(*retention); err == nil && removed > 0 {
+		fmt.Fprintf(os.Stderr, "cleaned up %d old probe records\n", removed)
+	}
 
 	if *metricsPort > 0 {
 		go func() {
 			mux := http.NewServeMux()
-			mux.Handle("/metrics", promhttp.Handler())
-			mux.HandleFunc("/network/quality", func(w http.ResponseWriter, r *http.Request) {
-				snap := mon.Latest()
-				var qualities []monitor.PeerQuality
-				for _, ps := range snap.Peers {
-					rttMs := float64(ps.RTTus) / 1000.0
-					lossPct := 0.0
-					if !ps.Success {
-						lossPct = 100.0
-					}
-					qualities = append(qualities, monitor.PeerQuality{
-						PeerIP:  ps.Peer.VPNIP,
-						Quality: ps.Quality.String(),
-						RTTMs:   rttMs,
-						LossPct: lossPct,
-						Level:   ps.Quality,
-					})
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(qualities)
-			})
+			registry := prometheus.NewRegistry()
+			registry.MustRegister(mon.Collector())
+			mux.Handle("/metrics", promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, registry}, promhttp.HandlerOpts{}))
+			mux.HandleFunc("/network/quality", mon.QualityHandler)
 			addr := fmt.Sprintf(":%d", *metricsPort)
 			slog.Info("metrics server listening", "addr", addr)
 			if err := http.ListenAndServe(addr, mux); err != nil {
@@ -2134,21 +2145,30 @@ func handleMonitor(args []string) {
 	if *watch {
 		ww := monitor.NewWatchWriter(os.Stdout)
 		sub := mon.Subscribe()
-		go mon.Run(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); mon.Run(ctx) }()
+		defer func() { cancel(); <-done }()
+		freshness := time.NewTicker(time.Second)
+		defer freshness.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case snap := <-sub:
-				ww.Write(snap)
+			case <-sub:
+				ww.Write(mon.Latest())
+			case <-freshness.C:
+				if snap := mon.Latest(); snap.Stale {
+					ww.Write(snap)
+				}
 			}
 		}
 	} else {
 		// Suppress slog output during TUI mode to avoid corrupting the display.
 		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-		sub := mon.Subscribe()
-		go mon.Run(ctx)
-		tuiModel := monitor.NewTUIModel(*iface, sub)
+		tuiModel := monitor.NewTUIModel(*iface, mon)
+		done := make(chan struct{})
+		go func() { defer close(done); mon.Run(ctx) }()
+		defer func() { cancel(); <-done }()
 		p := tea.NewProgram(tuiModel)
 		if _, err := p.Run(); err != nil {
 			fatal(err)

@@ -6,6 +6,7 @@ package monitor
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -22,6 +23,8 @@ var (
 // qualityStyle returns the lipgloss style for the given link quality level.
 func qualityStyle(q LinkQuality) lipgloss.Style {
 	switch q {
+	case QualityUnknown:
+		return dimStyle
 	case QualityGood:
 		return okStyle
 	case QualityDegraded:
@@ -48,19 +51,22 @@ type TUIModel struct {
 	snap     Snapshot
 	quitting bool
 	sub      <-chan Snapshot
+	latest   func() Snapshot
 }
 
-// NewTUIModel creates a TUIModel subscribed to the given snapshot channel.
-func NewTUIModel(iface string, sub <-chan Snapshot) TUIModel {
+// NewTUIModel follows publications and refreshes freshness while collection stalls.
+func NewTUIModel(iface string, m *Monitor) TUIModel {
 	return TUIModel{
-		iface: iface,
-		sub:   sub,
+		iface:  iface,
+		snap:   m.Latest(),
+		sub:    m.Subscribe(),
+		latest: m.Latest,
 	}
 }
 
 // Init returns the initial command: wait for the first snapshot.
 func (m TUIModel) Init() tea.Cmd {
-	return waitForSnapshot(m.sub)
+	return tea.Batch(waitForSnapshot(m.sub), freshnessTick())
 }
 
 // Update handles incoming messages and key presses.
@@ -72,8 +78,11 @@ func (m TUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
+	case freshnessMsg:
+		m.snap = m.latest()
+		return m, freshnessTick()
 	case snapshotMsg:
-		m.snap = Snapshot(msg)
+		m.snap = m.latest()
 		return m, waitForSnapshot(m.sub)
 	}
 	return m, nil
@@ -97,6 +106,10 @@ func (m TUIModel) View() string {
 	sb.WriteString(headerStyle.Render(header))
 	sb.WriteString("\n\n")
 
+	if m.snap.ErrorReason != "" || m.snap.StorageError != "" {
+		sb.WriteString(fmt.Sprintf("collection=%s stale=%t storage=%s\n", m.snap.ErrorReason, m.snap.Stale, m.snap.StorageError))
+	}
+
 	// Column headers
 	colHeader := fmt.Sprintf("  %-14s %-16s %6s  %5s  %-8s  %s", "PEER", "VPN IP", "RTT", "LOSS", "QUALITY", "HANDSHAKE")
 	sb.WriteString(dimStyle.Render(colHeader))
@@ -112,21 +125,13 @@ func (m TUIModel) View() string {
 		ip := ps.Peer.VPNIP
 		hs := formatHandshake(ps.Peer.LastHandshake)
 
-		var rtt, loss string
-		if ps.Success {
-			ms := ps.RTTus / 1000
-			rtt = fmt.Sprintf("%dms", ms)
-			loss = "0.0%"
-		} else {
-			rtt = "-"
-			loss = "100%"
-		}
+		rtt, loss := formatQuality(ps.Quality)
 
 		prefix := fmt.Sprintf("  %-14s %-16s %6s  %5s  ", name, ip, rtt, loss)
-		qualStr := fmt.Sprintf("%-8s", ps.Quality.String())
-		suffix := fmt.Sprintf("  %s", hs)
+		qualStr := fmt.Sprintf("%-8s", ps.Quality.Quality)
+		suffix := fmt.Sprintf("  %s  %s", hs, ps.Quality.ErrorReason)
 
-		sb.WriteString(qualityStyle(ps.Quality).Render(prefix + qualityStyle(ps.Quality).Render(qualStr) + suffix))
+		sb.WriteString(qualityStyle(ps.Quality.Level).Render(prefix + qualityStyle(ps.Quality.Level).Render(qualStr) + suffix))
 		sb.WriteString("\n")
 	}
 
@@ -135,4 +140,10 @@ func (m TUIModel) View() string {
 	sb.WriteString("\n")
 
 	return sb.String()
+}
+
+type freshnessMsg time.Time
+
+func freshnessTick() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return freshnessMsg(t) })
 }

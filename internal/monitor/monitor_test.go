@@ -45,7 +45,7 @@ func TestMonitor_RunCollectsProbes(t *testing.T) {
 		},
 	}
 
-	m := New(Config{
+	m := newTestMonitor(t, Config{
 		Source:   src,
 		Store:    store,
 		Interval: 100 * time.Millisecond,
@@ -75,7 +75,7 @@ func TestMonitor_RunCollectsProbes(t *testing.T) {
 
 func TestMonitor_DefaultInterval(t *testing.T) {
 	src := &fakePeerSource{}
-	m := New(Config{
+	m := newTestMonitor(t, Config{
 		Source:   src,
 		Interval: 0,
 	})
@@ -97,7 +97,7 @@ func TestMonitor_Subscribe(t *testing.T) {
 		},
 	}
 
-	m := New(Config{
+	m := newTestMonitor(t, Config{
 		Source:   src,
 		Interval: 50 * time.Millisecond,
 	})
@@ -136,7 +136,7 @@ func TestFilterPeers(t *testing.T) {
 }
 
 func TestSnapshotPublicationIsConcurrentAndIsolated(t *testing.T) {
-	m := New(Config{})
+	m := newTestMonitor(t, Config{})
 	a, b := m.Subscribe(), m.Subscribe()
 	snap := Snapshot{Time: time.Now(), Peers: []PeerState{{Peer: peersource.Peer{Name: "original"}}}}
 	m.publish(snap)
@@ -213,4 +213,13 @@ func negativeProbeResponder(t *testing.T) int {
 	}()
 	t.Cleanup(func() { conn.Close(); <-done })
 	return conn.LocalAddr().(*net.UDPAddr).Port
+}
+
+func newTestMonitor(t *testing.T, cfg Config) *Monitor {
+	t.Helper()
+	m, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
 }

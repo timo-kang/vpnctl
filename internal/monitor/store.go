@@ -4,6 +4,7 @@
 package monitor
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -70,12 +71,16 @@ func (s *Store) Close() error {
 
 // Insert persists a single ProbeResult.
 func (s *Store) Insert(r ProbeResult) error {
+	return s.InsertContext(context.Background(), r)
+}
+
+func (s *Store) InsertContext(ctx context.Context, r ProbeResult) error {
 	ts := r.Timestamp.UnixMicro()
 	success := 0
 	if r.Success {
 		success = 1
 	}
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO probes (timestamp, peer_key, peer_ip, rtt_us, success) VALUES (?, ?, ?, ?, ?)`,
 		ts, r.PeerKey, r.PeerIP, r.RTTus, success,
 	)
