@@ -15,21 +15,36 @@ var ErrTunnelDead = errors.New("tunnel health check failed")
 // checkTunnelHealth sends a UDP packet with a unique vpnctl-echo payload to
 // hubAddr (host:port) and waits for an identical reply. Returns (true, nil) only
 // if the exact payload is echoed back within timeout. The context cancels the
-// dial; the read/write deadline governs I/O.
+// dial and interrupts in-flight I/O; the timeout bounds the complete check.
 //
 // On read timeout (no reply), returns (false, nil) — the legitimate "tunnel dead" signal.
 // On infrastructure errors (dial, write, set-deadline), returns (false, err) so
 // the caller can distinguish local failures from tunnel failures.
-func checkTunnelHealth(ctx context.Context, hubAddr string, timeout time.Duration) (bool, error) {
-	dialer := net.Dialer{Timeout: timeout}
+func checkTunnelHealth(ctx context.Context, hubAddr string, timeout time.Duration) (healthy bool, err error) {
+	parent := ctx
+	defer func() {
+		parentErr := parent.Err()
+		if deadline, ok := parent.Deadline(); parentErr == nil && ok && !time.Now().Before(deadline) {
+			parentErr = context.DeadlineExceeded
+		}
+		if parentErr != nil {
+			healthy, err = false, parentErr
+		}
+	}()
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "udp", hubAddr)
 	if err != nil {
 		return false, fmt.Errorf("dial %s: %w", hubAddr, err)
 	}
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 
 	msg := []byte(fmt.Sprintf("vpnctl-echo:health-%d", time.Now().UnixNano()))
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
 		return false, fmt.Errorf("set deadline: %w", err)
 	}
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -22,6 +23,7 @@ const (
 // Responder listens for direct probes and replies with acks.
 type Responder struct {
 	conn *net.UDPConn
+	done chan struct{}
 }
 
 // StartResponder starts a UDP responder on the given address (e.g. ":0").
@@ -36,7 +38,7 @@ func StartResponder(addr string) (*Responder, error) {
 		return nil, err
 	}
 
-	resp := &Responder{conn: conn}
+	resp := &Responder{conn: conn, done: make(chan struct{})}
 	go resp.serve()
 	return resp, nil
 }
@@ -54,10 +56,13 @@ func (r *Responder) Close() error {
 	if r == nil || r.conn == nil {
 		return nil
 	}
-	return r.conn.Close()
+	err := r.conn.Close()
+	<-r.done
+	return err
 }
 
 func (r *Responder) serve() {
+	defer close(r.done)
 	buf := make([]byte, 2048)
 	for {
 		n, addr, err := r.conn.ReadFromUDP(buf)
@@ -83,60 +88,40 @@ func handlePacket(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 
 // ProbePeer sends a direct probe to a peer and waits for an ack.
 func ProbePeer(ctx context.Context, localAddr, peerAddr string, timeout time.Duration) (time.Duration, error) {
-	udpAddr, err := net.ResolveUDPAddr("udp", localAddr)
+	ctx, cancel := probeContext(ctx, timeout)
+	defer cancel()
+	conn, cleanup, err := dialProbe(ctx, localAddr, peerAddr)
 	if err != nil {
-		return 0, err
+		return 0, contextError(ctx, err)
 	}
-	peerUDP, err := net.ResolveUDPAddr("udp", peerAddr)
-	if err != nil {
-		return 0, err
-	}
-
-	// DialUDP "connects" the socket so the kernel filters out packets from other sources.
-	// This avoids brittle string comparisons on source addresses (IPv4-mapped IPv6, etc).
-	conn, err := net.DialUDP("udp", udpAddr, peerUDP)
-	if err != nil {
-		return 0, err
-	}
-	defer conn.Close()
-	if ctx != nil {
-		go func() {
-			<-ctx.Done()
-			_ = conn.Close()
-		}()
-	}
+	defer cleanup()
 
 	nonce, err := randomNonce(8)
 	if err != nil {
-		return 0, err
+		return 0, contextError(ctx, err)
 	}
 	payload := []byte(probePrefix + nonce)
 
 	start := time.Now()
 	if _, err := conn.Write(payload); err != nil {
-		return 0, err
-	}
-
-	if timeout > 0 {
-		_ = conn.SetReadDeadline(time.Now().Add(timeout))
+		return 0, contextError(ctx, err)
 	}
 
 	buf := make([]byte, 2048)
 	for {
 		n, err := conn.Read(buf)
 		if err != nil {
-			return 0, err
+			return 0, contextError(ctx, err)
 		}
 		msg := string(buf[:n])
 		if msg == ackPrefix+nonce {
+			if err := contextError(ctx, nil); err != nil {
+				return 0, err
+			}
 			return time.Since(start), nil
 		}
-		if ctx != nil {
-			select {
-			case <-ctx.Done():
-				return 0, ctx.Err()
-			default:
-			}
+		if err := ctx.Err(); err != nil {
+			return 0, err
 		}
 	}
 }
@@ -150,26 +135,17 @@ func PerfProbe(ctx context.Context, localAddr, peerAddr string, packetSize, coun
 		packetSize = len(echoPrefix) + 8
 	}
 
-	udpAddr, err := net.ResolveUDPAddr("udp", localAddr)
+	parent := ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := probeContext(parent, timeout)
+	defer cancel()
+	conn, cleanup, err := dialProbe(ctx, localAddr, peerAddr)
 	if err != nil {
 		return 0, 0, err
 	}
-	peerUDP, err := net.ResolveUDPAddr("udp", peerAddr)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	conn, err := net.DialUDP("udp", udpAddr, peerUDP)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer conn.Close()
-	if ctx != nil {
-		go func() {
-			<-ctx.Done()
-			_ = conn.Close()
-		}()
-	}
+	defer cleanup()
 
 	payload := make([]byte, packetSize)
 	copy(payload, []byte(echoPrefix))
@@ -178,12 +154,8 @@ func PerfProbe(ctx context.Context, localAddr, peerAddr string, packetSize, coun
 	for i := 0; i < count; i++ {
 		copy(payload[len(echoPrefix):], fmt.Sprintf("%08d", i))
 		if _, err := conn.Write(payload); err != nil {
-			return 0, 0, err
+			return 0, 0, contextError(ctx, err)
 		}
-	}
-
-	if timeout > 0 {
-		_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	}
 
 	received := 0
@@ -192,7 +164,14 @@ func PerfProbe(ctx context.Context, localAddr, peerAddr string, packetSize, coun
 	for received < count {
 		n, err := conn.Read(buf)
 		if err != nil {
-			break
+			if parentErr := contextError(parent, nil); parentErr != nil {
+				return 0, 0, parentErr
+			}
+			var netErr net.Error
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+				break
+			}
+			return 0, 0, err
 		}
 		if n <= 0 {
 			continue
@@ -204,6 +183,9 @@ func PerfProbe(ctx context.Context, localAddr, peerAddr string, packetSize, coun
 		receivedBytes += n
 	}
 
+	if err := contextError(parent, nil); err != nil {
+		return 0, 0, err
+	}
 	elapsed := time.Since(start)
 	if elapsed <= 0 {
 		elapsed = time.Millisecond
