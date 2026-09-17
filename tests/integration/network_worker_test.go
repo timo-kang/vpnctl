@@ -46,6 +46,31 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "fleet-page":
+		creds, e := pki.LoadCredentials(os.Getenv("VPNCTL_PKI"))
+		if e != nil {
+			err = e
+			break
+		}
+		tlsConfig, e := creds.TLSConfig()
+		if e != nil {
+			err = e
+			break
+		}
+		transport := &http.Transport{TLSClientConfig: tlsConfig}
+		defer transport.CloseIdleConnections()
+		client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+		resp, e := client.Get("https://10.77.0.1:8443/status")
+		if e != nil {
+			err = e
+			break
+		}
+		if resp.StatusCode != 200 {
+			err = fmt.Errorf("page status %d", resp.StatusCode)
+		} else {
+			_, err = io.Copy(os.Stdout, resp.Body)
+		}
+		resp.Body.Close()
 	case "monitor-http":
 		path := os.Getenv("VPNCTL_MONITOR_PATH")
 		if path != "/network/quality" && path != "/metrics" {

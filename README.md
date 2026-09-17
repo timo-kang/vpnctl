@@ -38,8 +38,8 @@ vpnctl discover --interface wg0
 
 ```bash
 # From controller (full fleet view)
-vpnctl fleet status --config controller.yaml
-vpnctl fleet history --config controller.yaml --window 24h
+vpnctl fleet status --config node.yaml
+vpnctl fleet history --config node.yaml --window 24h
 
 # From local monitor data (no controller needed)
 vpnctl fleet status --interface wg0
@@ -538,7 +538,7 @@ The controller serves a built-in HTML status page at `/status` (no authenticatio
 http://controller:8443/status
 ```
 
-Shows all registered nodes with online/offline status, quality level, and last seen time. Auto-refreshes every 5 seconds.
+Shows registered nodes with separate heartbeat contact and measured path quality, nullable RTT/loss, freshness and reported path labels. Auto-refreshes every 5 seconds. Central history retains individual probes for seven days; `ping --config node.yaml` submits them. See the [fleet observation, capacity and backup contract](docs/validation/fleet-history.md).
 
 ## Grafana Dashboard
 

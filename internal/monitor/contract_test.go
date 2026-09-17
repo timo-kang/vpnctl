@@ -179,11 +179,11 @@ func TestStalledMonitorExpiresOnHTTPAndScrapeWithoutNewPublication(t *testing.T)
 }
 
 func TestQualityWindowBoundaryAndRecoveryHysteresis(t *testing.T) {
-	cfg, err := (QualityConfig{Window: time.Second, StaleAfter: time.Second, MinSamples: 1, RecoverySamples: 3}).normalized(time.Second)
+	cfg, err := (QualityConfig{Window: time.Second, StaleAfter: time.Second, MinSamples: 1, RecoverySamples: 3}).Normalized(time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := qualityWindow{level: QualityUnknown}
+	w := qualityWindow{}
 	now := time.Now()
 	q := w.observe(now, probeOutcome{rtt: 1000, success: true}, cfg)
 	if q.Level != QualityGood {
@@ -207,8 +207,8 @@ func TestQualityWindowBoundaryAndRecoveryHysteresis(t *testing.T) {
 	w.observe(now.Add(5*time.Second), probeOutcome{reason: "probe_timeout"}, cfg)
 	w.observe(now.Add(6*time.Second), probeOutcome{rtt: 1000, success: true}, cfg)
 	q = w.observe(now.Add(7*time.Second), probeOutcome{rtt: 100000, success: true}, cfg)
-	if q.Level != QualityOffline || w.recovery != 1 {
-		t.Fatal(q, w.recovery)
+	if q.Level != QualityOffline || q.ErrorReason != "recovering" {
+		t.Fatal(q)
 	}
 }
 

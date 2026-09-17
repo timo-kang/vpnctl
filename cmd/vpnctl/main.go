@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -30,6 +31,7 @@ import (
 	"vpnctl/internal/controller"
 	"vpnctl/internal/direct"
 	"vpnctl/internal/execx"
+	"vpnctl/internal/history"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
 	"vpnctl/internal/monitor"
@@ -54,6 +56,8 @@ Usage:
   vpnctl version
   vpnctl controller init --config <path>
   vpnctl controller status --config <path>
+  vpnctl controller history backup --config <path> --out <history.db>
+  vpnctl controller history restore --config <path> --file <history.db>
   vpnctl controller token create|list|revoke --config <path>
   vpnctl controller pki status|trust|revoke|ca-prepare|ca-activate|ca-retire|ca-rollback|backup --config <path>
   vpnctl controller pki restore --file <backup> --data-dir <fresh-dir> --config-out <path>
@@ -166,6 +170,10 @@ func handleController(args []string) {
 		controllerToken(args[1:])
 	case "remove-node":
 		controllerRemoveNode(args[1:])
+	case "history":
+		if err := runControllerHistory(args[1:]); err != nil {
+			fatal(err)
+		}
 	case "pki":
 		if err := runControllerPKI(args[1:]); err != nil {
 			fatal(err)
@@ -1144,6 +1152,12 @@ func handlePing(args []string) {
 	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
 	probePort := fs.Int("probe-port", 51900, "echo responder port on peers")
 	_ = fs.Parse(args)
+	if *count < 1 || *count > 10000 || *interval < 100*time.Millisecond || *timeout <= 0 || *timeout > 60*time.Second {
+		fatal(errors.New("count must be 1..10000, interval >=100ms, timeout in (0,60s]"))
+	}
+	if *path != "auto" && *path != "direct" && *path != "relay" {
+		fatal(errors.New("path must be auto, direct or relay"))
+	}
 
 	if *configPath != "" && *ifaceFlag != "" {
 		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
@@ -1224,15 +1238,35 @@ func handlePing(args []string) {
 		}
 
 		results := make([]float64, 0, *count)
+		observations := make([]history.Observation, 0, 16)
+		lastSubmit := time.Now()
 		for i := 0; i < *count; i++ {
 			rtt, err := direct.ProbePeer(ctx, ":0", peerAddr, *timeout)
+			success := err == nil
+			o := history.Observation{ID: rand.Text(), Timestamp: time.Now().UTC().Truncate(time.Microsecond), PeerID: p.ID, Path: pathLabel, Success: &success}
+			if success {
+				ms := float64(rtt.Microseconds()) / 1000
+				o.RTTMs = &ms
+			}
+			observations = append(observations, o)
 			if err == nil {
 				results = append(results, float64(rtt.Microseconds())/1000.0)
 				fmt.Fprintf(os.Stdout, "ping %s seq=%d rtt=%.2fms\n", p.Name, i+1, results[len(results)-1])
 			} else {
 				fmt.Fprintf(os.Stdout, "ping %s seq=%d timeout\n", p.Name, i+1)
 			}
-			time.Sleep(*interval)
+			if *submit && (len(observations) == 16 || time.Since(lastSubmit) >= 5*time.Second || i == *count-1) {
+				if err := client.SubmitMetrics(ctx, api.MetricsRequest{NodeID: cfg.Node.Name, Observations: observations}); err != nil {
+					fatal(fmt.Errorf("submit probe observations: %w", err))
+				}
+				observations = observations[:0]
+				lastSubmit = time.Now()
+			} else if !*submit {
+				observations = observations[:0]
+			}
+			if i < *count-1 {
+				time.Sleep(*interval)
+			}
 		}
 
 		metric := summarizePing(cfg.Node.Name, p.ID, pathLabel, results, *count, cfg.Node.MTU)
@@ -1240,9 +1274,6 @@ func handlePing(args []string) {
 			if err := metrics.AppendCSV(cfg.Node.MetricsPath, []model.Metric{metric}); err != nil {
 				fmt.Fprintf(os.Stderr, "append metrics failed: %v\n", err)
 			}
-		}
-		if *submit {
-			_ = client.SubmitMetrics(ctx, api.MetricsRequest{NodeID: cfg.Node.Name, Samples: []model.Metric{metric}})
 		}
 		fmt.Fprintf(os.Stdout, "ping summary peer=%s avg=%.2fms loss=%.2f%%\n", p.Name, metric.RTTMs, metric.LossPct)
 	}
@@ -1340,7 +1371,9 @@ func handlePerf(args []string) {
 		}
 	}
 	if *submit {
-		_ = client.SubmitMetrics(ctx, api.MetricsRequest{NodeID: cfg.Node.Name, Samples: []model.Metric{metric}})
+		if err := client.SubmitMetrics(ctx, api.MetricsRequest{NodeID: cfg.Node.Name, Samples: []model.Metric{metric}}); err != nil {
+			fatal(err)
+		}
 	}
 
 	fmt.Fprintf(os.Stdout, "perf peer=%s throughput=%.2f Mbps loss=%.2f%%\n", *peer, throughput, lossPct)
@@ -1906,7 +1939,11 @@ func fleetStatus(args []string) {
 	configPath := fs.String("config", "", "path to YAML config (controller API)")
 	iface := fs.String("interface", "", "WireGuard interface (local monitor store)")
 	dataPath := fs.String("data", "", "SQLite store path (default: ~/.vpnctl/monitor.db)")
+	jsonOutput := fs.Bool("json", false, "print fleet API JSON (requires --config)")
 	_ = fs.Parse(args)
+	if *jsonOutput && *configPath == "" {
+		fatal(errors.New("--json requires --config"))
+	}
 
 	if *configPath != "" && *iface != "" {
 		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
@@ -1934,11 +1971,8 @@ func fleetStatus(args []string) {
 			fatal(err)
 		}
 
-		fmt.Printf("%-16s  %-18s  %-10s  %-8s  %-8s  %-10s  %-20s\n",
-			"NAME", "VPN_IP", "PATH", "RTT_MS", "LOSS%", "NAT", "LAST_SEEN")
-		for _, n := range resp.Nodes {
-			fmt.Printf("%-16s  %-18s  %-10s  %-8.2f  %-8.2f  %-10s  %-20s\n",
-				n.Name, n.VPNIP, n.Path, n.RTTMs, n.LossPct, n.NATType, n.LastSeen)
+		if err := printFleetStatus(os.Stdout, resp, *jsonOutput); err != nil {
+			fatal(err)
 		}
 		return
 	}
@@ -1962,9 +1996,11 @@ func fleetStatus(args []string) {
 	fmt.Printf("%-16s  %-18s  %-8s  %-8s  %-20s\n",
 		"PEER_KEY", "PEER_IP", "RTT_MS", "LOSS%", "LAST_SEEN")
 	for _, s := range summaries {
-		rttMs := float64(s.AvgRTTus) / 1000.0
-		fmt.Printf("%-16s  %-18s  %-8.2f  %-8.2f  %-20s\n",
-			s.PeerKey, s.PeerIP, rttMs, s.LossPct, s.LastSeen.Format(time.RFC3339))
+		rtt := "-"
+		if s.SuccessCount > 0 {
+			rtt = fmt.Sprintf("%.2f", float64(s.AvgRTTus)/1000)
+		}
+		fmt.Printf("%-16s  %-18s  %-8s  %-8.2f  %-20s\n", s.PeerKey, s.PeerIP, rtt, s.LossPct, s.LastSeen.Format(time.RFC3339))
 	}
 }
 
@@ -1974,7 +2010,13 @@ func fleetHistory(args []string) {
 	iface := fs.String("interface", "", "WireGuard interface (local monitor store)")
 	dataPath := fs.String("data", "", "SQLite store path (default: ~/.vpnctl/monitor.db)")
 	window := fs.String("window", "1h", "time window (e.g. 1h, 30m)")
+	jsonOutput := fs.Bool("json", false, "print fleet API JSON (requires --config)")
+	nodeID := fs.String("node", "", "filter reporting node ID (controller only)")
+	bucket := fs.String("bucket", "", "bucket width, e.g. 1m, 15m, 1h (controller only)")
 	_ = fs.Parse(args)
+	if *configPath == "" && (*jsonOutput || *nodeID != "" || *bucket != "") {
+		fatal(errors.New("--json, --node and --bucket require --config"))
+	}
 
 	if *configPath != "" && *iface != "" {
 		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
@@ -1997,17 +2039,13 @@ func fleetHistory(args []string) {
 
 		client := newAPIClient(cfg.Node)
 		ctx := context.Background()
-		resp, err := client.FleetHistory(ctx, *window)
+		resp, err := client.FleetHistoryQuery(ctx, *window, *nodeID, *bucket)
 		if err != nil {
 			fatal(err)
 		}
 
-		for _, n := range resp.Nodes {
-			fmt.Printf("Node: %s\n", n.Name)
-			fmt.Printf("  %-20s  %-8s  %-8s\n", "TIME", "ONLINE%", "AVG_RTT_MS")
-			for _, b := range n.Buckets {
-				fmt.Printf("  %-20s  %-8.1f  %-8.2f\n", b.Time, b.OnlinePct, b.AvgRTTMs)
-			}
+		if err := printFleetHistory(os.Stdout, resp, *jsonOutput); err != nil {
+			fatal(err)
 		}
 		return
 	}
@@ -2043,9 +2081,11 @@ func fleetHistory(args []string) {
 			barLen = 0
 		}
 		bar := strings.Repeat("█", barLen) + strings.Repeat("░", 20-barLen)
-		rttMs := float64(s.AvgRTTus) / 1000.0
-		fmt.Printf("%-16s  [%s] %.1f%% online  %.2f ms avg RTT\n",
-			s.PeerIP, bar, onlinePct, rttMs)
+		rtt := "-"
+		if s.SuccessCount > 0 {
+			rtt = fmt.Sprintf("%.2f", float64(s.AvgRTTus)/1000)
+		}
+		fmt.Printf("%-16s  [%s] %.1f%% probe availability  %s ms avg RTT\n", s.PeerIP, bar, onlinePct, rtt)
 	}
 }
 

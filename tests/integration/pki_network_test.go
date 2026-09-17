@@ -243,6 +243,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 			_ = os.WriteFile(filepath.Join(results, filepath.Base(path)), []byte(strings.Join(lines, "\n")), 0600)
 		}
 	})
+	checkFleetHistory := exerciseFleetHistory(t, bin, namespaces, paths, results)
 	time.Sleep(time.Second)
 	before := make([]kernelSnapshot, size)
 	for n := range before {
@@ -417,6 +418,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	for n := range configs {
 		eventually(t, 5*time.Second, "node after controller restart", func() error { return fleet(n) })
 	}
+	checkFleetHistory("after-restart")
 	time.Sleep(time.Second)
 	phase("network_loss")
 	// Drop encrypted underlay packets for one node; positive control proves the

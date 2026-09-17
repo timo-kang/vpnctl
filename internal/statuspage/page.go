@@ -24,14 +24,17 @@ type Data struct {
 
 // NodeStatus represents one node in the status page.
 type NodeStatus struct {
-	Name    string
-	VPNIP   string
-	NATType string
-	LastSeen string
-	Online  bool
-	Quality string // good, degraded, poor, offline
-	RTTMs   string
-	LossPct string
+	Status                            string
+	Peer, Path, Relay, Uplink, Reason string
+	Stale                             bool
+	Name                              string
+	VPNIP                             string
+	NATType                           string
+	LastSeen                          string
+	Online                            bool
+	Quality                           string // good, degraded, poor, offline
+	RTTMs                             string
+	LossPct                           string
 }
 
 // Handler returns an http.HandlerFunc that renders the status page.

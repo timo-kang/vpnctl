@@ -34,14 +34,15 @@ type ProbeResult struct {
 
 // PeerSummary holds aggregated stats for a single peer over a time window.
 type PeerSummary struct {
-	PeerKey  string
-	PeerIP   string
-	Count    int
-	AvgRTTus int64
-	MinRTTus int64
-	MaxRTTus int64
-	LossPct  float64
-	LastSeen time.Time
+	PeerKey      string
+	PeerIP       string
+	Count        int
+	SuccessCount int
+	AvgRTTus     int64
+	MinRTTus     int64
+	MaxRTTus     int64
+	LossPct      float64
+	LastSeen     time.Time
 }
 
 // Store is a SQLite-backed store for probe results.
@@ -89,11 +90,12 @@ func (s *Store) InsertContext(ctx context.Context, r ProbeResult) error {
 
 // Query returns all probe results for peerKey within the given time window.
 func (s *Store) Query(peerKey string, window time.Duration) ([]ProbeResult, error) {
-	since := time.Now().Add(-window).UnixMicro()
+	end := time.Now().UnixMicro()
+	since := end - window.Microseconds()
 	rows, err := s.db.Query(
 		`SELECT timestamp, peer_key, peer_ip, rtt_us, success
-		 FROM probes WHERE peer_key = ? AND timestamp >= ? ORDER BY timestamp`,
-		peerKey, since,
+		 FROM probes WHERE peer_key = ? AND timestamp > ? AND timestamp <= ? ORDER BY timestamp`,
+		peerKey, since, end,
 	)
 	if err != nil {
 		return nil, err
@@ -104,11 +106,12 @@ func (s *Store) Query(peerKey string, window time.Duration) ([]ProbeResult, erro
 
 // QueryAll returns all probe results for all peers within the given time window.
 func (s *Store) QueryAll(window time.Duration) ([]ProbeResult, error) {
-	since := time.Now().Add(-window).UnixMicro()
+	end := time.Now().UnixMicro()
+	since := end - window.Microseconds()
 	rows, err := s.db.Query(
 		`SELECT timestamp, peer_key, peer_ip, rtt_us, success
-		 FROM probes WHERE timestamp >= ? ORDER BY timestamp`,
-		since,
+		 FROM probes WHERE timestamp > ? AND timestamp <= ? ORDER BY timestamp`,
+		since, end,
 	)
 	if err != nil {
 		return nil, err
@@ -129,17 +132,19 @@ func (s *Store) Cleanup(retention time.Duration) (int64, error) {
 
 // Summarize returns aggregated per-peer statistics over the given time window.
 func (s *Store) Summarize(window time.Duration) ([]PeerSummary, error) {
-	since := time.Now().Add(-window).UnixMicro()
+	end := time.Now().UnixMicro()
+	since := end - window.Microseconds()
 	rows, err := s.db.Query(`
 		SELECT peer_key, peer_ip,
 		    COUNT(*) as cnt,
+		    SUM(CASE WHEN success=1 THEN 1 ELSE 0 END),
 		    COALESCE(AVG(CASE WHEN success=1 THEN rtt_us END), 0) as avg_rtt,
 		    COALESCE(MIN(CASE WHEN success=1 THEN rtt_us END), 0) as min_rtt,
 		    COALESCE(MAX(CASE WHEN success=1 THEN rtt_us END), 0) as max_rtt,
 		    100.0 * SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) / COUNT(*) as loss_pct,
 		    MAX(timestamp) as last_ts
-		FROM probes WHERE timestamp >= ? GROUP BY peer_key, peer_ip ORDER BY peer_ip`,
-		since,
+		FROM probes WHERE timestamp > ? AND timestamp <= ? GROUP BY peer_key, peer_ip ORDER BY peer_ip`,
+		since, end,
 	)
 	if err != nil {
 		return nil, err
@@ -155,7 +160,7 @@ func (s *Store) Summarize(window time.Duration) ([]PeerSummary, error) {
 
 		if err := rows.Scan(
 			&ps.PeerKey, &ps.PeerIP,
-			&ps.Count,
+			&ps.Count, &ps.SuccessCount,
 			&avgRTT, &minRTT, &maxRTT,
 			&ps.LossPct,
 			&lastTs,

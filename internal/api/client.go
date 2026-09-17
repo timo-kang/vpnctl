@@ -102,14 +102,25 @@ func (c *Client) FleetStatus(ctx context.Context) (FleetStatusResponse, error) {
 	if err := c.getJSON(ctx, "/fleet/status", &resp); err != nil {
 		return resp, err
 	}
+	if resp.SchemaVersion != 2 {
+		return resp, fmt.Errorf("unsupported fleet schema %d; controller and client must support v2", resp.SchemaVersion)
+	}
 	return resp, nil
 }
 
 // FleetHistory fetches time-bucketed history for all fleet nodes.
 func (c *Client) FleetHistory(ctx context.Context, window string) (FleetHistoryResponse, error) {
+	return c.FleetHistoryQuery(ctx, window, "", "")
+}
+
+func (c *Client) FleetHistoryQuery(ctx context.Context, window, nodeID, bucket string) (FleetHistoryResponse, error) {
 	var resp FleetHistoryResponse
-	if err := c.getJSON(ctx, "/fleet/history?window="+url.QueryEscape(window), &resp); err != nil {
+	values := url.Values{"window": {window}, "node_id": {nodeID}, "bucket": {bucket}}
+	if err := c.getJSON(ctx, "/fleet/history?"+values.Encode(), &resp); err != nil {
 		return resp, err
+	}
+	if resp.SchemaVersion != 2 {
+		return resp, fmt.Errorf("unsupported fleet schema %d; controller and client must support v2", resp.SchemaVersion)
 	}
 	return resp, nil
 }

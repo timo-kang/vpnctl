@@ -3,7 +3,12 @@
 
 package api
 
-import "vpnctl/internal/model"
+import (
+	"time"
+
+	"vpnctl/internal/history"
+	"vpnctl/internal/model"
+)
 
 // RegisterRequest is sent by a node when joining the controller.
 type RegisterRequest struct {
@@ -46,8 +51,9 @@ type CandidatesResponse struct {
 
 // MetricsRequest submits one or more samples.
 type MetricsRequest struct {
-	NodeID  string         `json:"node_id"`
-	Samples []model.Metric `json:"samples"`
+	NodeID       string                `json:"node_id"`
+	Samples      []model.Metric        `json:"samples,omitempty"`
+	Observations []history.Observation `json:"observations,omitempty"`
 }
 
 // NATProbeRequest submits NAT discovery results.
@@ -77,37 +83,35 @@ type WGConfigResponse struct {
 
 // FleetNodeStatus describes the current status of a single fleet node.
 type FleetNodeStatus struct {
-	Status   string  `json:"status,omitempty"`
-	Name     string  `json:"name"`
-	VPNIP    string  `json:"vpn_ip"`
-	Path     string  `json:"path"`
-	RTTMs    float64 `json:"rtt_ms"`
-	LossPct  float64 `json:"loss_pct"`
-	NATType  string  `json:"nat_type"`
-	LastSeen string  `json:"last_seen"`
+	history.Measurement
+	Status       string                `json:"status"`
+	Name         string                `json:"name"`
+	VPNIP        string                `json:"vpn_ip"`
+	NATType      string                `json:"nat_type"`
+	LastSeen     string                `json:"last_seen"`
+	Measurements []history.Measurement `json:"measurements"`
 }
 
-// FleetStatusResponse is returned by GET /fleet/status.
 type FleetStatusResponse struct {
-	Nodes []FleetNodeStatus `json:"nodes"`
+	SchemaVersion int               `json:"schema_version"`
+	Nodes         []FleetNodeStatus `json:"nodes"`
 }
 
-// FleetHistoryBucket holds aggregated stats for a single time bucket.
-type FleetHistoryBucket struct {
-	Time      string  `json:"time"`
-	OnlinePct float64 `json:"online_pct"`
-	AvgRTTMs  float64 `json:"avg_rtt_ms"`
-}
+type FleetHistoryBucket = history.Bucket
 
-// FleetNodeHistory holds time-bucketed history for a single fleet node.
 type FleetNodeHistory struct {
+	NodeID  string               `json:"node_id"`
 	Name    string               `json:"name"`
 	Buckets []FleetHistoryBucket `json:"buckets"`
 }
 
-// FleetHistoryResponse is returned by GET /fleet/history.
 type FleetHistoryResponse struct {
-	Nodes []FleetNodeHistory `json:"nodes"`
+	SchemaVersion    int                `json:"schema_version"`
+	Start            time.Time          `json:"start"`
+	End              time.Time          `json:"end"`
+	BucketSeconds    float64            `json:"bucket_seconds"`
+	RetentionSeconds float64            `json:"retention_seconds"`
+	Nodes            []FleetNodeHistory `json:"nodes"`
 }
 
 // BootstrapRequest is sent by a node during initial enrollment.

@@ -26,7 +26,7 @@
   .quality.good { background: #0d2818; color: #3fb950; }
   .quality.degraded { background: #2a1f00; color: #d29922; }
   .quality.poor { background: #2d0000; color: #da3633; }
-  .quality.offline { background: #1c1c1c; color: #484f58; }
+  .quality.unknown, .quality.offline { background: #1c1c1c; color: #484f58; }
   .footer { margin-top: 24px; font-size: 12px; color: #484f58; }
   .mono { font-family: 'SF Mono', Consolas, monospace; font-size: 13px; }
   @media (max-width: 600px) { body { padding: 12px; } table { font-size: 13px; } }
@@ -48,6 +48,7 @@
         <th>Quality</th>
         <th>RTT</th>
         <th>Loss</th>
+        <th>Reported peer / path / relay / uplink</th>
         <th>NAT</th>
         <th>Last Seen</th>
       </tr>
@@ -55,12 +56,13 @@
     <tbody>
       {{range .Nodes}}
       <tr>
-        <td><span class="dot {{.Quality}}"></span></td>
+        <td>{{.Status}}</td>
         <td class="mono">{{.Name}}</td>
         <td class="mono">{{.VPNIP}}</td>
-        <td><span class="quality {{.Quality}}">{{.Quality}}</span></td>
+        <td><span class="quality {{.Quality}}">{{.Quality}}</span>{{if .Stale}} (stale){{end}}<br><small>{{.Reason}}</small></td>
         <td class="mono">{{.RTTMs}}</td>
         <td class="mono">{{.LossPct}}</td>
+        <td>{{.Peer}} / {{.Path}} / {{.Relay}} / {{.Uplink}}</td>
         <td>{{.NATType}}</td>
         <td>{{.LastSeen}}</td>
       </tr>

@@ -72,7 +72,7 @@ func New(cfg Config) (*Monitor, error) {
 		return nil, fmt.Errorf("monitor interval must be positive")
 	}
 	var err error
-	cfg.Quality, err = cfg.Quality.normalized(cfg.Interval)
+	cfg.Quality, err = cfg.Quality.Normalized(cfg.Interval)
 	if err != nil {
 		return nil, err
 	}
@@ -171,12 +171,14 @@ func (m *Monitor) recordCycle(now time.Time, peers []peersource.Peer, outcomes [
 		snap.Peers = cloneSnapshot(m.latest).Peers
 		snap.ErrorReason, snap.Stale = discoveryError, true
 		for i := range snap.Peers {
-			snap.Peers[i].Quality.setLevel(QualityUnknown)
+			snap.Peers[i].Quality.SetLevel(QualityUnknown)
 			snap.Peers[i].Quality.Stale = true
 			snap.Peers[i].Quality.ErrorReason = discoveryError
 		}
 		for _, w := range m.windows {
-			w.level, w.recovery = QualityUnknown, 0
+			if w.state != nil {
+				w.state.ResetAssessment()
+			}
 		}
 	} else {
 		if len(peers) == 0 {
@@ -187,7 +189,7 @@ func (m *Monitor) recordCycle(now time.Time, peers []peersource.Peer, outcomes [
 			id := identify(p)
 			w := m.windows[id]
 			if w == nil {
-				w = &qualityWindow{level: QualityUnknown}
+				w = &qualityWindow{}
 			}
 			q := w.observe(now, outcomes[i], m.cfg.Quality)
 			q.PeerIP = p.VPNIP
@@ -311,7 +313,7 @@ func (m *Monitor) latestAt(now time.Time) Snapshot {
 		q := &snap.Peers[i].Quality
 		if snap.Stale || q.ObservedAt == nil || !now.Before(q.ObservedAt.Add(m.cfg.Quality.StaleAfter)) {
 			q.Stale = true
-			q.setLevel(QualityUnknown)
+			q.SetLevel(QualityUnknown)
 			if snap.ErrorReason == "clock_regressed" {
 				q.ErrorReason = "clock_regressed"
 			} else if q.ErrorReason == "" || q.ErrorReason == "insufficient_samples" || q.ErrorReason == "recovering" {
@@ -344,7 +346,7 @@ func filterPeers(peers []peersource.Peer, ips []string) []peersource.Peer {
 func cloneSnapshot(s Snapshot) Snapshot {
 	s.Peers = slices.Clone(s.Peers)
 	for i := range s.Peers {
-		s.Peers[i].Quality = s.Peers[i].Quality.clone()
+		s.Peers[i].Quality = s.Peers[i].Quality.Clone()
 	}
 	return s
 }

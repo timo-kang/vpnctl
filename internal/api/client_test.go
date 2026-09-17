@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,5 +36,26 @@ func TestClient_ErrorIncludesBody(t *testing.T) {
 	}
 	if want := `"error":"nope"`; !strings.Contains(got, want) {
 		t.Fatalf("error missing body: %q", got)
+	}
+}
+
+func TestFleetClientRejectsUnversionedAndUnsupportedQuality(t *testing.T) {
+	for _, version := range []int{0, 1, 2, 3} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"schema_version":%d,"nodes":[]}`, version)
+			}))
+			defer s.Close()
+			c := NewClient(s.URL)
+			_, statusErr := c.FleetStatus(context.Background())
+			_, historyErr := c.FleetHistory(context.Background(), "24h")
+			if version == 2 {
+				if statusErr != nil || historyErr != nil {
+					t.Fatal(statusErr, historyErr)
+				}
+			} else if statusErr == nil || historyErr == nil {
+				t.Fatal("unsupported fleet values accepted", version)
+			}
+		})
 	}
 }
