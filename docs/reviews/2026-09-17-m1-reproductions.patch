@@ -1,0 +1,307 @@
+diff --git a/internal/controller/review_boundary_test.go b/internal/controller/review_boundary_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/controller/review_boundary_test.go
+@@ -0,0 +1,107 @@
++package controller
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"testing"
++	"vpnctl/internal/api"
++	"vpnctl/internal/config"
++	"vpnctl/internal/pki"
++)
++
++func TestReviewRegistryLossMustNotResetIdentity(t *testing.T) {
++	for _, fault := range []string{"missing", "empty", "null"} {
++		t.Run(fault, func(t *testing.T) {
++			cfg := config.ControllerConfig{DataDir: t.TempDir(), VPNCIDR: "10.7.0.0/24", WGAddress: "10.7.0.1/24", Listen: "127.0.0.1:0", PKI: &config.PKIConfig{}}
++			s, err := NewServer(cfg)
++			if err != nil {
++				t.Fatal(err)
++			}
++			token, err := s.InitPKI()
++			if err != nil {
++				t.Fatal(err)
++			}
++			h, b, tc := testTLSAPI(t, s)
++			defer b.CloseIdleConnections()
++			old, _, oldTLS := enrollTestClient(t, h, b, tc, token, "removed")
++			defer old.CloseIdleConnections()
++			if err := s.removeNode("removed"); err != nil {
++				t.Fatal(err)
++			}
++			if _, err := old.FleetStatus(context.Background()); err == nil {
++				t.Fatal("fixture did not revoke removed identity")
++			}
++			path := filepath.Join(cfg.DataDir, "registry.yaml")
++			switch fault {
++			case "missing":
++				err = os.Remove(path)
++			case "empty":
++				err = os.WriteFile(path, nil, 0600)
++			case "null":
++				err = os.WriteFile(path, []byte("null\n"), 0600)
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			restarted, err := NewServer(cfg)
++			if err != nil {
++				return
++			}
++			if _, err := restarted.InitPKI(); err != nil {
++				t.Fatal(err)
++			}
++			h2, b2, tc2 := testTLSAPI(t, restarted)
++			defer b2.CloseIdleConnections()
++			replacement, _, _ := enrollTestClient(t, h2, b2, tc2, token, "removed")
++			defer replacement.CloseIdleConnections()
++			replay := api.NewTLSClient(h2.URL, oldTLS)
++			defer replay.CloseIdleConnections()
++			_, err = replay.Register(context.Background(), api.RegisterRequest{Name: "removed", PubKey: "old-device-regained-access"})
++			t.Fatalf("controller accepted %s registry; removed identity re-enrolled and old certificate registration error=%v", fault, err)
++		})
++	}
++}
++
++func TestReviewBootstrapIssuanceFailureMustNotPublishLiveNode(t *testing.T) {
++	cfg := config.ControllerConfig{DataDir: t.TempDir(), VPNCIDR: "10.7.0.0/24", WGAddress: "10.7.0.1/24", Listen: "127.0.0.1:0", PKI: &config.PKIConfig{}}
++	s, err := NewServer(cfg)
++	if err != nil {
++		t.Fatal(err)
++	}
++	token, err := s.InitPKI()
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, bootstrap, _ := testTLSAPI(t, s)
++	defer bootstrap.CloseIdleConnections()
++	path := filepath.Join(cfg.DataDir, "pki", "authority.json")
++	if err := os.Rename(path, path+".saved"); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(path, 0700); err != nil {
++		t.Fatal(err)
++	}
++	csr, _, err := pki.GenerateCSR("new-node")
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, err = bootstrap.Bootstrap(context.Background(), api.BootstrapRequest{Token: token, Name: "new-node", CSR: string(csr)})
++	if err == nil {
++		t.Fatal("issuance failure not injected")
++	}
++	if err := os.Remove(path); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Rename(path+".saved", path); err != nil {
++		t.Fatal(err)
++	}
++	_, prepErr := s.adminPKI(api.AdminRequest{Operation: "ca.prepare"})
++	if prepErr != nil {
++		t.Fatal(prepErr)
++	}
++	_, activateErr := s.adminPKI(api.AdminRequest{Operation: "ca.activate"})
++	if len(s.reg.Nodes) != 0 {
++		t.Fatalf("bootstrap failed but published %d online nodes, certificates=%d; CA activation blocked=%v", len(s.reg.Nodes), len(s.authority.Status().Certificates), activateErr)
++	}
++}
+diff --git a/internal/agent/review_starvation_test.go b/internal/agent/review_starvation_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/agent/review_starvation_test.go
+@@ -0,0 +1,78 @@
++package agent
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++	"time"
++	"vpnctl/internal/api"
++	"vpnctl/internal/config"
++)
++
++func TestReviewDirectSweepMustNotStarveHeartbeat(t *testing.T) {
++	silent, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer silent.Close()
++	first := make(chan time.Time, 1)
++	readerDone := make(chan struct{})
++	go func() {
++		defer close(readerDone)
++		buf := make([]byte, 2048)
++		for {
++			_, _, err := silent.ReadFromUDP(buf)
++			if err != nil {
++				return
++			}
++			select {
++			case first <- time.Now():
++			default:
++			}
++		}
++	}()
++	defer func() { silent.Close(); <-readerDone }()
++	var lastRegister atomic.Int64
++	peers := []api.PeerCandidate{}
++	for i := 0; i < 3; i++ {
++		peers = append(peers, api.PeerCandidate{ID: fmt.Sprint("peer-", i), PublicAddr: "127.0.0.1:1234", ProbePort: silent.LocalAddr().(*net.UDPAddr).Port})
++	}
++	ctrl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/register":
++			lastRegister.Store(time.Now().UnixNano())
++			json.NewEncoder(w).Encode(api.RegisterResponse{NodeID: "node", VPNIP: "10.7.0.2/32"})
++		case "/candidates":
++			json.NewEncoder(w).Encode(api.CandidatesResponse{Peers: peers})
++		default:
++			w.WriteHeader(204)
++		}
++	}))
++	defer ctrl.Close()
++	reservation, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
++	if err != nil {
++		t.Fatal(err)
++	}
++	port := reservation.LocalAddr().(*net.UDPAddr).Port
++	reservation.Close()
++	cfg := config.NodeConfig{Name: "node", Controller: ctrl.URL, ProbePort: port, DirectMode: "auto", KeepaliveIntervalSec: 1, STUNIntervalSec: 60, CandidatesIntervalSec: 1, DirectIntervalSec: 1, ServerPublicKey: "unused", ServerEndpoint: "127.0.0.1:51820", ServerAllowedIPs: []string{"10.7.0.0/24"}}
++	ctx, cancel := context.WithCancel(context.Background())
++	done := make(chan error, 1)
++	go func() { done <- Run(ctx, cfg) }()
++	defer func() { cancel(); <-done }()
++	var started time.Time
++	select {
++	case started = <-first:
++	case <-time.After(4 * time.Second):
++		t.Fatal("sweep did not start")
++	}
++	time.Sleep(3 * time.Second)
++	if lastRegister.Load() < started.UnixNano() {
++		t.Fatalf("1-second heartbeat did not run for 3 seconds during only 3 silent peer probes; last heartbeat age=%v", time.Since(time.Unix(0, lastRegister.Load())))
++	}
++}
+diff --git a/cmd/vpnctl/review_renewal_test.go b/cmd/vpnctl/review_renewal_test.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/vpnctl/review_renewal_test.go
+@@ -0,0 +1,107 @@
++package main
++
++import (
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"sync/atomic"
++	"testing"
++	"time"
++	"vpnctl/internal/api"
++	"vpnctl/internal/config"
++	"vpnctl/internal/pki"
++)
++
++func TestReviewNodeServeRenewsDuringRegistrationFailure(t *testing.T) {
++	dir := t.TempDir()
++	a, err := pki.OpenAuthority(filepath.Join(dir, "ca"), pki.Policy{CALifetime: time.Hour, ServerLifetime: time.Hour, ClientLifetime: 6 * time.Second, ClientRenewBefore: 4 * time.Second, CheckInterval: 100 * time.Millisecond, SANs: []string{"127.0.0.1"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	csr, key, err := pki.GenerateCSR("node")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, status, err := a.Issue(csr, "node")
++	if err != nil {
++		t.Fatal(err)
++	}
++	pkiDir := filepath.Join(dir, "node-pki")
++	creds := pki.Credentials{Version: 1, Generation: status.Generation, CACert: status.CACert, ClientCert: cert, ClientKey: string(key)}
++	if err := pki.SaveCredentials(pkiDir, creds, ""); err != nil {
++		t.Fatal(err)
++	}
++	var registrations, trusts, renewals atomic.Int32
++	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/register":
++			registrations.Add(1)
++			http.Error(w, "temporary registry I/O failure", 503)
++		case "/pki/trust":
++			trusts.Add(1)
++			s := a.Status()
++			json.NewEncoder(w).Encode(api.TrustState{Generation: s.Generation, CACert: s.CACert, Active: s.Active, Phase: s.Phase, RenewBeforeSeconds: s.RenewBeforeSeconds})
++		case "/pki/renew":
++			renewals.Add(1)
++			var req api.RenewRequest
++			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
++				http.Error(w, err.Error(), 400)
++				return
++			}
++			c, s, err := a.Renew([]byte(req.CSR), "node", r.TLS.PeerCertificates[0])
++			if err != nil {
++				http.Error(w, err.Error(), 503)
++				return
++			}
++			json.NewEncoder(w).Encode(api.RenewResponse{ClientCert: c, TrustState: api.TrustState{Generation: s.Generation, CACert: s.CACert, Active: s.Active, Phase: s.Phase, RenewBeforeSeconds: s.RenewBeforeSeconds}})
++		case "/pki/ack":
++			w.WriteHeader(204)
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	server.TLS = a.DynamicTLSConfig()
++	server.Config.ErrorLog = nil
++	server.StartTLS()
++	defer server.Close()
++	for _, name := range []string{"wg", "ip"} {
++		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
++			t.Fatal(err)
++		}
++	}
++	disabled := false
++	cfg := config.Config{Node: &config.NodeConfig{Name: "node", Controller: server.URL, PKIDir: pkiDir, WGPrivateKey: "test-private", WGPublicKey: "test-public", VPNIP: "10.7.0.2/32", ServerPublicKey: "server-public", ServerEndpoint: "127.0.0.1:51820", ServerAllowedIPs: []string{"10.7.0.0/24"}, WGConfigPath: filepath.Join(dir, "wg.conf"), DirectMode: "off", PolicyRoutingEnabled: &disabled}}
++	path := filepath.Join(dir, "node.yaml")
++	if err := config.Save(path, cfg); err != nil {
++		t.Fatal(err)
++	}
++	cmd := cliProcess(t, "node", "serve", "--config", path, "--retry-delay", "50ms", "--retry-max-delay", "100ms")
++	cmd.Env = append(cmd.Env, "PATH="+dir+":"+os.Getenv("PATH"))
++	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
++	if err := cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	defer func() { cmd.Process.Kill(); cmd.Wait() }()
++	leaf, err := pki.ParseCertificate(cert)
++	if err != nil {
++		t.Fatal(err)
++	}
++	time.Sleep(time.Until(leaf.NotAfter) + 200*time.Millisecond)
++	if registrations.Load() < 2 {
++		t.Fatal("registration retry fixture not exercised")
++	}
++	installed, err := pki.LoadCredentials(pkiDir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	installedLeaf, err := pki.ParseCertificate(installed.ClientCert)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !installedLeaf.NotAfter.After(time.Now()) {
++		t.Fatalf("valid certificate expired while register was retrying: registrations=%d trust=%d renew=%d", registrations.Load(), trusts.Load(), renewals.Load())
++	}
++}

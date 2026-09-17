@@ -12,10 +12,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"gopkg.in/yaml.v3"
 	"vpnctl/internal/config"
 	"vpnctl/internal/pki"
 	"vpnctl/internal/store"
+
+	"vpnctl/internal/atomicfile"
 )
 
 type controllerBackup struct {
@@ -66,7 +67,7 @@ func RestoreBackup(data []byte, dataDir string) (config.Config, error) {
 	if err := json.Unmarshal(data, &backup); err != nil {
 		return out, err
 	}
-	if backup.Version != 1 || backup.Registry == nil || backup.Config.PKI == nil {
+	if backup.Version != 1 || backup.Registry == nil || backup.Config.PKI == nil || backup.Registry.Version < 0 || backup.Registry.Version > 1 {
 		return out, fmt.Errorf("invalid controller backup")
 	}
 	if err := pki.ValidateAuthoritySnapshot(backup.Authority); err != nil {
@@ -128,7 +129,7 @@ func RestoreBackup(data []byte, dataDir string) (config.Config, error) {
 		return out, err
 	}
 	pkiDir := filepath.Join(target, "pki")
-	if err := os.MkdirAll(pkiDir, 0700); err != nil {
+	if err := atomicfile.MkdirAll(pkiDir, 0700); err != nil {
 		return out, err
 	}
 	if err := pki.WriteAtomic(filepath.Join(pkiDir, "authority.json"), backup.Authority, 0600); err != nil {
@@ -140,13 +141,13 @@ func RestoreBackup(data []byte, dataDir string) (config.Config, error) {
 	if err := pki.WriteAtomic(filepath.Join(pkiDir, "authority.initialized"), []byte("1"), 0600); err != nil {
 		return out, err
 	}
-	registry, err := yaml.Marshal(backup.Registry)
-	if err != nil {
+	if err := store.SaveRegistry(filepath.Join(target, "registry.yaml"), backup.Registry); err != nil {
 		return out, err
 	}
-	if err := pki.WriteAtomic(filepath.Join(target, "registry.yaml"), registry, 0600); err != nil {
+	if err := markRegistryInitialized(target); err != nil {
 		return out, err
 	}
+
 	if err := os.Remove(marker); err != nil {
 		return out, err
 	}

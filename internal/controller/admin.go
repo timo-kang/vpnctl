@@ -21,13 +21,15 @@ import (
 	"vpnctl/internal/api"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/pki"
+
+	"vpnctl/internal/atomicfile"
 )
 
 // AcquireStateLock must be called before constructing or initializing the production
 // server. It prevents two controllers loading independent writable registry copies.
 func AcquireStateLock(dataDir string) (*os.File, error) {
 	dir := filepath.Join(dataDir, "run")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := atomicfile.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	info, err := os.Lstat(dir)
@@ -228,6 +230,9 @@ func (s *Server) removeNode(nodeID string) error {
 	defer s.mutationMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureRegistryDurableLocked(); err != nil {
+		return err
+	}
 	if _, removed := s.reg.RemovedNodes[nodeID]; removed {
 		return nil
 	}
@@ -244,7 +249,8 @@ func (s *Server) removeNode(nodeID string) error {
 		return errNodeNotFound
 	}
 	next.RemovedNodes[nodeID] = time.Now().UTC()
-	if err := s.commitRegistryLocked(next, s.cfg.WGApply); err != nil {
+	commitErr := s.commitRegistryLocked(next, s.cfg.WGApply)
+	if err := commitErr; err != nil && !atomicfile.Replaced(err) {
 		return err
 	}
 	delete(s.directOK, nodeID)
@@ -256,7 +262,7 @@ func (s *Server) removeNode(nodeID string) error {
 	}
 	metricsRemoveNode(nodeID)
 	s.updateMetricsLocked()
-	return nil
+	return commitErr
 }
 
 func metricsRemoveNode(nodeID string) {

@@ -32,6 +32,8 @@ import (
 	"vpnctl/internal/statuspage"
 	"vpnctl/internal/store"
 	"vpnctl/internal/wireguard"
+
+	"vpnctl/internal/atomicfile"
 )
 
 const (
@@ -54,9 +56,10 @@ type Server struct {
 	ipam    *ipam
 	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
 	// when multiple nodes submit samples concurrently.
-	metricsMu    sync.Mutex
-	wg           *wireguard.Manager
-	saveRegistry func(string, *store.Registry) error
+	metricsMu         sync.Mutex
+	wg                *wireguard.Manager
+	saveRegistry      func(string, *store.Registry) error
+	registryUncertain bool
 	// directOK tracks recent direct probe successes reported by nodes.
 	// Used to gate P2P WireGuard /32 injection so relay doesn't get blackholed.
 	directOK         map[string]map[string]time.Time // node_id -> peer_id -> last success
@@ -76,13 +79,13 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 	}
 
 	regPath := filepath.Join(cfg.DataDir, "registry.yaml")
-	reg, err := store.LoadRegistry(regPath)
+	reg, fresh, err := loadControllerRegistry(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
 	// Backward/forward compatibility: older registries might not have IDs.
 	// Keep IDs stable so callers can consistently use node_id.
-	changed := false
+	changed := fresh || reg.Version == 0
 	for id := range reg.RemovedNodes {
 		if _, err := pki.NodeIdentityURI(id); err != nil {
 			return nil, fmt.Errorf("invalid removed identity: %w", err)
@@ -120,6 +123,9 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 			return nil, err
 		}
 	}
+	if err := markRegistryInitialized(cfg.DataDir); err != nil {
+		return nil, err
+	}
 	return &Server{
 		cfg:          cfg,
 		regPath:      regPath,
@@ -141,7 +147,7 @@ func (s *Server) InitPKI() (string, error) {
 	}
 
 	pkiDir := filepath.Join(s.cfg.DataDir, "pki")
-	if err := os.MkdirAll(pkiDir, 0o700); err != nil {
+	if err := atomicfile.MkdirAll(pkiDir, 0o700); err != nil {
 		return "", fmt.Errorf("create pki dir: %w", err)
 	}
 	s.pkiDir = pkiDir
@@ -522,18 +528,20 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	var signedCert string
 	var issuedState pki.AuthorityStatus
 
-	// Persist the registration before returning credentials to the node.
+	// Consume admission durably, validate/reserve in memory, then issue before
+	// publishing the enrollment. Failed issuance cannot create a live registry node.
 	var result nodeRegistrationResult
 	err = s.tokenStore.Use(req.Token, req.Name, func() error {
 		var registrationErr error
-		result, registrationErr = s.registerNode(nodeRegistration{Name: req.Name}, s.cfg.WGApply)
-		if registrationErr != nil {
-			return registrationErr
-		}
-		signedCert, issuedState, registrationErr = s.authority.Issue([]byte(req.CSR), req.Name)
-		s.logPKIResult("issue", req.Name, registrationErr)
+		result, registrationErr = s.registerWithIssuance(nodeRegistration{Name: req.Name}, s.cfg.WGApply, func() error {
+			var issueErr error
+			signedCert, issuedState, issueErr = s.authority.Issue([]byte(req.CSR), req.Name)
+			s.logPKIResult("issue", req.Name, issueErr)
+			return issueErr
+		})
 		return registrationErr
 	})
+
 	if errors.Is(err, pki.ErrInvalidToken) {
 		writeJSONError(w, http.StatusUnauthorized, "invalid bootstrap token")
 		return
@@ -654,9 +662,16 @@ type nodeRegistrationResult struct {
 }
 
 // registerNode registers or updates a node using a copy-on-write registry
-// transaction. The live registry changes only after the replacement has been
-// durably written and, when enabled, applied to the WireGuard dataplane.
+// transaction. Publication follows persistence and optional WireGuard apply.
+// A post-rename sync error publishes the visible replacement but returns an
+// uncertain-commit error; it must never roll memory/WG back behind the file.
 func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegistrationResult, error) {
+	return s.registerWithIssuance(input, autoApply, nil)
+}
+
+// issue runs after validation/lease selection and before registry publication.
+// mutationMu reserves the proposed lease while readers retain the prior snapshot.
+func (s *Server) registerWithIssuance(input nodeRegistration, autoApply bool, issue func() error) (nodeRegistrationResult, error) {
 	if err := validateRegistrationInput(input); err != nil {
 		return nodeRegistrationResult{}, fmt.Errorf("%w: %v", errRegistrationValidation, err)
 	}
@@ -668,6 +683,9 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := s.ensureRegistryDurableLocked(); err != nil {
+		return nodeRegistrationResult{}, err
+	}
 	if _, removed := s.reg.RemovedNodes[input.Name]; removed {
 		return nodeRegistrationResult{}, errNodeRemoved
 	}
@@ -684,6 +702,17 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 	assignedVPNIP, err := s.ipam.lease(input.Name, input.VPNIP, next)
 	if err != nil {
 		return nodeRegistrationResult{}, fmt.Errorf("%w: %v", errVPNIPAllocation, err)
+	}
+
+	if issue != nil {
+		err := func() error { s.mu.Unlock(); defer s.mu.Lock(); return issue() }()
+		if err != nil {
+			return nodeRegistrationResult{}, err
+		}
+		// Re-enrollment must not alter an existing lease, liveness or WG metadata.
+		if existingIndex >= 0 {
+			return nodeRegistrationResult{NodeID: input.Name, VPNIP: assignedVPNIP, Peers: s.peersLocked(input.Name)}, nil
+		}
 	}
 
 	var nodeID string
@@ -708,6 +737,7 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 		}
 		node.LastSeenAt = now
 		node.Status = "online"
+		node.EnrollmentPending = false
 		nodeID = node.ID
 	} else {
 		nodeID = input.Name
@@ -723,6 +753,13 @@ func (s *Server) registerNode(input nodeRegistration, autoApply bool) (nodeRegis
 			LastSeenAt: now,
 			Status:     "online",
 		})
+	}
+
+	if issue != nil {
+		node := &next.Nodes[len(next.Nodes)-1]
+		node.EnrollmentPending = true
+		node.Status = "pending"
+		node.LastSeenAt = time.Time{}
 	}
 
 	if err := s.commitRegistryLocked(next, autoApply); err != nil {
@@ -747,10 +784,25 @@ func (s *Server) commitRegistryLocked(next *store.Registry, autoApply bool) erro
 		defer s.mu.Lock() // restore the caller's lock even if an injected writer panics
 		return s.applyAndPersist(previous, next, autoApply)
 	}()
-	if err == nil {
+	if err == nil || atomicfile.Replaced(err) {
 		s.reg = next
+		s.registryUncertain = atomicfile.Replaced(err)
 	}
 	return err
+}
+
+// With mutationMu and mu held, confirm a prior visible-but-uncertain replacement
+// before an idempotent operation can report success without another file write.
+func (s *Server) ensureRegistryDurableLocked() error {
+	if !s.registryUncertain {
+		return nil
+	}
+	err := func() error { s.mu.Unlock(); defer s.mu.Lock(); return atomicfile.SyncDir(filepath.Dir(s.regPath)) }()
+	if err != nil {
+		return &atomicfile.CommitError{Err: err}
+	}
+	s.registryUncertain = false
+	return nil
 }
 
 func (s *Server) applyAndPersist(previous, next *store.Registry, autoApply bool) error {
@@ -776,7 +828,7 @@ func (s *Server) applyAndPersist(previous, next *store.Registry, autoApply bool)
 	observeStage("transaction", "persist", start)
 	if err != nil {
 		err = fmt.Errorf("save registry: %w", err)
-		if autoApply {
+		if autoApply && !atomicfile.Replaced(err) {
 			return rollback(err)
 		}
 		return err
@@ -829,7 +881,7 @@ func (s *Server) updateMetricsLocked() {
 
 	online := 0
 	for _, n := range s.reg.Nodes {
-		if time.Since(n.LastSeenAt) < 60*time.Second {
+		if !n.EnrollmentPending && time.Since(n.LastSeenAt) < 60*time.Second {
 			online++
 		}
 	}
@@ -955,7 +1007,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		path = filepath.Join(s.cfg.DataDir, "metrics.csv")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := atomicfile.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1043,16 +1095,21 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.mu.Lock()
 	if req.Success {
-		s.mu.Lock()
 		m := s.directOK[req.NodeID]
 		if m == nil {
 			m = make(map[string]time.Time)
 			s.directOK[req.NodeID] = m
 		}
 		m[req.PeerID] = time.Now().UTC()
-		s.mu.Unlock()
+	} else {
+		// An explicit failure invalidates the pair, including either-direction mode.
+		// Neither direction may reuse a success observed before this failure.
+		delete(s.directOK[req.NodeID], req.PeerID)
+		delete(s.directOK[req.PeerID], req.NodeID)
 	}
+	s.mu.Unlock()
 
 	if req.NodeID != "" && req.PeerID != "" {
 		result := "success"
@@ -1183,6 +1240,7 @@ func (s *Server) handleFleetStatus(w http.ResponseWriter, r *http.Request) {
 			lastSeen = node.LastSeenAt.Format(time.RFC3339)
 		}
 		nodes = append(nodes, api.FleetNodeStatus{
+			Status:   fleetNodeState(node, time.Now()),
 			Name:     node.Name,
 			VPNIP:    node.VPNIP,
 			NATType:  node.NATType,
@@ -1191,6 +1249,21 @@ func (s *Server) handleFleetStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, api.FleetStatusResponse{Nodes: nodes})
+}
+
+// Enrollment completion and recent contact are separate facts. In particular,
+// a persisted online registration must not advertise online forever.
+func fleetNodeState(node store.NodeInfo, now time.Time) string {
+	if node.EnrollmentPending {
+		return "pending"
+	}
+	if node.LastSeenAt.IsZero() && node.PubKey == "" {
+		return "enrolled"
+	}
+	if node.LastSeenAt.IsZero() || now.Sub(node.LastSeenAt) >= 60*time.Second {
+		return "offline"
+	}
+	return "online"
 }
 
 func (s *Server) handleFleetHistory(w http.ResponseWriter, r *http.Request) {
@@ -1246,7 +1319,7 @@ func peersForWGRegistry(reg *store.Registry) []wireguard.Peer {
 	}
 	peers := make([]wireguard.Peer, 0, len(reg.Nodes))
 	for _, node := range reg.Nodes {
-		if node.PubKey == "" || node.VPNIP == "" {
+		if node.EnrollmentPending || node.PubKey == "" || node.VPNIP == "" {
 			continue
 		}
 		allowed := normalizeHostCIDR(node.VPNIP)
@@ -1299,7 +1372,7 @@ func (s *Server) statusPageData() statuspage.Data {
 
 	data := statuspage.Data{Title: "vpnctl"}
 	for _, n := range s.reg.Nodes {
-		online := time.Since(n.LastSeenAt) < 60*time.Second
+		online := !n.EnrollmentPending && time.Since(n.LastSeenAt) < 60*time.Second
 		quality := "offline"
 		if online {
 			quality = "good"

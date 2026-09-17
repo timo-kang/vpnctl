@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"vpnctl/internal/atomicfile"
 )
 
 // Policy uses a third of each certificate's configured lifetime as the default
@@ -121,7 +123,7 @@ func OpenAuthority(dir string, policy Policy) (*Authority, error) {
 	if err := policy.Defaults(); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := atomicfile.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
 	a := &Authority{path: filepath.Join(dir, "authority.json"), policy: policy, write: WriteAtomic}

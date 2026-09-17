@@ -77,6 +77,7 @@ type WGConfigResponse struct {
 
 // FleetNodeStatus describes the current status of a single fleet node.
 type FleetNodeStatus struct {
+	Status   string  `json:"status,omitempty"`
 	Name     string  `json:"name"`
 	VPNIP    string  `json:"vpn_ip"`
 	Path     string  `json:"path"`

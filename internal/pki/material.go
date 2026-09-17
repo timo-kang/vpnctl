@@ -15,8 +15,9 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
+
+	"vpnctl/internal/atomicfile"
 )
 
 // Material is stored only in owner-readable state, never in public status.
@@ -113,36 +114,7 @@ func newServer(ca Material, sans []string, lifetime time.Duration) (Material, er
 // WriteAtomic keeps the old file on pre-rename failure, and fsyncs the parent
 // after replacement. An fsync failure after rename is an indeterminate commit.
 func WriteAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".pki-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if err := f.Chmod(mode); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	parent, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer parent.Close()
-	return parent.Sync()
+	return atomicfile.Write(path, data, mode)
 }
 
 // ValidateCSR checks proof of possession before allocating any registry state.

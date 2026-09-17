@@ -9,14 +9,12 @@ import (
 	"log/slog"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
-	"vpnctl/internal/addrutil"
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
-	"vpnctl/internal/metrics"
-	"vpnctl/internal/model"
 	"vpnctl/internal/stunutil"
 	"vpnctl/internal/wireguard"
 )
@@ -31,6 +29,19 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 		go func() { defer close(done); client.MaintainCredentials(renewalCtx, cfg.PKIDir, cfg.Name) }()
 		defer func() { cancelRenewal(); <-done }()
 	}
+
+	return runSession(ctx, cfg, client)
+}
+
+// RunSession runs one agent attempt. Its supervisor owns credential maintenance
+// across registration failures, tunnel restoration and retry backoff.
+func RunSession(ctx context.Context, cfg config.NodeConfig) error {
+	client := newClient(cfg)
+	defer client.CloseIdleConnections()
+	return runSession(ctx, cfg, client)
+}
+
+func runSession(ctx context.Context, cfg config.NodeConfig, client *api.Client) error {
 
 	nodeID, vpnIP, err := register(ctx, client, cfg)
 	if err != nil {
@@ -50,23 +61,60 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 		slog.Info("probe responder started", "addr", shared.LocalAddr())
 	}
 
-	keepaliveTicker := time.NewTicker(time.Duration(cfg.KeepaliveIntervalSec) * time.Second)
-	defer keepaliveTicker.Stop()
-	stunTicker := time.NewTicker(time.Duration(cfg.STUNIntervalSec) * time.Second)
-	defer stunTicker.Stop()
-	candidatesTicker := time.NewTicker(time.Duration(cfg.CandidatesIntervalSec) * time.Second)
-	defer candidatesTicker.Stop()
-	directTicker := time.NewTicker(time.Duration(cfg.DirectIntervalSec) * time.Second)
-	defer directTicker.Stop()
-
-	var candidates []api.PeerCandidate
-	var publicAddr string
-	var natType string
-	activePeers := map[string]wireguard.Peer{}
 	if err := fillServerConfig(ctx, client, &cfg); err != nil {
 		slog.Warn("server config fetch failed", "err", err)
 	}
-
+	// Independent owners prevent slow controller requests, STUN or a silent fleet
+	// from delaying heartbeat and tunnel health. Shutdown cancels and joins all I/O.
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	defer func() { cancelWorkers(); workers.Wait() }()
+	start := func(fn func()) { workers.Add(1); go func() { defer workers.Done(); fn() }() }
+	var snapshots directSnapshots
+	updates := make(chan directSnapshot, 1)
+	start(func() {
+		periodic(workerCtx, cfg.KeepaliveIntervalSec, func() {
+			if _, _, err := register(workerCtx, client, cfg); err != nil && workerCtx.Err() == nil {
+				slog.Warn("keepalive register failed", "err", err)
+			}
+		})
+	})
+	if cfg.DirectMode != "off" {
+		start(func() {
+			periodic(workerCtx, cfg.CandidatesIntervalSec, func() {
+				resp, err := client.Candidates(workerCtx, nodeID)
+				if err != nil {
+					if workerCtx.Err() == nil {
+						slog.Warn("candidates fetch failed", "err", err)
+					}
+					return
+				}
+				snapshots.update(updates, func(s *directSnapshot) { s.peers = resp.Peers })
+			})
+		})
+		if shared != nil && len(cfg.STUNServers) > 0 {
+			start(func() {
+				periodic(workerCtx, cfg.STUNIntervalSec, func() {
+					addr, nat, err := probeShared(workerCtx, shared, cfg.STUNServers, 5*time.Second)
+					if err != nil {
+						if workerCtx.Err() == nil {
+							slog.Warn("STUN probe failed", "err", err)
+						}
+						return
+					}
+					snapshots.update(updates, func(s *directSnapshot) { s.publicAddr = addr; s.natType = nat })
+					if err := client.SubmitNATProbe(workerCtx, api.NATProbeRequest{NodeID: nodeID, NATType: nat, PublicAddr: addr}); err != nil && workerCtx.Err() == nil {
+						slog.Warn("NAT probe submit failed", "err", err)
+					}
+				})
+			})
+		}
+		start(func() {
+			runDirect(workerCtx, client, cfg, nodeID, shared, updates, func(peers []wireguard.Peer) error {
+				return wireguard.DefaultManager().WithContext(workerCtx).ApplyPeers(cfg, peers)
+			})
+		})
+	}
 	// Health check ticker — detect dead tunnels.
 	// Must be computed AFTER fillServerConfig which populates ServerAllowedIPs and ServerProbePort.
 	// When disabled, healthC stays nil so the select case blocks forever (no-op).
@@ -86,145 +134,6 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-keepaliveTicker.C:
-			_, _, err := register(ctx, client, cfg)
-			if err != nil {
-				slog.Warn("keepalive register failed", "err", err)
-			}
-		case <-stunTicker.C:
-			if cfg.DirectMode == "off" || len(cfg.STUNServers) == 0 {
-				break
-			}
-			if shared == nil {
-				break
-			}
-			addr, nat, err := probeShared(ctx, shared, cfg.STUNServers, 5*time.Second)
-			// A slow STUN sweep can outlast its interval. Discard the queued
-			// tick so another blocking sweep cannot immediately starve the
-			// pending heartbeat and health checks.
-			stunTicker.Reset(time.Duration(cfg.STUNIntervalSec) * time.Second)
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if err != nil {
-				slog.Warn("STUN probe failed", "err", err)
-				break
-			}
-			publicAddr = addr
-			natType = nat
-			if err := client.SubmitNATProbe(ctx, api.NATProbeRequest{
-				NodeID:     nodeID,
-				NATType:    natType,
-				PublicAddr: publicAddr,
-			}); err != nil {
-				slog.Warn("NAT probe submit failed", "err", err)
-			}
-		case <-candidatesTicker.C:
-			resp, err := client.Candidates(ctx, nodeID)
-			if err != nil {
-				slog.Warn("candidates fetch failed", "err", err)
-				break
-			}
-			candidates = resp.Peers
-		case <-directTicker.C:
-			if cfg.DirectMode == "off" {
-				break
-			}
-			desired := map[string]wireguard.Peer{}
-			allowedOwner := map[string]string{}
-			for _, peer := range candidates {
-				inject := peer.P2PReady
-				// P2P WireGuard injection needs the peer's wg endpoint (as observed by the controller).
-				// PublicAddr from STUN is for the probe socket, not wg, and must not be used for wg endpoints.
-				wgEndpoint := peer.Endpoint
-				allowedIP := normalizeHostIP(peer.VPNIP)
-				if inject && allowedIP != "" {
-					if prev, ok := allowedOwner[allowedIP]; ok && prev != peer.ID {
-						// Overlapping AllowedIPs are invalid in WireGuard. Skip duplicates so one bad/stale
-						// registry entry doesn't block all peer injection.
-						slog.Warn("skip peer injection: duplicate allowed_ip", "name", peer.Name, "id", peer.ID, "vpn_ip", peer.VPNIP, "owner", prev)
-						inject = false
-					} else {
-						allowedOwner[allowedIP] = peer.ID
-					}
-				}
-				if inject && allowedIP != "" && peer.PubKey != "" && wgEndpoint != "" {
-					desired[peer.ID] = wireguard.Peer{
-						PublicKey:    peer.PubKey,
-						Endpoint:     wgEndpoint,
-						AllowedIPs:   []string{allowedIP},
-						KeepaliveSec: directKeepalive(cfg, peer.NATType),
-					}
-				}
-
-				// Record a direct UDP reachability datapoint to the peer's probe port.
-				// Use the host from PublicAddr or (fallback) from Endpoint, and always target ProbePort.
-				if shared == nil {
-					continue
-				}
-				peerAddr, ok := addrutil.ProbeAddr(peer.PublicAddr, peer.Endpoint, peer.ProbePort)
-				if !ok {
-					continue
-				}
-				path := "direct"
-
-				rtt, err := shared.ProbePeer(ctx, peerAddr, 2*time.Second)
-				success := err == nil
-				if !success {
-					_ = client.SubmitDirectResult(ctx, api.DirectResultRequest{
-						NodeID:  nodeID,
-						PeerID:  peer.ID,
-						Success: false,
-						RTTMs:   0,
-						Reason:  err.Error(),
-					})
-					continue
-				}
-
-				rttMs := float64(rtt.Microseconds()) / 1000.0
-				_ = client.SubmitDirectResult(ctx, api.DirectResultRequest{
-					NodeID:  nodeID,
-					PeerID:  peer.ID,
-					Success: true,
-					RTTMs:   rttMs,
-					Reason:  "",
-				})
-
-				sample := model.Metric{
-					Timestamp:  time.Now().UTC(),
-					NodeID:     nodeID,
-					PeerID:     peer.ID,
-					Path:       path,
-					RTTMs:      rttMs,
-					JitterMs:   0,
-					LossPct:    0,
-					MTU:        cfg.MTU,
-					NATType:    natType,
-					PublicAddr: publicAddr,
-				}
-
-				if cfg.MetricsPath != "" {
-					if err := metrics.AppendCSV(cfg.MetricsPath, []model.Metric{sample}); err != nil {
-						slog.Warn("append metrics failed", "err", err)
-					}
-				}
-				if err := client.SubmitMetrics(ctx, api.MetricsRequest{NodeID: nodeID, Samples: []model.Metric{sample}}); err != nil {
-					slog.Warn("submit metrics failed", "err", err)
-				}
-			}
-
-			if cfg.ServerPublicKey != "" && cfg.ServerEndpoint != "" && len(cfg.ServerAllowedIPs) > 0 {
-				if !peersEqual(activePeers, desired) {
-					peerList := peersFromMap(desired)
-					slog.Info("injecting wg peers", "count", len(peerList))
-					if err := wireguard.DefaultManager().WithContext(ctx).ApplyPeers(cfg, peerList); err != nil {
-						slog.Error("apply peers failed", "err", err)
-					} else {
-						slog.Info("wg peers injected", "count", len(peerList))
-						activePeers = desired
-					}
-				}
-			}
 		case <-healthC:
 			timeout := time.Duration(cfg.HealthCheckTimeoutSec) * time.Second
 			if timeout <= 0 {
@@ -248,6 +157,28 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 					return ErrTunnelDead
 				}
 			}
+		}
+	}
+}
+
+// Delay after completion: no overlapping work or accumulated ticker backlog.
+func periodic(ctx context.Context, seconds int, fn func()) {
+	interval := time.Duration(seconds) * time.Second
+	if interval <= 0 {
+		interval = time.Second
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
+			fn()
+			timer.Reset(interval)
 		}
 	}
 }

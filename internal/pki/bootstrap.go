@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"vpnctl/internal/atomicfile"
 )
 
 // GenerateToken returns a bootstrap token with format "vpnctl-bootstrap-" + 16 random hex bytes.
@@ -34,11 +36,12 @@ type TokenStore struct {
 	mu     sync.Mutex
 	path   string
 	tokens map[string]TokenRecord
+	write  func(string, []byte, os.FileMode) error
 }
 
 // OpenTokenStore loads tokens from file or creates an empty store if file doesn't exist.
 func OpenTokenStore(path string) (*TokenStore, error) {
-	store := &TokenStore{path: path, tokens: make(map[string]TokenRecord)}
+	store := &TokenStore{path: path, tokens: make(map[string]TokenRecord), write: atomicfile.Write}
 	if err := store.reloadLocked(); err != nil {
 		return nil, err
 	}
@@ -88,7 +91,9 @@ func (ts *TokenStore) CreateWithOptions(ttl time.Duration, singleUse bool) (stri
 		}
 		ts.tokens[generated] = record
 		if err := ts.saveLocked(); err != nil {
-			delete(ts.tokens, generated)
+			if !atomicfile.Replaced(err) {
+				delete(ts.tokens, generated)
+			}
 			return err
 		}
 		token = generated
@@ -117,7 +122,9 @@ func (ts *TokenStore) Use(token, nodeID string, fn func() error) error {
 		record.LastUsedAt, record.LastUsedBy = now, nodeID
 		ts.tokens[token] = record
 		if err := ts.saveLocked(); err != nil {
-			ts.tokens[token] = previous
+			if !atomicfile.Replaced(err) {
+				ts.tokens[token] = previous
+			}
 			return err
 		}
 		return fn()
@@ -158,7 +165,7 @@ func (ts *TokenStore) Validate(token string) (bool, error) {
 }
 
 // Revoke durably marks a token inactive while retaining its admission history.
-// A persistence failure restores the previous in-memory record.
+// Pre-replacement failures restore memory; uncertain commits retain visible state.
 func (ts *TokenStore) Revoke(token string) error {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -168,14 +175,19 @@ func (ts *TokenStore) Revoke(token string) error {
 			return err
 		}
 		record, ok := ts.tokens[token]
-		if !ok || !record.RevokedAt.IsZero() {
+		if !ok {
 			return nil
+		}
+		if !record.RevokedAt.IsZero() {
+			return atomicfile.SyncDir(filepath.Dir(ts.path))
 		}
 		previous := record
 		record.RevokedAt = time.Now().UTC()
 		ts.tokens[token] = record
 		if err := ts.saveLocked(); err != nil {
-			ts.tokens[token] = previous
+			if !atomicfile.Replaced(err) {
+				ts.tokens[token] = previous
+			}
 			return err
 		}
 		return nil
@@ -265,29 +277,7 @@ func (ts *TokenStore) saveLocked() error {
 		return err
 	}
 
-	dir := filepath.Dir(ts.path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(ts.path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, ts.path)
+	return ts.write(ts.path, data, 0600)
 }
 
 func (ts *TokenStore) withMutationLock(fn func() error) error {

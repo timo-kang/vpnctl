@@ -35,7 +35,7 @@ func qualityStyle(q LinkQuality) lipgloss.Style {
 type snapshotMsg Snapshot
 
 // waitForSnapshot returns a Cmd that blocks until a Snapshot arrives on sub.
-func waitForSnapshot(sub chan Snapshot) tea.Cmd {
+func waitForSnapshot(sub <-chan Snapshot) tea.Cmd {
 	return func() tea.Msg {
 		snap := <-sub
 		return snapshotMsg(snap)
@@ -47,11 +47,11 @@ type TUIModel struct {
 	iface    string
 	snap     Snapshot
 	quitting bool
-	sub      chan Snapshot
+	sub      <-chan Snapshot
 }
 
 // NewTUIModel creates a TUIModel subscribed to the given snapshot channel.
-func NewTUIModel(iface string, sub chan Snapshot) TUIModel {
+func NewTUIModel(iface string, sub <-chan Snapshot) TUIModel {
 	return TUIModel{
 		iface: iface,
 		sub:   sub,
