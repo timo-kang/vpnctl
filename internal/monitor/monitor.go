@@ -83,7 +83,7 @@ func (m *Monitor) Run(ctx context.Context) {
 
 // probeAll discovers peers, probes each one, stores results, and notifies listeners.
 func (m *Monitor) probeAll(ctx context.Context) {
-	peers, err := m.cfg.Source.Discover()
+	peers, err := peersource.Discover(ctx, m.cfg.Source)
 	if err != nil {
 		return
 	}

@@ -26,6 +26,7 @@ import (
 type probeEvent struct {
 	Node        string    `json:"node"`
 	Phase       string    `json:"phase"`
+	EndPhase    string    `json:"end_phase,omitempty"`
 	Kind        string    `json:"kind"`
 	At          time.Time `json:"at"`
 	DurationMS  float64   `json:"duration_ms"`
@@ -63,6 +64,18 @@ func TestNetworkWorker(t *testing.T) {
 			if fleetErr == nil || renewErr == nil || !strings.Contains(fleetErr.Error(), "403 Forbidden") || !strings.Contains(renewErr.Error(), "403 Forbidden") {
 				err = fmt.Errorf("revoked replay %d must be rejected by authorization: fleet=%v renew=%v", i, fleetErr, renewErr)
 				break
+			}
+		}
+	case "register":
+		c := api.NewClient("http://127.0.0.1:8080")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err = c.Register(ctx, api.RegisterRequest{Name: os.Getenv("VPNCTL_REGISTER_NAME"), PubKey: os.Getenv("VPNCTL_REGISTER_KEY")})
+		if os.Getenv("VPNCTL_EXPECT_FAILURE") == "1" {
+			if err == nil || !strings.Contains(err.Error(), "500 Internal Server Error") {
+				err = fmt.Errorf("expected failed mutation, got %v", err)
+			} else {
+				err = nil
 			}
 		}
 	case "fleet":
@@ -208,6 +221,7 @@ func runNetworkProbes() error {
 					}
 				}
 				e.DurationMS = float64(time.Since(start)) / float64(time.Millisecond)
+				e.EndPhase = phase()
 				e.OK = probeErr == nil
 				if probeErr != nil {
 					e.Error = probeErr.Error()

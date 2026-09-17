@@ -4,6 +4,8 @@
 package wireguard
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -57,5 +59,23 @@ func TestManagerUp_InstallsPolicyBaselineRoute(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("missing baseline route command; cmds=%v", rr.cmds)
+	}
+}
+
+func TestCanceledManagerDoesNotMutateOrCancelOriginal(t *testing.T) {
+	runner := &recordRunner{}
+	manager := NewManager(runner)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	disabled := false
+	cfg := config.NodeConfig{WGInterface: "test-wg", VPNIP: "10.7.0.2/32", PolicyRoutingEnabled: &disabled}
+	if err := manager.WithContext(ctx).Up(cfg, "[Interface]\n"); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if len(runner.cmds) != 0 {
+		t.Fatal("canceled operation mutated kernel")
+	}
+	if err := manager.Up(cfg, "[Interface]\n"); err != nil {
+		t.Fatal("original manager inherited cancellation", err)
 	}
 }

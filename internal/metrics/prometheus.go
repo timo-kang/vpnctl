@@ -67,3 +67,9 @@ var (
 	PKICertificates  = promauto.NewGaugeVec(prometheus.GaugeOpts{Name: "vpnctl_pki_certificates", Help: "Tracked client certificates by current status"}, []string{"status"})
 	PKIOverlap       = promauto.NewGauge(prometheus.GaugeOpts{Name: "vpnctl_pki_ca_overlap", Help: "One while a staged CA transition is in progress"})
 )
+
+var SystemCommandSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "vpnctl_system_command_seconds",
+	Help:    "System command duration including startup and wait; command labels are ip, wg or other",
+	Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10},
+}, []string{"command", "result"})

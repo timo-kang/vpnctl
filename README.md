@@ -239,6 +239,13 @@ direct peers after a successful candidates refresh and direct reconciliation;
 an agent disconnected from the controller can retain stale peers. This command
 does not promise immediate packet isolation across a partitioned mesh.
 
+Controller SIGTERM/SIGINT closes admission and drains accepted mutations before
+releasing the state lock. External ip/wg commands have a 5-second timeout and WG
+mutations a 30-second budget; rollback gets a fresh budget. The 10-second HTTP
+shutdown grace closes client connections but never releases ownership while a
+handler may still write. See the [shutdown and recovery runbook](docs/validation/controller-lifecycle.md)
+for process-group cleanup, verification and force-stop limits.
+
 ### Token management
 
 ```bash

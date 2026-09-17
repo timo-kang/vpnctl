@@ -373,8 +373,20 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	}
 	snapshots, _ := json.MarshalIndent(map[string]any{"before": before, "after": after}, "", "  ")
 	mustWrite(t, filepath.Join(results, "kernel.json"), string(snapshots))
-	phase("controller_restart")
+	phase("controller_graceful_restart")
 	savedStatus := action("pki.status")
+	ctrl.terminate(t)
+	ctrl = startNetworkProcess(t, namespaces[0], ctrlLog, nil, bin, "controller", "init", "--config", ctrlPath)
+	eventually(t, 5*time.Second, "controller graceful restart", func() error { _, err := admin(api.AdminRequest{Operation: "pki.status"}); return err })
+	gracefulStatus := action("pki.status")
+	if savedStatus.Generation != gracefulStatus.Generation || savedStatus.Active != gracefulStatus.Active || savedStatus.Phase != gracefulStatus.Phase {
+		t.Fatal("graceful restart changed persisted CA state")
+	}
+	for n := range configs {
+		eventually(t, 5*time.Second, "node after graceful restart", func() error { return fleet(n) })
+	}
+	time.Sleep(time.Second)
+	phase("controller_restart")
 	ctrl.stop()
 	ctrl = startNetworkProcess(t, namespaces[0], ctrlLog, nil, bin, "controller", "init", "--config", ctrlPath)
 	eventually(t, 5*time.Second, "controller restart", func() error { _, err := admin(api.AdminRequest{Operation: "pki.status"}); return err })
@@ -457,7 +469,7 @@ func evaluateNetworkEvents(t *testing.T, dir string, size int) {
 			if e.Phase == "warmup" {
 				continue
 			}
-			key := fmt.Sprintf("node-%d/%s/%s", n, e.Phase, e.Kind)
+			key := fmt.Sprintf("node-%d/%s/%s", n, accountingPhase(e), e.Kind)
 			s := summaries[key]
 			if s == nil {
 				s = &probeSummary{}
@@ -511,11 +523,39 @@ func evaluateNetworkEvents(t *testing.T, dir string, size int) {
 	}
 	for n := 0; n < size; n++ {
 		for _, kind := range []string{"udp", "tcp"} {
-			s := summaries[fmt.Sprintf("node-%d/controller_restart/%s", n, kind)]
-			if s == nil || s.Sent == 0 || s.Failed != 0 || s.Reconnects != 0 {
-				t.Errorf("controller process restart disrupted independent WG application: %+v", s)
+			for _, phase := range []string{"controller_restart", "controller_graceful_restart"} {
+				s := summaries[fmt.Sprintf("node-%d/%s/%s", n, phase, kind)]
+				if s == nil || s.Sent == 0 || s.Failed != 0 || s.Reconnects != 0 {
+					t.Errorf("%s disrupted independent WG application: %+v", phase, s)
+				}
 			}
 		}
 	}
 	t.Logf("planned PKI phases: probes=%d failures=%d; injected packet loss: %+v", total, failed, control)
+}
+
+// Only transport closure overlapping an intentional controller stop belongs to
+// its restart window. Deadline/authentication errors remain in their start phase.
+// Raw events retain both phase markers; no failure samples are discarded.
+func accountingPhase(e probeEvent) string {
+	if e.Kind == "https" && (e.EndPhase == "controller_restart" || e.EndPhase == "controller_graceful_restart") && (strings.HasSuffix(e.Error, ": EOF") || strings.Contains(e.Error, "connection reset by peer")) {
+		return e.EndPhase
+	}
+	return e.Phase
+}
+func TestNetworkAccountingPreservesFailures(t *testing.T) {
+	for _, tc := range []struct{ kind, end, err, want string }{
+		{"https", "controller_restart", "Get: EOF", "controller_restart"},
+		{"https", "controller_graceful_restart", "Get: EOF", "controller_graceful_restart"},
+		{"https", "controller_restart", "context deadline exceeded", "rollback"},
+		{"https", "controller_restart", "403 Forbidden", "rollback"},
+		{"https", "rollback", "Get: EOF", "rollback"},
+		{"udp", "controller_restart", "Get: EOF", "rollback"},
+		{"tcp", "controller_restart", "connection reset by peer", "rollback"},
+	} {
+		got := accountingPhase(probeEvent{Kind: tc.kind, Phase: "rollback", EndPhase: tc.end, Error: tc.err})
+		if got != tc.want {
+			t.Errorf("%+v: %s", tc, got)
+		}
+	}
 }

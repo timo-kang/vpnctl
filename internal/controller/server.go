@@ -210,13 +210,27 @@ func extractSANs(listen string) []string {
 	return []string{host}
 }
 
-// ListenAndServe runs the HTTP server.
-func (s *Server) ListenAndServe() error {
+// ListenAndServe runs until a listener fails. CLI owners use the context
+// variant to drain admitted mutations before releasing the state lock.
+func (s *Server) ListenAndServe() error { return s.ListenAndServeContext(context.Background()) }
+
+func (s *Server) ListenAndServeContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if s.cfg.PKI != nil && s.authority == nil {
 		return fmt.Errorf("controller PKI is configured but not initialized")
 	}
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", s.cfg.Listen)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
 	if s.cfg.WGApply {
-		if err := s.reconcileWG(); err != nil {
+		s.mu.Lock()
+		err := s.applyWGContext(ctx, s.peersForWGLocked())
+		s.mu.Unlock()
+		if err != nil {
 			return fmt.Errorf("reconcile WireGuard from registry: %w", err)
 		}
 	}
@@ -225,36 +239,40 @@ func (s *Server) ListenAndServe() error {
 		if err != nil {
 			return fmt.Errorf("probe responder: %w", err)
 		}
+		defer s.StopProbeResponder()
 		slog.Info("probe responder listening", "addr", addr)
 	}
-
-	stopAdmin, err := s.startAdmin()
+	admin, err := s.startAdminService()
 	if err != nil {
 		return fmt.Errorf("admin IPC: %w", err)
 	}
-	defer stopAdmin()
-
-	server := &http.Server{
-		Addr:              s.cfg.Listen,
-		Handler:           s.httpHandler(),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 20,
-	}
-
+	defer admin.stop()
 	if s.mtlsEnabled() {
-		server.TLSConfig = s.authority.DynamicTLSConfig()
 		stopPKI := s.startPKIMaintenance()
 		defer stopPKI()
-
-		slog.Info("controller listening (mTLS)", "addr", s.cfg.Listen)
-		return server.ListenAndServeTLS("", "")
 	}
-
-	slog.Info("controller listening", "addr", s.cfg.Listen)
-	return server.ListenAndServe()
+	server := &http.Server{
+		Handler: s.httpHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20,
+	}
+	if s.mtlsEnabled() {
+		server.TLSConfig = s.authority.DynamicTLSConfig()
+	}
+	apiServer := startHTTP(server, listener, s.mtlsEnabled())
+	// Drain both listeners before stopping maintenance/UDP and returning to owner.
+	defer stopHTTP(apiServer, admin)
+	slog.Info("controller listening", "addr", listener.Addr(), "mtls", s.mtlsEnabled())
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-apiServer.done:
+		return serveResult(ctx, apiServer)
+	case <-admin.done:
+		if err := serveResult(ctx, admin); err != nil {
+			return fmt.Errorf("admin IPC stopped: %w", err)
+		}
+		return nil
+	}
 }
 
 // httpHandler is shared by the production listener and network integration tests.
@@ -1227,6 +1245,10 @@ func (s *Server) reconcileWG() error {
 }
 
 func (s *Server) applyWG(peers []wireguard.Peer) error {
+	return s.applyWGContext(context.Background(), peers)
+}
+
+func (s *Server) applyWGContext(ctx context.Context, peers []wireguard.Peer) error {
 	serverCfg := wireguard.ServerConfig{
 		Interface:  s.cfg.WGInterface,
 		PrivateKey: s.cfg.WGPrivateKey,
@@ -1234,7 +1256,7 @@ func (s *Server) applyWG(peers []wireguard.Peer) error {
 		ListenPort: s.cfg.WGPort,
 		MTU:        s.cfg.MTU,
 	}
-	return s.wg.ApplyServer(serverCfg, peers)
+	return s.wg.WithContext(ctx).ApplyServer(serverCfg, peers)
 }
 
 func (s *Server) statusPageData() statuspage.Data {

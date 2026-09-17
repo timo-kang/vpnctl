@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +12,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -30,6 +28,7 @@ import (
 	"vpnctl/internal/config"
 	"vpnctl/internal/controller"
 	"vpnctl/internal/direct"
+	"vpnctl/internal/execx"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
 	"vpnctl/internal/monitor"
@@ -219,7 +218,9 @@ func controllerInit(args []string) {
 		}
 	}
 
-	fatal(srv.ListenAndServe())
+	ctx, stop := signalContext()
+	defer stop()
+	fatal(srv.ListenAndServeContext(ctx))
 }
 
 func controllerStatus(args []string) {
@@ -644,7 +645,7 @@ func nodeServe(args []string) {
 		// Restore the cached relay path before making any controller request.
 		// Incomplete first-time configurations still enroll/sync before WG up.
 		if _, err := wireguard.RenderNode(*cfg.Node); err == nil {
-			if err := upOnce(*configPath, &cfg); err != nil {
+			if err := upOnce(ctx, *configPath, &cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "restore cached tunnel failed: %v\n", err)
 				goto retry
 			}
@@ -660,7 +661,7 @@ func nodeServe(args []string) {
 			goto retry
 		}
 		if !tunnelRestored {
-			if err := upOnce(*configPath, &cfg); err != nil {
+			if err := upOnce(ctx, *configPath, &cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "wg up failed: %v\n", err)
 				goto retry
 			}
@@ -763,12 +764,12 @@ func syncConfigOnce(ctx context.Context, configPath string, cfg *config.Config) 
 	return nil
 }
 
-func upOnce(configPath string, cfg *config.Config) error {
+func upOnce(ctx context.Context, configPath string, cfg *config.Config) error {
 	if cfg == nil || cfg.Node == nil {
 		return errors.New("node config required")
 	}
 	// Ensure server fields are present (controller-driven config generation).
-	if err := fillServerConfig(cfg.Node); err != nil {
+	if err := fillServerConfig(ctx, cfg.Node); err != nil {
 		return err
 	}
 	if cfg.Node.VPNIP == "" {
@@ -785,7 +786,7 @@ func upOnce(configPath string, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	return wireguard.Up(*cfg.Node, setConf)
+	return wireguard.DefaultManager().WithContext(ctx).Up(*cfg.Node, setConf)
 }
 
 func nodeSyncConfig(args []string) {
@@ -876,6 +877,8 @@ func handleDoctor(args []string) {
 	iface := fs.String("iface", "", "wireguard interface name")
 	ifaceFlag := fs.String("interface", "", "WireGuard interface (alternative to --config)")
 	_ = fs.Parse(args)
+	ctx, cancel := signalContext()
+	defer cancel()
 
 	if *configPath != "" && *ifaceFlag != "" {
 		fmt.Fprintln(os.Stderr, "error: specify --config or --interface, not both")
@@ -885,7 +888,7 @@ func handleDoctor(args []string) {
 	// --interface mode: skip config-dependent checks, show interface status only.
 	if *ifaceFlag != "" {
 		fmt.Fprintf(os.Stdout, "iface=%s\n", *ifaceFlag)
-		if out, err := wireguard.Status(*ifaceFlag); err == nil {
+		if out, err := wireguard.DefaultManager().WithContext(ctx).Status(*ifaceFlag); err == nil {
 			fmt.Fprintln(os.Stdout, out)
 		} else {
 			fmt.Fprintf(os.Stdout, "wg status error: %v\n", err)
@@ -914,7 +917,7 @@ func handleDoctor(args []string) {
 	}
 
 	fmt.Fprintf(os.Stdout, "iface=%s\n", *iface)
-	if out, err := wireguard.Status(*iface); err == nil {
+	if out, err := wireguard.DefaultManager().WithContext(ctx).Status(*iface); err == nil {
 		fmt.Fprintln(os.Stdout, out)
 	} else {
 		fmt.Fprintf(os.Stdout, "wg status error: %v\n", err)
@@ -931,12 +934,12 @@ func handleDoctor(args []string) {
 		if cfg.Node.ProbePort > 0 {
 			fmt.Fprintf(os.Stdout, "probe_port=%d\n", cfg.Node.ProbePort)
 		}
-		if out, err := outputCmd("ip", "rule", "show"); err == nil && out != "" {
+		if out, err := outputCmd(ctx, "ip", "rule", "show"); err == nil && out != "" {
 			fmt.Fprintln(os.Stdout, "ip rule:")
 			fmt.Fprintln(os.Stdout, out)
 		}
 		if config.PolicyRoutingEnabled(cfg.Node) && cfg.Node.PolicyRoutingTable > 0 {
-			out, err := outputCmd("ip", "route", "show", "table", fmt.Sprintf("%d", cfg.Node.PolicyRoutingTable))
+			out, err := outputCmd(ctx, "ip", "route", "show", "table", fmt.Sprintf("%d", cfg.Node.PolicyRoutingTable))
 			if err == nil && out != "" {
 				fmt.Fprintf(os.Stdout, "ip route table %d:\n", cfg.Node.PolicyRoutingTable)
 				fmt.Fprintln(os.Stdout, out)
@@ -957,15 +960,8 @@ func handleDoctor(args []string) {
 	}
 }
 
-func outputCmd(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		return "", errors.New(strings.TrimSpace(buf.String()))
-	}
-	return strings.TrimSpace(buf.String()), nil
+func outputCmd(ctx context.Context, name string, args ...string) (string, error) {
+	return execx.NewOSRunner(nil, nil).OutputContext(ctx, name, args...)
 }
 
 func handleDirect(args []string) {
@@ -1470,12 +1466,14 @@ func handleUp(args []string) {
 	if *wgConfig != "" {
 		cfg.Node.WGConfigPath = *wgConfig
 	}
-	if err := fillServerConfig(cfg.Node); err != nil {
+	ctx, cancel := signalContext()
+	defer cancel()
+	if err := fillServerConfig(ctx, cfg.Node); err != nil {
 		fatal(err)
 	}
 	if cfg.Node.VPNIP == "" && cfg.Node.Controller != "" {
 		client := newAPIClient(cfg.Node)
-		resp, err := client.Register(context.Background(), api.RegisterRequest{
+		resp, err := client.Register(ctx, api.RegisterRequest{
 			Name:       cfg.Node.Name,
 			PubKey:     cfg.Node.WGPublicKey,
 			VPNIP:      cfg.Node.VPNIP,
@@ -1509,7 +1507,7 @@ func handleUp(args []string) {
 	if err != nil {
 		fatal(err)
 	}
-	fatal(wireguard.Up(*cfg.Node, setConf))
+	fatal(wireguard.DefaultManager().WithContext(ctx).Up(*cfg.Node, setConf))
 }
 
 func handleDown(args []string) {
@@ -1533,7 +1531,9 @@ func handleDown(args []string) {
 		cfg.Node.WGConfigPath = *wgConfig
 	}
 
-	fatal(wireguard.Down(*cfg.Node))
+	ctx, cancel := signalContext()
+	defer cancel()
+	fatal(wireguard.DefaultManager().WithContext(ctx).Down(*cfg.Node))
 }
 
 func handleStatus(args []string) {
@@ -1557,7 +1557,9 @@ func handleStatus(args []string) {
 		*iface = cfg.Node.WGInterface
 	}
 
-	out, err := wireguard.Status(*iface)
+	ctx, cancel := signalContext()
+	defer cancel()
+	out, err := wireguard.DefaultManager().WithContext(ctx).Status(*iface)
 	if err != nil {
 		fatal(err)
 	}
@@ -1808,7 +1810,7 @@ func writeBackVPNIP(path string, cfg *config.Config, vpnIP string) error {
 	return config.Save(path, *cfg)
 }
 
-func fillServerConfig(node *config.NodeConfig) error {
+func fillServerConfig(ctx context.Context, node *config.NodeConfig) error {
 	if node == nil {
 		return errors.New("node config required")
 	}
@@ -1822,7 +1824,7 @@ func fillServerConfig(node *config.NodeConfig) error {
 		return errors.New("node.controller required to fetch server config")
 	}
 	client := newAPIClient(node)
-	resp, err := client.WGConfig(context.Background(), node.Name)
+	resp, err := client.WGConfig(ctx, node.Name)
 	if err != nil {
 		return err
 	}
@@ -1850,20 +1852,13 @@ func firstScopedCIDR(values []string) string {
 }
 
 func waitForSignal() {
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	<-signals
+	ctx, stop := signalContext()
+	defer stop()
+	<-ctx.Done()
 }
 
 func signalContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-signals
-		cancel()
-	}()
-	return ctx, cancel
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
 func fatal(err error) {

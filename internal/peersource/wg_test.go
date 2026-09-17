@@ -4,6 +4,8 @@
 package peersource
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -93,5 +95,36 @@ func TestParseWgDump_ExtractsVPNIPFromSlash32(t *testing.T) {
 	}
 	if peers[0].VPNIP != "10.7.0.2" {
 		t.Errorf("VPNIP=%q, want 10.7.0.2", peers[0].VPNIP)
+	}
+}
+
+type blockingWgRunner struct{ started chan struct{} }
+
+func (r blockingWgRunner) RunContext(ctx context.Context, _ string, _ ...string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (r blockingWgRunner) OutputContext(ctx context.Context, _ string, _ ...string) (string, error) {
+	close(r.started)
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+func TestWGDiscoverOwnerCancellation(t *testing.T) {
+	source := NewWgSource("test-wg", 0)
+	started := make(chan struct{})
+	source.runner = blockingWgRunner{started}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := Discover(ctx, source); done <- err }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("discovery ignored owner cancellation")
 	}
 }
