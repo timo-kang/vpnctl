@@ -121,3 +121,11 @@ CI는 기존 kernel 작업에서 이 시나리오를 필수 실행한다. `nodes
 하드웨어·무선 채널의 재현과 현장 SLA는 별도 M3 검증에 남는다. controller 프로세스
 재시작은 kernel relay 자체의 장애와 다르다. 물리 relay 장치가 꺼져도 통신을 유지하려면
 대체 경로가 있어야 하며 이 단일 relay topology에서는 보장할 수 없다.
+
+## 독립 운영과 배포 저장소 연계
+
+외부 제품 바이너리 입력, suite/제품 digest, 실행 환경 기록, 권한과 artifact 계약은
+[실행 계약 v1](../../tests/integration/README.md)에 둔다. 배포 환경이 소유하는
+forwarding/firewall/서버 반환 route/SNAT는 [relay 배포 계약](../deployment/relay-network.md)에
+따로 둔다. 배포 저장소는 필요한 계약 파일을 고정된 commit/tag에서 가져다 쓰고,
+실제 환경별 적용·영속화·복원 책임을 가진다.
