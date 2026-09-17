@@ -24,15 +24,16 @@ import (
 )
 
 type probeEvent struct {
-	Node        string    `json:"node"`
-	Phase       string    `json:"phase"`
-	EndPhase    string    `json:"end_phase,omitempty"`
-	Kind        string    `json:"kind"`
-	At          time.Time `json:"at"`
-	DurationMS  float64   `json:"duration_ms"`
-	OK          bool      `json:"ok"`
-	Reconnected bool      `json:"reconnected,omitempty"`
-	Error       string    `json:"error,omitempty"`
+	Node        string          `json:"node"`
+	Phase       string          `json:"phase"`
+	EndPhase    string          `json:"end_phase,omitempty"`
+	Kind        string          `json:"kind"`
+	At          time.Time       `json:"at"`
+	DurationMS  float64         `json:"duration_ms"`
+	OK          bool            `json:"ok"`
+	Reconnected bool            `json:"reconnected,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	HTTP        *httpMilestones `json:"http,omitempty"`
 }
 
 // Re-exec the compiled test binary inside a node netns. All API and socket calls
@@ -46,6 +47,8 @@ func TestNetworkWorker(t *testing.T) {
 	switch mode {
 	case "echo":
 		err = serveEcho()
+	case "telemetry":
+		err = collectTelemetry()
 	case "probe":
 		err = runNetworkProbes()
 	case "replay":
@@ -191,7 +194,9 @@ func runNetworkProbes() error {
 					// Fresh TLS handshakes exercise server certificate reload too.
 					client.CloseIdleConnections()
 					reqCtx, stop := context.WithTimeout(ctx, time.Second)
-					_, probeErr = client.FleetStatus(reqCtx)
+					tracedCtx, trace := tracedProbe(reqCtx, start)
+					_, probeErr = client.FleetStatus(tracedCtx)
+					e.HTTP = trace.snapshot()
 					stop()
 				} else {
 					if conn == nil {

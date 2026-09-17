@@ -224,6 +224,8 @@ func (s *Server) removeNode(nodeID string) error {
 	// the tombstone, dataplane and all volatile node state have been committed.
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, removed := s.reg.RemovedNodes[nodeID]; removed {

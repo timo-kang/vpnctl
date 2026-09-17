@@ -93,7 +93,8 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		t.Fatal(err)
 	}
 	ctrlLog := filepath.Join(dir, "controller.log")
-	ctrl := startNetworkProcess(t, namespaces[0], ctrlLog, nil, bin, "controller", "init", "--config", ctrlPath)
+	ctrlEnv, injectSlowReconcile := slowReconcileEnvironment(t, dir)
+	ctrl := startNetworkProcess(t, namespaces[0], ctrlLog, ctrlEnv, bin, "controller", "init", "--config", ctrlPath)
 	admin := func(req api.AdminRequest) (api.AdminResponse, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -122,6 +123,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	startNetworkProcess(t, namespaces[0], filepath.Join(dir, "echo.log"), []string{"VPNCTL_WORKER=echo"}, testBin, "-test.run=^TestNetworkWorker$")
 	phaseFile := filepath.Join(dir, "phase")
 	mustWrite(t, phaseFile, "warmup")
+	stopResources := startResourceSampler(t, results, phaseFile)
 	phase := func(name string) {
 		t.Helper()
 		if err := pki.WriteAtomic(phaseFile, []byte(name), 0600); err != nil {
@@ -208,6 +210,9 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 			"VPNCTL_WORKER=probe", "VPNCTL_NODE=" + id, "VPNCTL_PHASE=" + phaseFile, "VPNCTL_PKI=" + cfg.Node.PKIDir, "VPNCTL_EVENTS=" + filepath.Join(results, id+".jsonl"),
 		}, testBin, "-test.run=^TestNetworkWorker$")
 	}
+	telemetry := startNetworkProcess(t, namespaces[0], filepath.Join(dir, "telemetry.log"), []string{
+		"VPNCTL_WORKER=telemetry", "VPNCTL_PHASE=" + phaseFile, "VPNCTL_PKI=" + configs[0].Node.PKIDir, "VPNCTL_TELEMETRY=" + filepath.Join(results, "telemetry.jsonl"),
+	}, testBin, "-test.run=^TestNetworkWorker$")
 	// Save sanitized logs on failure; never export generated credentials/state.
 	t.Cleanup(func() {
 		if !t.Failed() {
@@ -373,10 +378,12 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	}
 	snapshots, _ := json.MarshalIndent(map[string]any{"before": before, "after": after}, "", "  ")
 	mustWrite(t, filepath.Join(results, "kernel.json"), string(snapshots))
+	phase("slow_reconcile")
+	injectSlowReconcile()
 	phase("controller_graceful_restart")
 	savedStatus := action("pki.status")
 	ctrl.terminate(t)
-	ctrl = startNetworkProcess(t, namespaces[0], ctrlLog, nil, bin, "controller", "init", "--config", ctrlPath)
+	ctrl = startNetworkProcess(t, namespaces[0], ctrlLog, ctrlEnv, bin, "controller", "init", "--config", ctrlPath)
 	eventually(t, 5*time.Second, "controller graceful restart", func() error { _, err := admin(api.AdminRequest{Operation: "pki.status"}); return err })
 	gracefulStatus := action("pki.status")
 	if savedStatus.Generation != gracefulStatus.Generation || savedStatus.Active != gracefulStatus.Active || savedStatus.Phase != gracefulStatus.Phase {
@@ -388,7 +395,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	time.Sleep(time.Second)
 	phase("controller_restart")
 	ctrl.stop()
-	ctrl = startNetworkProcess(t, namespaces[0], ctrlLog, nil, bin, "controller", "init", "--config", ctrlPath)
+	ctrl = startNetworkProcess(t, namespaces[0], ctrlLog, ctrlEnv, bin, "controller", "init", "--config", ctrlPath)
 	eventually(t, 5*time.Second, "controller restart", func() error { _, err := admin(api.AdminRequest{Operation: "pki.status"}); return err })
 	restartedStatus := action("pki.status")
 	if savedStatus.Generation != restartedStatus.Generation || savedStatus.Active != restartedStatus.Active || savedStatus.Phase != restartedStatus.Phase {
@@ -424,6 +431,8 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	phase("recovered")
 	time.Sleep(2 * time.Second)
 	phase("done")
+	telemetry.finish(t)
+	stopResources()
 	for _, p := range probes {
 		p.finish(t)
 	}
@@ -501,7 +510,7 @@ func evaluateNetworkEvents(t *testing.T, dir string, size int) {
 	mustWrite(t, filepath.Join(dir, "summary.json"), string(data))
 	total, failed := 0, 0
 	for n := 0; n < size; n++ {
-		for _, phase := range []string{"renewal", "revocation", "rotation", "rollback", "recovered"} {
+		for _, phase := range []string{"renewal", "revocation", "rotation", "rollback", "slow_reconcile", "recovered"} {
 			for _, kind := range []string{"udp", "tcp", "https"} {
 				key := fmt.Sprintf("node-%d/%s/%s", n, phase, kind)
 				s := summaries[key]
@@ -534,11 +543,11 @@ func evaluateNetworkEvents(t *testing.T, dir string, size int) {
 	t.Logf("planned PKI phases: probes=%d failures=%d; injected packet loss: %+v", total, failed, control)
 }
 
-// Only transport closure overlapping an intentional controller stop belongs to
+// Only transport closure or an explicit shutdown rejection overlapping a stop belongs to
 // its restart window. Deadline/authentication errors remain in their start phase.
 // Raw events retain both phase markers; no failure samples are discarded.
 func accountingPhase(e probeEvent) string {
-	if e.Kind == "https" && (e.EndPhase == "controller_restart" || e.EndPhase == "controller_graceful_restart") && (strings.HasSuffix(e.Error, ": EOF") || strings.Contains(e.Error, "connection reset by peer")) {
+	if e.Kind == "https" && (e.EndPhase == "controller_restart" || e.EndPhase == "controller_graceful_restart") && (strings.HasSuffix(e.Error, ": EOF") || strings.Contains(e.Error, "connection reset by peer") || strings.HasSuffix(strings.TrimSpace(e.Error), "503 Service Unavailable: controller shutting down")) {
 		return e.EndPhase
 	}
 	return e.Phase
@@ -549,6 +558,8 @@ func TestNetworkAccountingPreservesFailures(t *testing.T) {
 		{"https", "controller_graceful_restart", "Get: EOF", "controller_graceful_restart"},
 		{"https", "controller_restart", "context deadline exceeded", "rollback"},
 		{"https", "controller_restart", "403 Forbidden", "rollback"},
+		{"https", "controller_graceful_restart", "request failed: 503 Service Unavailable: controller shutting down", "controller_graceful_restart"},
+		{"https", "controller_restart", "request failed: 503 Service Unavailable: certificate authorization failed", "rollback"},
 		{"https", "rollback", "Get: EOF", "rollback"},
 		{"udp", "controller_restart", "Get: EOF", "rollback"},
 		{"tcp", "controller_restart", "connection reset by peer", "rollback"},
