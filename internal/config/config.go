@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"vpnctl/internal/atomicfile"
+	"vpnctl/internal/uplink"
 )
 
 const (
@@ -85,6 +86,8 @@ type PKIConfig struct {
 
 // NodeConfig is used by the agent process running on a device.
 type NodeConfig struct {
+	UplinkObservation *uplink.Config `yaml:"uplink_observation,omitempty"`
+
 	Name                        string   `yaml:"name"`
 	Controller                  string   `yaml:"controller"`
 	WGInterface                 string   `yaml:"wg_interface"`
@@ -182,6 +185,11 @@ func Validate(cfg Config) error {
 		if cfg.Node.Controller == "" && (cfg.Node.ServerPublicKey == "" || cfg.Node.ServerEndpoint == "" || len(cfg.Node.ServerAllowedIPs) == 0) {
 			return fmt.Errorf("node.controller is required unless server fields are set")
 		}
+		if cfg.Node.UplinkObservation != nil {
+			if err := cfg.Node.UplinkObservation.Validate(); err != nil {
+				return err
+			}
+		}
 		if cfg.Node.HealthCheckIntervalSec < 0 {
 			return fmt.Errorf("node.health_check_interval_sec must be >= 0")
 		}
@@ -236,6 +244,9 @@ func ApplyDefaults(cfg *Config) {
 	}
 
 	if cfg.Node != nil {
+		if cfg.Node.UplinkObservation != nil {
+			cfg.Node.UplinkObservation.Defaults()
+		}
 		if cfg.Node.WGInterface == "" {
 			cfg.Node.WGInterface = DefaultWGInterface
 		}

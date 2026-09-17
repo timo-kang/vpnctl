@@ -4,7 +4,10 @@
 package history
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -127,7 +130,7 @@ func Check(ctx context.Context, path string) error {
 	if err = db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app); err != nil {
 		return err
 	}
-	if version != 1 || app != applicationID {
+	if (version != 1 && version != 2) || app != applicationID {
 		return fmt.Errorf("unsupported history backup schema %d", version)
 	}
 	if err = db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil {
@@ -156,5 +159,60 @@ func Check(ctx context.Context, path string) error {
 	if invalid != 0 {
 		return fmt.Errorf("invalid history measurements")
 	}
+	if version == 2 {
+		var stored, actual, bad int
+		if err = db.QueryRowContext(ctx, "SELECT row_count FROM uplink_metadata WHERE id=1").Scan(&stored); err != nil {
+			return err
+		}
+		if err = db.QueryRowContext(ctx, "SELECT count(*) FROM uplink_snapshots").Scan(&actual); err != nil {
+			return err
+		}
+		if stored != actual || actual > MaxUplinkSnapshots {
+			return fmt.Errorf("invalid uplink history counts")
+		}
+		if err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM uplink_results r LEFT JOIN uplink_snapshots s ON (s.node,s.id)=(r.node,r.id) WHERE s.id IS NULL OR r.state NOT IN ('up','down','unknown') OR r.rtt<0 OR r.rtt>60000 OR (r.state!='up' AND r.rtt IS NOT NULL) OR (r.state='up' AND r.rtt IS NULL) OR r.ts!=s.ts)").Scan(&bad); err != nil {
+			return err
+		}
+		if bad != 0 {
+			return fmt.Errorf("invalid uplink history results")
+		}
+		if err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM uplink_latest l LEFT JOIN uplink_snapshots s ON (s.node,s.id)=(l.node,l.id) WHERE s.id IS NULL OR s.ts!=l.ts OR s.payload!=l.payload)").Scan(&bad); err != nil {
+			return err
+		}
+		if bad != 0 {
+			return fmt.Errorf("invalid latest uplink snapshot")
+		}
+		records, e := db.QueryContext(ctx, "SELECT node,id,ts,payload,digest FROM uplink_snapshots")
+		if e != nil {
+			return e
+		}
+		for records.Next() {
+			var node, id string
+			var ts int64
+			var payload, digest []byte
+			if e = records.Scan(&node, &id, &ts, &payload, &digest); e != nil {
+				records.Close()
+				return e
+			}
+			snapshot, e := unpackSnapshot(payload)
+			if e != nil {
+				records.Close()
+				return e
+			}
+			raw, _ := json.Marshal(snapshot)
+			sum := sha256.Sum256(raw)
+			if !validLabel(node, true) || snapshot.ID != id || snapshot.At.UnixMicro() != ts || snapshot.Validate(snapshot.At) != nil || !bytes.Equal(sum[:], digest) {
+				records.Close()
+				return fmt.Errorf("invalid stored uplink snapshot")
+			}
+		}
+		e = records.Err()
+		records.Close()
+		if e != nil {
+			return e
+		}
+
+	}
+
 	return nil
 }

@@ -307,6 +307,8 @@ func (s *Server) httpHandler() http.Handler {
 	mux.HandleFunc("/wg-config", s.requireClientCert(s.handleWGConfig))
 	mux.HandleFunc("/fleet/status", s.requireClientCert(s.handleFleetStatus))
 	mux.HandleFunc("/fleet/history", s.handleAuthorizedFleetHistory)
+	mux.HandleFunc("/uplink-observations", s.requireClientCert(s.handleUplinkObservation))
+	mux.HandleFunc("/fleet/uplinks", s.handleAuthorizedUplinks)
 	// Prometheus metrics endpoint — no client cert required so Prometheus can scrape without mTLS.
 	mux.Handle("/prom/metrics", promhttp.Handler())
 	// Status page — simple HTML dashboard, no auth required.

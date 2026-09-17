@@ -64,6 +64,7 @@ Usage:
   vpnctl node join --config <path> [--token <bootstrap-token> --ca-cert <trusted-ca.pem>]
   vpnctl node serve --config <path>
   vpnctl node run --config <path>
+  vpnctl node diagnose --config <path> [--submit]
   vpnctl node sync-config --config <path>
   vpnctl direct serve --config <path> [--listen :0]
   vpnctl direct test --config <path> --peer <name>
@@ -79,6 +80,7 @@ Usage:
   vpnctl monitor --interface <iface> [--watch] [--interval 5s] [--peers ip1,ip2]
   vpnctl fleet status --config <path> | --interface <iface>
   vpnctl fleet history --config <path> | --interface <iface> [--window 1h]
+  vpnctl fleet uplinks --config <path> --node <id> [--window 7d] [--json]
 
 `
 
@@ -395,6 +397,8 @@ func handleNode(args []string) {
 	switch args[0] {
 	case "join":
 		nodeJoin(args[1:])
+	case "diagnose":
+		fatal(runNodeDiagnose(args[1:]))
 	case "serve":
 		nodeServe(args[1:])
 	case "run":
@@ -623,6 +627,8 @@ func nodeServe(args []string) {
 
 	var credentials credentialSupervisor
 	defer credentials.stop()
+	var observations agent.UplinkSupervisor
+	defer observations.Stop()
 
 	delay := *retryDelay
 	if delay <= 0 {
@@ -652,6 +658,7 @@ func nodeServe(args []string) {
 			fatal(err)
 		}
 
+		observations.Configure(ctx, *cfg.Node)
 		credentials.configure(*cfg.Node)
 		tunnelRestored := false
 		// A provisioned node may reach its controller only through WireGuard.
@@ -1920,7 +1927,7 @@ func defaultMonitorDBPath() string {
 
 func handleFleet(args []string) {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, "fleet subcommand required (status|history)\n")
+		fmt.Fprint(os.Stderr, "fleet subcommand required (status|history|uplinks)\n")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -1928,6 +1935,8 @@ func handleFleet(args []string) {
 		fleetStatus(args[1:])
 	case "history":
 		fleetHistory(args[1:])
+	case "uplinks":
+		fatal(runFleetUplinks(args[1:]))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown fleet subcommand %q\n", args[0])
 		os.Exit(2)

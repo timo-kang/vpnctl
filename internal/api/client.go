@@ -14,7 +14,21 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"vpnctl/internal/history"
 )
+
+// HTTPError preserves the response status for bounded producer retry decisions.
+type HTTPError struct {
+	StatusCode      int
+	Status, Message string
+}
+
+func (e *HTTPError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("request failed: %s: %s", e.Status, e.Message)
+	}
+	return "request failed: " + e.Status
+}
 
 // Client is a thin HTTP client for the controller API.
 type Client struct {
@@ -144,12 +158,8 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(res.Body)
-		msg := strings.TrimSpace(string(body))
-		if msg != "" {
-			return fmt.Errorf("request failed: %s: %s", res.Status, msg)
-		}
-		return fmt.Errorf("request failed: %s", res.Status)
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 8192))
+		return &HTTPError{StatusCode: res.StatusCode, Status: res.Status, Message: strings.TrimSpace(string(body))}
 	}
 
 	if out == nil {
@@ -173,14 +183,23 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(res.Body)
-		msg := strings.TrimSpace(string(body))
-		if msg != "" {
-			return fmt.Errorf("request failed: %s: %s", res.Status, msg)
-		}
-		return fmt.Errorf("request failed: %s", res.Status)
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 8192))
+		return &HTTPError{StatusCode: res.StatusCode, Status: res.Status, Message: strings.TrimSpace(string(body))}
 	}
 
 	decoder := json.NewDecoder(res.Body)
 	return decoder.Decode(out)
+}
+
+func (c *Client) SubmitUplink(ctx context.Context, req UplinkRequest) error {
+	return c.postJSON(ctx, "/uplink-observations", req, nil)
+}
+func (c *Client) FleetUplinks(ctx context.Context, node, window string, limit int) (history.UplinkHistory, error) {
+	var out history.UplinkHistory
+	values := url.Values{"node_id": {node}, "window": {window}, "limit": {fmt.Sprint(limit)}}
+	err := c.getJSON(ctx, "/fleet/uplinks?"+values.Encode(), &out)
+	if err == nil && out.SchemaVersion != 1 {
+		err = fmt.Errorf("unsupported uplink history schema %d", out.SchemaVersion)
+	}
+	return out, err
 }

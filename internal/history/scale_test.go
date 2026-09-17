@@ -53,6 +53,11 @@ func TestHistoryScale(t *testing.T) {
 		t.Fatal(e)
 	}
 	db.Close()
+	uplinkStep := 15 * time.Minute
+	if os.Getenv("VPNCTL_HISTORY_SCALE") == "1" {
+		uplinkStep = time.Minute
+	}
+	seedUplinkScale(t, s, now, uplinkStep)
 	info, e := os.Stat(s.path)
 	if e != nil {
 		t.Fatal(e)
@@ -86,7 +91,7 @@ func TestHistoryScale(t *testing.T) {
 	t.Logf("restart replay=%s", time.Since(start))
 	if os.Getenv("VPNCTL_HISTORY_SCALE") == "1" {
 		t.Run("WAL backpressure", testWALBackpressure)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		start = time.Now()
 		if e = s.Maintain(ctx, now.Add(Retention)); e != nil {

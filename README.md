@@ -572,3 +572,8 @@ the limits of the verified fleet sizes.
 A provisioned `node serve` restores its saved WireGuard path before contacting
 the controller, allowing a controller URL reachable only through the VPN. Initial
 enrollment still needs a provisioning path and a trusted CA bundle.
+
+Robot-to-server diagnostics can be enabled with `node.uplink_observation`.
+`vpnctl node diagnose --config robot.yaml` observes one cycle;
+`vpnctl fleet uplinks --config robot.yaml --node robot-01 --window 7d` reads the
+central target history. See [configuration, semantics and limits](docs/validation/uplink-observation.md).
