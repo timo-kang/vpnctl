@@ -25,24 +25,19 @@ func NewWatchWriter(w io.Writer) *WatchWriter {
 // Format: [HH:MM:SS] %-12s %-15s %6s %5s  %s
 func (ww *WatchWriter) Write(snap Snapshot) {
 	ts := snap.Time.Local().Format("15:04:05")
+	if snap.ErrorReason != "" || snap.StorageError != "" {
+		fmt.Fprintf(ww.w, "[%s] collection=%s stale=%t storage=%s\n", ts, snap.ErrorReason, snap.Stale, snap.StorageError)
+	}
 	for _, ps := range snap.Peers {
 		name := FormatPeerName(ps.Peer)
 		ip := ps.Peer.VPNIP
 
-		var rtt, loss string
-		if ps.Success {
-			ms := ps.RTTus / 1000
-			rtt = fmt.Sprintf("%dms", ms)
-			loss = "0.0%"
-		} else {
-			rtt = "-"
-			loss = "100%"
-		}
+		rtt, loss := formatQuality(ps.Quality)
 
 		hs := formatHandshake(ps.Peer.LastHandshake)
 
 		fmt.Fprintf(ww.w, "[%s] %-12s %-15s %6s %5s  %-8s %s\n",
-			ts, name, ip, rtt, loss, ps.Quality.String(), hs)
+			ts, name, ip, rtt, loss, ps.Quality.Quality, hs+" "+ps.Quality.ErrorReason)
 	}
 }
 
@@ -73,4 +68,15 @@ func formatHandshake(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	}
+}
+
+func formatQuality(q PeerQuality) (string, string) {
+	rtt, loss := "-", "-"
+	if q.RTTMs != nil {
+		rtt = fmt.Sprintf("%.2fms", *q.RTTMs)
+	}
+	if q.LossPct != nil {
+		loss = fmt.Sprintf("%.1f%%", *q.LossPct)
+	}
+	return rtt, loss
 }

@@ -46,6 +46,26 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "monitor-http":
+		path := os.Getenv("VPNCTL_MONITOR_PATH")
+		if path != "/network/quality" && path != "/metrics" {
+			err = fmt.Errorf("invalid monitor path")
+			break
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:19100"+path, nil)
+		resp, getErr := http.DefaultClient.Do(req)
+		if getErr != nil {
+			err = getErr
+			break
+		}
+		if resp.StatusCode != http.StatusOK {
+			err = fmt.Errorf("monitor status %d", resp.StatusCode)
+		} else {
+			_, err = io.Copy(os.Stdout, resp.Body)
+		}
+		resp.Body.Close()
 	case "plaintext-metrics":
 		resp, getErr := http.Get("http://10.77.0.1:8080/prom/metrics")
 		if getErr != nil {

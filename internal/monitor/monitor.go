@@ -7,10 +7,14 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"slices"
+	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"vpnctl/internal/metrics"
@@ -21,14 +25,18 @@ import (
 type Config struct {
 	Source   peersource.PeerSource
 	Store    *Store
-	Interval time.Duration // default 5s if <= 0
+	Interval time.Duration // default 5s if zero
 	Peers    []string      // VPN IP filter; empty = all
+	Quality  QualityConfig
 }
 
 // Snapshot is the result of a single probe cycle.
 type Snapshot struct {
-	Time  time.Time
-	Peers []PeerState
+	Time         time.Time
+	Peers        []PeerState
+	Stale        bool
+	ErrorReason  string
+	StorageError string
 }
 
 // PeerState holds the result of probing a single peer.
@@ -36,7 +44,7 @@ type PeerState struct {
 	Peer    peersource.Peer
 	RTTus   int64
 	Success bool
-	Quality LinkQuality
+	Quality PeerQuality
 }
 
 // Monitor runs a periodic probe loop over discovered VPN peers.
@@ -45,15 +53,31 @@ type Monitor struct {
 	cfg       Config
 	latest    Snapshot
 	listeners []chan Snapshot
+	windows   map[peerID]*qualityWindow
 }
 
-// New creates a new Monitor with the given config.
-// If cfg.Interval is <= 0, it defaults to 5 seconds.
-func New(cfg Config) *Monitor {
-	if cfg.Interval <= 0 {
+type peerID struct {
+	key, ip string
+	port    int
+}
+
+func identify(p peersource.Peer) peerID { return peerID{p.PublicKey, p.VPNIP, p.ProbePort} }
+
+// New validates the live quality contract. Zero config values select defaults.
+func New(cfg Config) (*Monitor, error) {
+	if cfg.Interval == 0 {
 		cfg.Interval = 5 * time.Second
 	}
-	return &Monitor{cfg: cfg}
+	if cfg.Interval < 0 {
+		return nil, fmt.Errorf("monitor interval must be positive")
+	}
+	var err error
+	cfg.Quality, err = cfg.Quality.normalized(cfg.Interval)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Peers = slices.Clone(cfg.Peers)
+	return &Monitor{cfg: cfg, windows: make(map[peerID]*qualityWindow)}, nil
 }
 
 // Subscribe returns a buffered channel (capacity 1) that receives a Snapshot
@@ -88,150 +112,214 @@ func (m *Monitor) Run(ctx context.Context) {
 // probeAll discovers peers, probes each one, stores results, and notifies listeners.
 func (m *Monitor) probeAll(ctx context.Context) {
 	peers, err := peersource.Discover(ctx, m.cfg.Source)
-	if err != nil {
+	if ctx.Err() != nil {
 		return
 	}
-
-	if len(m.cfg.Peers) > 0 {
-		peers = filterPeers(peers, m.cfg.Peers)
+	if err != nil {
+		m.recordCycle(time.Now().UTC(), nil, nil, "discovery_failed", "")
+		return
 	}
-
-	now := time.Now().UTC()
-	states := make([]PeerState, len(peers))
-
+	peers = filterPeers(peers, m.cfg.Peers)
+	seen := make(map[string]bool)
+	for _, p := range peers {
+		if seen[p.VPNIP] {
+			m.recordCycle(time.Now().UTC(), nil, nil, "discovery_conflict", "")
+			return
+		}
+		seen[p.VPNIP] = true
+	}
+	outcomes := make([]probeOutcome, len(peers))
 	var wg sync.WaitGroup
 	for i, peer := range peers {
 		wg.Add(1)
-		go func(idx int, p peersource.Peer) {
-			defer wg.Done()
-			rttUs, success := probePeer(ctx, p)
-			rttMs := float64(rttUs) / 1000.0
-			quality := ComputeQuality(rttMs, 0, success, DefaultThresholds)
-			if !success {
-				quality = QualityOffline
-			}
-			states[idx] = PeerState{
-				Peer:    p,
-				RTTus:   rttUs,
-				Success: success,
-				Quality: quality,
-			}
-			if m.cfg.Store != nil {
-				_ = m.cfg.Store.Insert(ProbeResult{
-					Timestamp: now,
-					PeerKey:   p.PublicKey,
-					PeerIP:    p.VPNIP,
-					RTTus:     rttUs,
-					Success:   success,
-				})
-			}
-			peerLabel := p.VPNIP
-			if peerLabel == "" {
-				peerLabel = p.PublicKey[:min(8, len(p.PublicKey))]
-			}
-			if success {
-				metrics.ProbeRTTSeconds.WithLabelValues(peerLabel).Set(float64(rttUs) / 1e6)
-				metrics.ProbeSuccess.WithLabelValues(peerLabel).Set(1)
-				metrics.ProbeTotal.WithLabelValues(peerLabel, "success").Inc()
-			} else {
-				metrics.ProbeSuccess.WithLabelValues(peerLabel).Set(0)
-				metrics.ProbeTotal.WithLabelValues(peerLabel, "failure").Inc()
-			}
-		}(i, peer)
+		go func(i int, peer peersource.Peer) { defer wg.Done(); outcomes[i] = probePeer(ctx, peer) }(i, peer)
 	}
 	wg.Wait()
-
-	// Compute link quality from recent store data.
-	if m.cfg.Store != nil {
-		summaries, err := m.cfg.Store.Summarize(1 * time.Minute)
-		if err == nil {
-			for _, s := range summaries {
-				rttMs := float64(s.AvgRTTus) / 1000.0
-				lossPct := s.LossPct
-				hasSuccess := s.Count > 0 && lossPct < 100
-				q := ComputeQuality(rttMs, lossPct, hasSuccess, DefaultThresholds)
-				metrics.LinkQualityLevel.WithLabelValues(s.PeerIP).Set(float64(q))
-				metrics.ProbeLossRatio.WithLabelValues(s.PeerIP).Set(lossPct / 100.0)
+	if ctx.Err() != nil {
+		return
+	} // Shutdown is not a network failure sample.
+	now := time.Now().UTC()
+	storageError := ""
+	for i, p := range peers {
+		result := outcomes[i]
+		if result.reason == "invalid_probe_target" {
+			continue
+		} // No network attempt was made.
+		if m.cfg.Store != nil {
+			if err := m.cfg.Store.InsertContext(ctx, ProbeResult{Timestamp: now, PeerKey: p.PublicKey, PeerIP: p.VPNIP, RTTus: result.rtt, Success: result.success}); err != nil {
+				if storageError == "" {
+					slog.Warn("monitor history write failed", "error", err)
+				}
+				storageError = "store_write_failed"
 			}
 		}
+		outcome := "failure"
+		if result.success {
+			outcome = "success"
+		}
+		metrics.ProbeTotal.WithLabelValues(p.VPNIP, outcome).Inc()
 	}
+	m.recordCycle(now, peers, outcomes, "", storageError)
+}
 
-	snap := Snapshot{
-		Time:  now,
-		Peers: states,
+// recordCycle owns the only quality calculation; persistence is not its source.
+func (m *Monitor) recordCycle(now time.Time, peers []peersource.Peer, outcomes []probeOutcome, discoveryError, storageError string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snap := Snapshot{Time: now, Peers: make([]PeerState, 0, len(peers)), StorageError: storageError}
+	if discoveryError != "" {
+		snap.Peers = cloneSnapshot(m.latest).Peers
+		snap.ErrorReason, snap.Stale = discoveryError, true
+		for i := range snap.Peers {
+			snap.Peers[i].Quality.setLevel(QualityUnknown)
+			snap.Peers[i].Quality.Stale = true
+			snap.Peers[i].Quality.ErrorReason = discoveryError
+		}
+		for _, w := range m.windows {
+			w.level, w.recovery = QualityUnknown, 0
+		}
+	} else {
+		if len(peers) == 0 {
+			snap.ErrorReason = "no_peers"
+		}
+		active := make(map[peerID]*qualityWindow, len(peers))
+		for i, p := range peers {
+			id := identify(p)
+			w := m.windows[id]
+			if w == nil {
+				w = &qualityWindow{level: QualityUnknown}
+			}
+			q := w.observe(now, outcomes[i], m.cfg.Quality)
+			q.PeerIP = p.VPNIP
+			snap.Peers = append(snap.Peers, PeerState{Peer: p, RTTus: outcomes[i].rtt, Success: outcomes[i].success, Quality: q})
+			active[id] = w
+		}
+		m.windows = active // Removed or reassigned identities never inherit old quality.
 	}
-	m.publish(snap)
+	m.publishLocked(snap)
 }
 
 func (m *Monitor) publish(snap Snapshot) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.publishLocked(snap)
+}
+
+func (m *Monitor) publishLocked(snap Snapshot) {
 	m.latest = cloneSnapshot(snap)
 
 	for _, ch := range m.listeners {
 		select {
 		case ch <- cloneSnapshot(snap):
 		default:
+			// Replace an unread older publication with the newest state.
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- cloneSnapshot(snap):
+			default:
+			}
 		}
 	}
 }
 
-// probePeer sends a vpnctl-echo UDP probe to the peer's VPNIP:ProbePort and
-// returns the round-trip time in microseconds and whether the probe succeeded.
-// It uses a 2-second per-probe timeout. The parent context can cancel early.
-// On any error, it returns (0, false).
-func probePeer(ctx context.Context, peer peersource.Peer) (rttUs int64, success bool) {
-	addr := fmt.Sprintf("%s:%d", peer.VPNIP, peer.ProbePort)
+type probeOutcome struct {
+	rtt     int64
+	success bool
+	reason  string
+}
 
-	// Create a per-probe context with a 2-second timeout, derived from the
-	// parent so it also cancels when the parent does.
+// probePeer validates an exact UDP echo within two seconds. Timeouts alone cannot
+// distinguish a failed tunnel from an unavailable remote responder.
+func probePeer(ctx context.Context, peer peersource.Peer) probeOutcome {
+	if net.ParseIP(peer.VPNIP) == nil || peer.ProbePort <= 0 || peer.ProbePort > 65535 {
+		return probeOutcome{reason: "invalid_probe_target"}
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-
-	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(probeCtx, "udp", addr)
+	failure := func(err error) probeOutcome {
+		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+			return probeOutcome{reason: "probe_timeout"}
+		}
+		return probeOutcome{reason: probeError(err)}
+	}
+	conn, err := (&net.Dialer{}).DialContext(probeCtx, "udp", net.JoinHostPort(peer.VPNIP, strconv.Itoa(peer.ProbePort)))
 	if err != nil {
-		return 0, false
+		return failure(err)
 	}
 	defer conn.Close()
-
-	// Close the connection when the probe context is done to unblock any reads.
-	go func() {
-		<-probeCtx.Done()
-		_ = conn.Close()
-	}()
-
-	msg := fmt.Sprintf("vpnctl-echo:monitor-%d", time.Now().UnixNano())
-	payload := []byte(msg)
-
+	stop := context.AfterFunc(probeCtx, func() { _ = conn.Close() })
+	defer stop()
 	dl, _ := probeCtx.Deadline()
 	if err := conn.SetDeadline(dl); err != nil {
-		return 0, false
+		return failure(err)
 	}
-
+	payload := []byte(fmt.Sprintf("vpnctl-echo:monitor-%d", time.Now().UnixNano()))
 	start := time.Now()
 	if _, err := conn.Write(payload); err != nil {
-		return 0, false
+		return failure(err)
 	}
-
 	buf := make([]byte, len(payload)+64)
 	n, err := conn.Read(buf)
 	if err != nil {
-		return 0, false
+		return failure(err)
 	}
-
-	if string(buf[:n]) != msg {
-		return 0, false
+	if string(buf[:n]) != string(payload) {
+		return probeOutcome{reason: "invalid_response"}
 	}
-
-	return time.Since(start).Microseconds(), true
+	return probeOutcome{rtt: time.Since(start).Microseconds(), success: true}
 }
 
-// Latest returns the most recent snapshot.
-func (m *Monitor) Latest() Snapshot {
+func probeError(err error) string {
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "responder_unavailable"
+	}
+	if errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) {
+		return "route_unreachable"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "probe_timeout"
+	}
+	return "probe_error"
+}
+
+// Latest applies freshness at read time, even if discovery or storage is stuck.
+func (m *Monitor) Latest() Snapshot { return m.latestAt(time.Time{}) }
+func (m *Monitor) latestAt(now time.Time) Snapshot {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return cloneSnapshot(m.latest)
+	snap := cloneSnapshot(m.latest)
+	// Read the clock after the snapshot: a concurrent newer publication must not
+	// be mistaken for a backwards clock step. Explicit test clocks are unchanged.
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	m.mu.RUnlock()
+	if snap.Time.IsZero() {
+		snap.Stale, snap.ErrorReason = true, "not_started"
+	} else if now.Before(snap.Time) {
+		snap.Stale, snap.ErrorReason = true, "clock_regressed"
+	} else if !now.Before(snap.Time.Add(m.cfg.Quality.StaleAfter)) {
+		snap.Stale = true
+		if snap.ErrorReason == "" || snap.ErrorReason == "no_peers" {
+			snap.ErrorReason = "stale"
+		}
+	}
+	for i := range snap.Peers {
+		q := &snap.Peers[i].Quality
+		if snap.Stale || q.ObservedAt == nil || !now.Before(q.ObservedAt.Add(m.cfg.Quality.StaleAfter)) {
+			q.Stale = true
+			q.setLevel(QualityUnknown)
+			if snap.ErrorReason == "clock_regressed" {
+				q.ErrorReason = "clock_regressed"
+			} else if q.ErrorReason == "" || q.ErrorReason == "insufficient_samples" || q.ErrorReason == "recovering" {
+				q.ErrorReason = "stale"
+			}
+		}
+	}
+	return snap
 }
 
 // filterPeers returns only those peers whose VPNIP is in the ips set.
@@ -253,4 +341,10 @@ func filterPeers(peers []peersource.Peer, ips []string) []peersource.Peer {
 	return out
 }
 
-func cloneSnapshot(s Snapshot) Snapshot { s.Peers = slices.Clone(s.Peers); return s }
+func cloneSnapshot(s Snapshot) Snapshot {
+	s.Peers = slices.Clone(s.Peers)
+	for i := range s.Peers {
+		s.Peers[i].Quality = s.Peers[i].Quality.clone()
+	}
+	return s
+}

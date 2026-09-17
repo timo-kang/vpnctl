@@ -31,6 +31,9 @@ vpnctl doctor --interface wg0
 vpnctl discover --interface wg0
 ```
 
+[품질 API v1 계약과 설정](docs/validation/quality-api.md): 최근 구간의 RTT/손실,
+표본 수, stale/unknown을 API·화면·Prometheus에서 동일하게 제공합니다.
+
 ### Fleet overview
 
 ```bash
@@ -59,6 +62,10 @@ vpnctl down --config configs/node.yaml
 vpnctl status --config configs/node.yaml
 vpnctl doctor --config configs/node.yaml
 ```
+
+별도 서버까지 VPN relay로 중계하려면 배포 환경의 forwarding·방화벽·반환 경로/NAT
+설정이 필요합니다. [Relay 배포 계약](docs/deployment/relay-network.md)과
+[재사용 가능한 sandbox 실행 계약](tests/integration/README.md)을 참고하세요.
 
 ## Architecture
 
