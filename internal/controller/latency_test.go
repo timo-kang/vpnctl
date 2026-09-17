@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
+	"vpnctl/internal/pki"
 	"vpnctl/internal/store"
 	"vpnctl/internal/wireguard"
 )
@@ -32,7 +34,7 @@ func (r *slowApplyRunner) Run(name string, _ ...string) error {
 // A single admitted writer must not consume the 1s fleet SLO for 32 unrelated
 // authenticated readers. Until durable commit they must see the previous state.
 func TestFleetReadsDuringSlowMutation(t *testing.T) {
-	for _, fault := range []string{"wg", "disk"} {
+	for _, fault := range []string{"wg", "disk", "disk_rejected_ca"} {
 		t.Run(fault, func(t *testing.T) {
 			s, err := NewServer(config.ControllerConfig{DataDir: t.TempDir(), VPNCIDR: "10.7.0.0/24", WGAddress: "10.7.0.1/24", WGInterface: "test-wg", WGPrivateKey: "test-private", Listen: "127.0.0.1:0", PKI: &config.PKIConfig{}})
 			if err != nil {
@@ -49,6 +51,11 @@ func TestFleetReadsDuringSlowMutation(t *testing.T) {
 				c, _, _ := enrollTestClient(t, h, bootstrap, tlsCfg, token, fmt.Sprintf("node-%d", i))
 				clients = append(clients, c)
 				defer c.CloseIdleConnections()
+			}
+			if fault == "disk_rejected_ca" {
+				if err := s.authority.Rotate("prepare", nil); err != nil {
+					t.Fatal(err)
+				}
 			}
 			entered, release := make(chan struct{}), make(chan struct{})
 			var once sync.Once
@@ -73,6 +80,30 @@ func TestFleetReadsDuringSlowMutation(t *testing.T) {
 			case <-entered:
 			case <-time.After(2 * time.Second):
 				t.Fatal("fault not reached")
+			}
+			var rejected <-chan error
+			rejectedPromptly := true
+			if fault == "disk_rejected_ca" {
+				done := make(chan error, 1)
+				rejected = done
+				go func() {
+					for i := 0; i < 20; i++ {
+						if _, err := s.adminPKI(api.AdminRequest{Operation: "ca.prepare"}); !errors.Is(err, pki.ErrTransitionBlocked) {
+							done <- fmt.Errorf("invalid prepare: %w", err)
+							return
+						}
+					}
+					done <- nil
+				}()
+				select {
+				case err := <-rejected:
+					if err != nil {
+						t.Error(err)
+					}
+					rejected = nil
+				case <-time.After(250 * time.Millisecond):
+					rejectedPromptly = false
+				}
 			}
 			results := make(chan error, len(clients))
 			for _, c := range clients {
@@ -99,6 +130,14 @@ func TestFleetReadsDuringSlowMutation(t *testing.T) {
 			unblock()
 			if err := <-written; err != nil {
 				t.Fatal(err)
+			}
+			if rejected != nil {
+				if err := <-rejected; err != nil {
+					t.Error(err)
+				}
+			}
+			if !rejectedPromptly {
+				t.Error("rejected CA command waited for an admitted mutation")
 			}
 			t.Logf("%s fault: 32 readers, %d exceeded deadline or saw pending state", fault, failed)
 			if failed != 0 {
@@ -271,5 +310,60 @@ func TestReadOnlyPKIStatusDoesNotWaitForAdmittedReaders(t *testing.T) {
 		s.stateMu.RUnlock()
 		<-done
 		t.Fatal("read-only status took global write admission")
+	}
+}
+
+func TestActualCATransitionStillDrainsAndRechecksNodes(t *testing.T) {
+	for _, op := range []string{"prepare", "activate"} {
+		t.Run(op, func(t *testing.T) {
+			s, err := NewServer(config.ControllerConfig{DataDir: t.TempDir(), VPNCIDR: "10.7.0.0/24", Listen: "127.0.0.1:0", PKI: &config.PKIConfig{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.InitPKI(); err != nil {
+				t.Fatal(err)
+			}
+			if op == "activate" {
+				if err := s.authority.Rotate("prepare", nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.stateMu.RLock()
+			var once sync.Once
+			release := func() { once.Do(s.stateMu.RUnlock) }
+			defer release()
+			done := make(chan error, 1)
+			go func() { _, err := s.adminPKI(api.AdminRequest{Operation: "ca." + op}); done <- err }()
+			waitPKI(t, time.Second, func() bool {
+				if s.stateMu.TryRLock() {
+					s.stateMu.RUnlock()
+					return false
+				}
+				return true
+			})
+			select {
+			case err := <-done:
+				t.Fatal("actual transition did not drain admitted request", err)
+			default:
+			}
+			if op == "activate" {
+				// A request admitted before the admin barrier confirms a new
+				// identity after preflight. Final validation must include it.
+				if _, err := s.registerNode(nodeRegistration{Name: "new-node", PubKey: "pub-new-node"}, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			release()
+			err = <-done
+			if op == "prepare" && err != nil {
+				t.Fatal(err)
+			}
+			if op == "activate" && !errors.Is(err, pki.ErrTransitionBlocked) {
+				t.Fatal("new unacknowledged node bypassed final gate", err)
+			}
+			if s.authority.Status().Phase != "prepared" {
+				t.Fatal("unexpected CA state")
+			}
+		})
 	}
 }

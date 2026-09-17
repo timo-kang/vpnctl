@@ -534,18 +534,57 @@ func (a *Authority) MaintainServer() (bool, error) {
 	return true, nil
 }
 
-func (a *Authority) Rotate(operation string, nodeIDs []string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	next := a.clone()
-	if next.Generation == ^uint64(0) {
+// CheckRotation rejects impossible transitions without asking the controller to
+// drain all admitted requests. This is advisory: Rotate repeats every check
+// under its write lock with the controller's freshly collected identity set.
+func (a *Authority) CheckRotation(operation string, nodeIDs []string) error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.checkRotation(operation, nodeIDs)
+}
+
+func (a *Authority) checkRotation(operation string, nodeIDs []string) error {
+	s := a.state
+	if s.Generation == ^uint64(0) {
 		return fmt.Errorf("%w: trust generation exhausted", ErrTransitionBlocked)
 	}
 	switch operation {
 	case "prepare":
-		if next.Phase != "stable" {
+		if s.Phase != "stable" {
 			return fmt.Errorf("%w: CA rotation already in progress", ErrTransitionBlocked)
 		}
+	case "activate":
+		if s.Phase != "prepared" {
+			return fmt.Errorf("%w: prepare CA rotation first", ErrTransitionBlocked)
+		}
+		return a.checkAcks(nodeIDs, false)
+	case "rollback":
+		if s.Phase != "prepared" && s.Phase != "overlap" {
+			return fmt.Errorf("%w: no reversible CA transition", ErrTransitionBlocked)
+		}
+	case "retire":
+		if s.Phase != "overlap" && s.Phase != "rollback" {
+			return fmt.Errorf("%w: no CA overlap to finish", ErrTransitionBlocked)
+		}
+		if time.Now().Before(s.OverlapUntil) {
+			return fmt.Errorf("%w: minimum CA overlap has not elapsed", ErrTransitionBlocked)
+		}
+		return a.checkAcks(nodeIDs, true)
+	default:
+		return fmt.Errorf("%w: unknown CA operation", ErrTransitionBlocked)
+	}
+	return nil
+}
+
+func (a *Authority) Rotate(operation string, nodeIDs []string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.checkRotation(operation, nodeIDs); err != nil {
+		return err
+	}
+	next := a.clone()
+	switch operation {
+	case "prepare":
 		ca, err := newCA(a.policy.CALifetime)
 		if err != nil {
 			return err
@@ -555,12 +594,6 @@ func (a *Authority) Rotate(operation string, nodeIDs []string) error {
 		next.CAs[next.Pending] = ca
 		next.Phase = "prepared"
 	case "activate":
-		if next.Phase != "prepared" {
-			return fmt.Errorf("%w: prepare CA rotation first", ErrTransitionBlocked)
-		}
-		if err := a.checkAcks(nodeIDs, false); err != nil {
-			return err
-		}
 		next.Previous, next.Active, next.Pending = next.Active, next.Pending, ""
 		next.Phase = "overlap"
 		next.OverlapUntil = time.Now().UTC().Add(a.policy.CAOverlap)
@@ -578,15 +611,6 @@ func (a *Authority) Rotate(operation string, nodeIDs []string) error {
 			return fmt.Errorf("%w: no reversible CA transition", ErrTransitionBlocked)
 		}
 	case "retire":
-		if next.Phase != "overlap" && next.Phase != "rollback" {
-			return fmt.Errorf("%w: no CA overlap to finish", ErrTransitionBlocked)
-		}
-		if time.Now().Before(next.OverlapUntil) {
-			return fmt.Errorf("%w: minimum CA overlap has not elapsed", ErrTransitionBlocked)
-		}
-		if err := a.checkAcks(nodeIDs, true); err != nil {
-			return err
-		}
 		delete(next.CAs, next.Previous)
 		next.Previous = ""
 		next.Phase = "stable"

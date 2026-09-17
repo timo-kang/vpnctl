@@ -15,6 +15,11 @@ import (
 
 func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 	var out api.AdminResponse
+	if strings.HasPrefix(req.Operation, "ca.") && s.authority != nil {
+		if err := s.authority.CheckRotation(strings.TrimPrefix(req.Operation, "ca."), s.caNodeIDs()); err != nil {
+			return out, err
+		}
+	}
 	if req.Operation == "pki.status" {
 		s.stateMu.RLock()
 		defer s.stateMu.RUnlock()
@@ -35,16 +40,9 @@ func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 		}
 		err = s.authority.Revoke(strings.ToLower(req.Fingerprint))
 	case "ca.prepare", "ca.activate", "ca.retire", "ca.rollback":
-		s.mu.Lock()
-		ids := make([]string, 0, len(s.reg.Nodes))
-		for _, node := range s.reg.Nodes {
-			if !node.EnrollmentPending {
-				ids = append(ids, node.ID)
-			}
-		}
-		s.mu.Unlock()
-		sort.Strings(ids)
-		err = s.authority.Rotate(strings.TrimPrefix(req.Operation, "ca."), ids)
+		// Admission remains exclusive for actual transitions. Recollect nodes
+		// and revalidate after draining: preflight never authorizes a mutation.
+		err = s.authority.Rotate(strings.TrimPrefix(req.Operation, "ca."), s.caNodeIDs())
 	case "pki.backup":
 		out.Backup, err = s.backupLocked()
 	default:
@@ -67,4 +65,17 @@ func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 	out.PKI = &status
 	s.updatePKIMetrics()
 	return out, nil
+}
+
+func (s *Server) caNodeIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.reg.Nodes))
+	for _, node := range s.reg.Nodes {
+		if !node.EnrollmentPending {
+			ids = append(ids, node.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
