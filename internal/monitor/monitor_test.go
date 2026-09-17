@@ -6,6 +6,7 @@ package monitor
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,5 +143,41 @@ func TestFilterPeers(t *testing.T) {
 	}
 	if got[0].VPNIP != "10.0.0.1" || got[1].VPNIP != "10.0.0.3" {
 		t.Errorf("filtered peers don't match expected IPs")
+	}
+}
+
+func TestSnapshotPublicationIsConcurrentAndIsolated(t *testing.T) {
+	m := New(Config{})
+	a, b := m.Subscribe(), m.Subscribe()
+	snap := Snapshot{Time: time.Now(), Peers: []PeerState{{Peer: peersource.Peer{Name: "original"}}}}
+	m.publish(snap)
+	snap.Peers[0].Peer.Name = "producer-mutated"
+	gotA, gotB := <-a, <-b
+	gotA.Peers[0].Peer.Name = "consumer-mutated"
+	if gotB.Peers[0].Peer.Name != "original" || m.Latest().Peers[0].Peer.Name != "original" {
+		t.Fatal("snapshot aliases another owner")
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := 0; n < 100; n++ {
+				snapshot := m.Latest()
+				if len(snapshot.Peers) > 0 {
+					snapshot.Peers[0].Peer.Name = "reader"
+				}
+				if n%20 == 0 {
+					m.Subscribe()
+				}
+			}
+		}()
+	}
+	for i := 0; i < 100; i++ {
+		m.publish(Snapshot{Time: time.Now(), Peers: []PeerState{{Peer: peersource.Peer{Name: "published"}}}})
+	}
+	wg.Wait()
+	if m.Latest().Peers[0].Peer.Name != "published" {
+		t.Fatal("reader mutated published state")
 	}
 }

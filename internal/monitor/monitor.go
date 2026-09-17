@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ type PeerState struct {
 
 // Monitor runs a periodic probe loop over discovered VPN peers.
 type Monitor struct {
+	mu        sync.RWMutex
 	cfg       Config
 	latest    Snapshot
 	listeners []chan Snapshot
@@ -57,7 +59,9 @@ func New(cfg Config) *Monitor {
 // Subscribe returns a buffered channel (capacity 1) that receives a Snapshot
 // after each probe cycle completes. Callers should read from the channel
 // promptly; slow consumers will miss snapshots (non-blocking send).
-func (m *Monitor) Subscribe() chan Snapshot {
+func (m *Monitor) Subscribe() <-chan Snapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	ch := make(chan Snapshot, 1)
 	m.listeners = append(m.listeners, ch)
 	return ch
@@ -123,7 +127,7 @@ func (m *Monitor) probeAll(ctx context.Context) {
 			}
 			peerLabel := p.VPNIP
 			if peerLabel == "" {
-				peerLabel = p.PublicKey[:8]
+				peerLabel = p.PublicKey[:min(8, len(p.PublicKey))]
 			}
 			if success {
 				metrics.ProbeRTTSeconds.WithLabelValues(peerLabel).Set(float64(rttUs) / 1e6)
@@ -156,11 +160,17 @@ func (m *Monitor) probeAll(ctx context.Context) {
 		Time:  now,
 		Peers: states,
 	}
-	m.latest = snap
+	m.publish(snap)
+}
+
+func (m *Monitor) publish(snap Snapshot) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.latest = cloneSnapshot(snap)
 
 	for _, ch := range m.listeners {
 		select {
-		case ch <- snap:
+		case ch <- cloneSnapshot(snap):
 		default:
 		}
 	}
@@ -219,7 +229,9 @@ func probePeer(ctx context.Context, peer peersource.Peer) (rttUs int64, success 
 
 // Latest returns the most recent snapshot.
 func (m *Monitor) Latest() Snapshot {
-	return m.latest
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return cloneSnapshot(m.latest)
 }
 
 // filterPeers returns only those peers whose VPNIP is in the ips set.
@@ -240,3 +252,5 @@ func filterPeers(peers []peersource.Peer, ips []string) []peersource.Peer {
 	}
 	return out
 }
+
+func cloneSnapshot(s Snapshot) Snapshot { s.Peers = slices.Clone(s.Peers); return s }

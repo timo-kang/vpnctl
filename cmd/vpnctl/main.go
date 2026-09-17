@@ -612,6 +612,9 @@ func nodeServe(args []string) {
 	ctx, cancel := signalContext()
 	defer cancel()
 
+	var credentials credentialSupervisor
+	defer credentials.stop()
+
 	delay := *retryDelay
 	if delay <= 0 {
 		delay = 2 * time.Second
@@ -640,6 +643,7 @@ func nodeServe(args []string) {
 			fatal(err)
 		}
 
+		credentials.configure(*cfg.Node)
 		tunnelRestored := false
 		// A provisioned node may reach its controller only through WireGuard.
 		// Restore the cached relay path before making any controller request.
@@ -647,10 +651,12 @@ func nodeServe(args []string) {
 		if _, err := wireguard.RenderNode(*cfg.Node); err == nil {
 			if err := upOnce(ctx, *configPath, &cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "restore cached tunnel failed: %v\n", err)
+				credentials.start(ctx)
 				goto retry
 			}
 			tunnelRestored = true
 		}
+		credentials.start(ctx)
 		if err := syncConfigOnce(ctx, *configPath, &cfg); err != nil {
 			// A request deadline is a retryable network failure. Only cancellation
 			// of the owning process context should stop the supervisor.
@@ -667,7 +673,7 @@ func nodeServe(args []string) {
 			}
 		}
 
-		if err := agent.Run(ctx, *cfg.Node); err != nil {
+		if err := agent.RunSession(ctx, *cfg.Node); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
@@ -709,6 +715,7 @@ func syncConfigOnce(ctx context.Context, configPath string, cfg *config.Config) 
 	}
 
 	client := newAPIClient(cfg.Node)
+	defer client.CloseIdleConnections()
 
 	updated := false
 	if cfg.Node.WGPublicKey != "" {

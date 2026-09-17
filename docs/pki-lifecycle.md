@@ -12,7 +12,8 @@ M3의 별도 네트워크 검증 대상이다.
 | controller `pki/authority.json` | CA/server 키·인증서, 발급 metadata, 폐기, CA 전환, trust acknowledgement, 재시도용 갱신 응답. `0600` |
 | controller `pki/authority.initialized` | 권한 저장소가 사라진 경우 새 CA로 초기화하지 않도록 하는 표식. `0600` |
 | controller `pki/bootstrap-tokens.json` | 기존 TTL·single-use·승인 이력. `0600` |
-| controller `registry.yaml` | 노드·VPN lease·영구 삭제 identity. `0600` |
+| controller `registry.yaml` | version 1 노드·VPN lease·영구 삭제 identity·미완료 가입 상태. `0600` |
+| controller `registry.initialized` | 기존 registry 유실을 새 설치로 처리하지 않도록 하는 표식. `0600` |
 | node `pki_dir/credentials.json` | CA bundle, 현재 client cert/key, trust generation, 미완료 갱신의 CSR/key. `0600` |
 | node `pki_dir/credentials.initialized` | 현재 JSON 유실 시 이전 PEM 자격증명으로 돌아가지 않도록 하는 표식. `0600` |
 | node `pki_dir/credentials.lock` | 여러 node/CLI 프로세스의 자격증명 갱신 충돌 방지. `0600` |
@@ -23,6 +24,19 @@ M3의 별도 네트워크 검증 대상이다.
 파일과 부모 디렉터리에 fsync를 수행하며 rename 이후 fsync 실패는 결과가
 불확실한 오류로 보고한다. 이미 교체된 authority는 다시 읽어 메모리의 폐기
 상태가 이전 값으로 되돌아가지 않게 한다.
+
+registry, bootstrap token, node config도 같은 원자 저장기를 사용한다. 성공은 임시
+파일 fsync → rename → 부모 디렉터리 fsync를 모두 마친 상태다. 새 디렉터리와
+상위 경로도 동기화한다. rename 이후 오류라면 새 registry와 WG·메모리 상태를
+유지하면서 오류를 반환한다. 다음 변경/동일 삭제 재시도는 먼저 내구성을 다시
+확인한다. token 소비의 내구성을 확인하지 못하면 인증서 발급을 실행하지 않는다.
+실제 전원 차단 시험을 수행했다는 의미는 아니며 저장장치의 fsync 보장을 전제로 한다.
+
+registry가 없고 초기화 표식·기존 PKI·기본 관측 이력이 없는 최초 설치에서만 빈
+registry를 생성한다. 정상 legacy registry는 내용을 검증한 뒤 version 1과 표식으로
+이전한다. 기존 registry가 없어졌거나 빈 파일/null/잘못된 구조이면 WG 적용 전에
+시작을 거부한다. 표식을 지워 강제 초기화하지 말고 일관된 backup을 새 경로에
+복원한다. 구버전의 PKI만 있고 registry가 없는 상태도 자동 초기화하지 않는다.
 
 기존 controller의 `ca.crt`/`ca.key` 및 `server.crt`/`server.key`는 최초 migration에
 사용한다. 이후 실행 기준은 `authority.json`이다. 기존 PEM 파일을 수정해도
@@ -60,6 +74,32 @@ Overlap은 최소 1초이며 기본 24시간이다. 실제 배포에서는 예�
 조회하고 만료가 가까워지면 더 자주 확인한다. 갱신 실패 시 1·2·4초부터 최대
 1분까지 재시도 간격을 늘리되, 남은 수명이 짧으면 간격을 줄인다. 한 번 실행하고
 종료하는 CLI는 최신 자격증명을 읽으며 갱신 루프를 소유하지 않는다.
+
+`node serve`는 cached VPN 경로 복원 시도 뒤 한 개의 PKI worker를 시작한다.
+등록/WG 적용 오류, agent 재시작, backoff 중에도 갱신을 계속하며, identity·controller·
+pki_dir 변경 시 이전 worker를 종료하고 교체한다. 프로세스 종료는 worker의 취소와
+종료를 기다린다. 모든 실제 접근 경로가 인증서 수명보다 오래 끊긴 경우에는 여전히
+재가입이 필요하다.
+
+## 가입 실패와 미완료 가입
+
+single-use token은 가입 시도 전에 소비하며 실패해도 되돌리지 않는다. identity와
+IP를 검증한 뒤 인증서를 저장하고 registry를 게시한다. 발급 자체가 실패하면 신규
+노드/lease를 추가하지 않는다. 이후 registry 저장이 실패하면 반환되지 않은 인증서
+metadata가 남을 수 있으나 미등록 identity의 인증 API 접근은 거부된다.
+
+신규 발급 후 registry 상태는 `pending`이다. credential 저장 acknowledgement 또는
+인증된 WG 등록이 가입을 확정한다. acknowledgement만 마치면 `enrolled`, 실제 등록과
+최근 접촉이 확인되면 fleet API에서 `online`이며 60초가 지나면 `offline`이다.
+기존 정상 identity의 재가입 실패는 기존 lease·WG metadata·최근 접촉 상태를 바꾸지 않는다.
+
+응답이 유실된 미완료 가입은 lease를 예약한 채 재시작 후에도 `pending`으로 남는다.
+새 관리 token으로 같은 이름을 재가입하면 같은 주소로 복구한다. 더 이상 사용하지
+않을 가입은 `remove-node`로 정리하여 주소를 반환한다. 이 삭제는 identity를 영구
+차단하므로 그 이름으로 다시 등록하려는 경우에는 삭제 대신 재가입을 선택한다.
+자동 만료/주소 재할당은 하지 않는다. 저장 확인도 WG 등록도 없는 pending만 CA
+전환 대기 대상에서 제외한다. 인증서가 실제 설치된 기존 노드는 계속 CA gate에
+포함한다. pending인 동안 발급 CA가 퇴역했다면 새 token으로 다시 가입해야 한다.
 
 발급 인증서의 만료는 서명 CA의 만료를 넘지 않는다. CA 만료 때문에 수명을 더
 늘릴 수 없으면 반복적으로 새 키를 발급하지 않고 CA 교체가 필요함을 노출한다.

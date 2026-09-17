@@ -4,15 +4,21 @@
 package store
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"vpnctl/internal/atomicfile"
 )
 
 // Registry persists registered nodes and their metadata.
 type Registry struct {
+	Version      int                  `yaml:"version"`
 	UpdatedAt    time.Time            `yaml:"updated_at"`
 	Nodes        []NodeInfo           `yaml:"nodes"`
 	RemovedNodes map[string]time.Time `yaml:"removed_nodes,omitempty"`
@@ -20,33 +26,55 @@ type Registry struct {
 
 // NodeInfo is a minimal snapshot for controller persistence.
 type NodeInfo struct {
-	ID         string    `yaml:"id"`
-	Name       string    `yaml:"name"`
-	PubKey     string    `yaml:"pub_key"`
-	VPNIP      string    `yaml:"vpn_ip"`
-	Endpoint   string    `yaml:"endpoint"`
-	ProbePort  int       `yaml:"probe_port"`
-	LastSeenAt time.Time `yaml:"last_seen_at"`
-	Status     string    `yaml:"status"`
-	NATType    string    `yaml:"nat_type"`
-	PublicAddr string    `yaml:"public_addr"`
+	EnrollmentPending bool      `yaml:"enrollment_pending,omitempty"`
+	ID                string    `yaml:"id"`
+	Name              string    `yaml:"name"`
+	PubKey            string    `yaml:"pub_key"`
+	VPNIP             string    `yaml:"vpn_ip"`
+	Endpoint          string    `yaml:"endpoint"`
+	ProbePort         int       `yaml:"probe_port"`
+	LastSeenAt        time.Time `yaml:"last_seen_at"`
+	Status            string    `yaml:"status"`
+	NATType           string    `yaml:"nat_type"`
+	PublicAddr        string    `yaml:"public_addr"`
 }
 
-// LoadRegistry loads the registry from disk. If the file is missing, returns an empty registry.
+// LoadRegistry never substitutes an empty registry for missing or malformed state.
+// First-time creation is owned by controller initialization, not by the reader.
 func LoadRegistry(path string) (*Registry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &Registry{}, nil
+		return nil, err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("invalid registry: expected a mapping with nodes")
+	}
+	hasNodes := false
+	for n := 0; n < len(doc.Content[0].Content); n += 2 {
+		if doc.Content[0].Content[n].Value == "nodes" {
+			hasNodes = true
 		}
-		return nil, err
 	}
-
+	if !hasNodes {
+		return nil, fmt.Errorf("invalid registry: nodes field missing")
+	}
 	var reg Registry
-	if err := yaml.Unmarshal(data, &reg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&reg); err != nil {
 		return nil, err
 	}
-
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("invalid registry: expected a single document")
+	}
+	if reg.Version < 0 || reg.Version > 1 {
+		return nil, fmt.Errorf("unsupported registry version %d", reg.Version)
+	}
 	return &reg, nil
 }
 
@@ -55,50 +83,19 @@ func SaveRegistry(path string, reg *Registry) error {
 	if reg == nil {
 		return nil
 	}
+	reg.Version = 1
 	reg.UpdatedAt = time.Now().UTC()
 	data, err := yaml.Marshal(reg)
 	if err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := atomicfile.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 
 	// Registry contains public keys and network metadata; keep it owner-readable by default.
-	return atomicWriteFile(path, data, 0o600)
-}
-
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	tmp, err := os.CreateTemp(dir, base+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		_ = os.Remove(tmpName)
-	}()
-
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-
-	return os.Rename(tmpName, path)
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // RemoveNode removes a node by name and persists the replacement registry.

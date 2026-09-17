@@ -10,20 +10,10 @@ import (
 	"testing"
 )
 
-func TestLoadRegistry_MissingFile_ReturnsEmpty(t *testing.T) {
-	t.Parallel()
-
-	tmp := t.TempDir()
-	path := filepath.Join(tmp, "registry.yaml")
-	reg, err := LoadRegistry(path)
-	if err != nil {
-		t.Fatalf("LoadRegistry: %v", err)
-	}
-	if reg == nil {
-		t.Fatalf("registry is nil")
-	}
-	if len(reg.Nodes) != 0 {
-		t.Fatalf("nodes=%d", len(reg.Nodes))
+func TestLoadRegistryMissingFileFailsClosed(t *testing.T) {
+	_, err := LoadRegistry(filepath.Join(t.TempDir(), "registry.yaml"))
+	if !os.IsNotExist(err) {
+		t.Fatalf("missing registry: %v", err)
 	}
 }
 

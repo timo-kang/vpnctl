@@ -117,7 +117,47 @@ func (s *Server) handlePKIAck(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 409, "trust acknowledgement failed; refresh and retry")
 		return
 	}
+	// Acknowledgement proves the issued credential reached durable node storage.
+	// Include this identity in future CA gates even before its first WG register.
+	if err := s.confirmEnrollment(identity.id); err != nil {
+		writeJSONError(w, 503, "enrollment confirmation unavailable; retry")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) confirmEnrollment(id string) error {
+	// Most acknowledgements belong to active identities. Keep those reads isolated
+	// from slow WG/registry writers, just like fleet/status.
+	s.mu.Lock()
+	needsCommit := s.registryUncertain
+	for _, node := range s.reg.Nodes {
+		if node.ID == id && node.EnrollmentPending {
+			needsCommit = true
+			break
+		}
+	}
+	s.mu.Unlock()
+	if !needsCommit {
+		return nil
+	}
+
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureRegistryDurableLocked(); err != nil {
+		return err
+	}
+	for i, node := range s.reg.Nodes {
+		if node.ID == id && node.EnrollmentPending {
+			next := cloneRegistry(s.reg)
+			next.Nodes[i].EnrollmentPending = false
+			next.Nodes[i].Status = "enrolled"
+			return s.commitRegistryLocked(next, false)
+		}
+	}
+	return nil
 }
 
 func (s *Server) logPKIResult(operation, target string, err error) {

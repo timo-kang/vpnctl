@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -45,6 +46,14 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "plaintext-metrics":
+		resp, getErr := http.Get("http://10.77.0.1:8080/prom/metrics")
+		if getErr != nil {
+			err = getErr
+			break
+		}
+		_, err = io.Copy(os.Stdout, resp.Body)
+		resp.Body.Close()
 	case "echo":
 		err = serveEcho()
 	case "telemetry":

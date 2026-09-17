@@ -38,7 +38,9 @@ func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 		s.mu.Lock()
 		ids := make([]string, 0, len(s.reg.Nodes))
 		for _, node := range s.reg.Nodes {
-			ids = append(ids, node.ID)
+			if !node.EnrollmentPending {
+				ids = append(ids, node.ID)
+			}
 		}
 		s.mu.Unlock()
 		sort.Strings(ids)

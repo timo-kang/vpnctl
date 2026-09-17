@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"vpnctl/internal/atomicfile"
 )
 
 // Credentials is a single atomic unit: trust and key/cert cannot be torn apart
@@ -108,7 +110,7 @@ func SaveCredentials(dir string, next Credentials, expected string) error {
 	if _, err := next.TLSConfig(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := atomicfile.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	fd, err := syscall.Open(filepath.Join(dir, "credentials.lock"), syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0600)

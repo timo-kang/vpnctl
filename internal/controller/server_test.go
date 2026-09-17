@@ -681,7 +681,7 @@ func TestMTLSIdentityBindingOverTLS(t *testing.T) {
 	}
 
 	s, err := NewServer(config.ControllerConfig{
-		DataDir: tmp,
+		DataDir: filepath.Join(tmp, "state"),
 		VPNCIDR: "10.7.0.0/24",
 		PKI:     &config.PKIConfig{},
 	})
