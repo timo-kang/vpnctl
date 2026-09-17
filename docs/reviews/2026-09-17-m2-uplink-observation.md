@@ -42,7 +42,11 @@ reuse. The implementation and its tests were reviewed together.
    Gateway state now distinguishes absent default routes from unavailable
    collection. Missing optional modem/resolver binaries do not emit repetitive
    command warnings; their unknown states remain in each snapshot.
-9. **Medium — combined storage can exceed previous capacity assumptions.**
+9. **High — actual WireGuard peer loss must not look like collection uncertainty.**
+   Removing the configured peer makes Linux return `ENOKEY`; classify it as
+   unavailable, and verify peer removal/restoration in all three kernel fault
+   cycles in addition to responder-only outages.
+10. **Medium — combined storage can exceed previous capacity assumptions.**
    Schema 2 shares the 1GiB database/WAL budgets, adds per-node/global snapshot and
    target-series quotas, and updates backup/restore/migration. Capacity failures
    do not publish status or acknowledge data. Retention removes both datasets in

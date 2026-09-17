@@ -187,6 +187,8 @@ func probeError(err error) Check {
 		return Unknown("probe_permission_denied")
 	case errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.ENODEV):
 		return Unknown("local_interface_unavailable")
+	case errors.Is(err, unix.ENOKEY):
+		return Down("wireguard_key_unavailable")
 	case errors.Is(err, syscall.ECONNREFUSED):
 		return Down("service_refused")
 	case errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH):

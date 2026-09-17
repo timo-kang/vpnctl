@@ -109,6 +109,10 @@ func TestNetns_UplinkDiagnosis(t *testing.T) {
 	netOutput(t, ns[1], "ip", "rule", "del", "priority", "100")
 	for cycle := 0; cycle < 3; cycle++ {
 		prefix := fmt.Sprintf("cycle-%d-", cycle)
+		netOutput(t, ns[1], "wg", "set", "wg0", "peer", pubA, "remove")
+		check(prefix+"wireguard-peer-removed", "relay_tunnel", "down")
+		netOutput(t, ns[1], "wg", "set", "wg0", "peer", pubA, "allowed-ips", "10.77.0.1/32,198.18.0.2/32", "endpoint", "192.0.2.1:51820")
+		check(prefix+"wireguard-peer-restored", "none", "up")
 		control.stop()
 		s = check(prefix+"controller-down", "none", "up")
 		if s.Links[0].Controller.State != "down" {

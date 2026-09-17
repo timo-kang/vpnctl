@@ -203,7 +203,7 @@ VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 ./scripts/test-netns.sh
 `TestNetns_UplinkDiagnosis` executes the shipped `node diagnose` CLI in disposable
 namespaces with a real WG relay and a separate target-only server. It tests two
 physical uplinks, fwmark-selected transport, controller-only failure, service
-stop, relay-responder failure, route removal, absent LTE, total uplink loss, and
+stop, actual WireGuard peer removal, relay-responder failure, route removal, absent LTE, total uplink loss, and
 three failure/recovery cycles. The 1/3/8/32-node PKI lifecycle suite enables the
 actual automatic collector on every node and reads persisted target availability
 through the shipped authenticated CLI while renewal/rotation/revocation and
