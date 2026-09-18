@@ -50,12 +50,15 @@ type Server struct {
 	// mutationMu serializes registry writers while mu only protects published state.
 	mutationMu sync.Mutex
 	// stateMu drains admitted requests before removal, including metric writes.
-	stateMu        sync.RWMutex
-	adminAdmission adminAdmission
-	pkiAdmission   pkiAdmission
-	reg            *store.Registry
-	ipam           *ipam
-	history        history.Storage
+	stateMu sync.RWMutex
+	// mutationAdmission drains slow/mutating handlers while committed reads continue.
+	mutationAdmission sync.RWMutex
+	adminAdmission    adminAdmission
+	pkiAdmission      writerAdmission
+	registryAdmission writerAdmission
+	reg               *store.Registry
+	ipam              *ipam
+	history           history.Storage
 	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
 	// when multiple nodes submit samples concurrently.
 	metricsMu         sync.Mutex
@@ -351,7 +354,19 @@ type authenticatedNode struct {
 // authorizeNode to bind the authenticated identity to the requested resource.
 func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.requestMayWritePKI(r) {
+		mayWritePKI := s.requestMayWritePKI(r)
+		mayWriteRegistry := r.Method == http.MethodPost && (r.URL.Path == "/register" || r.URL.Path == "/nat-probe")
+		if mayWritePKI || r.Method == http.MethodPost {
+			// Reject already invalid identities before they can queue behind writers.
+			// This preflight grants no authority; recheck after both admissions below.
+			if _, ok := s.authenticateClient(w, r, false); !ok {
+				return
+			}
+		}
+		if r.Method == http.MethodPost && !bufferAdmissionBody(w, r) {
+			return
+		}
+		if mayWritePKI {
 			release, err := s.pkiAdmission.acquire(r.Context())
 			if err != nil {
 				writeJSONError(w, http.StatusRequestTimeout, "PKI request canceled before admission")
@@ -359,64 +374,88 @@ func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 			}
 			defer release()
 		}
+		if mayWriteRegistry {
+			release, err := s.registryAdmission.admit(r.Context(), false, "registry_writer")
+			if err != nil {
+				writeJSONError(w, http.StatusRequestTimeout, "registry request canceled before admission")
+				return
+			}
+			defer release()
+		}
+		if mayWritePKI || requestNeedsMutationDrain(r) {
+			s.mutationAdmission.RLock()
+			defer s.mutationAdmission.RUnlock()
+		}
 		admissionStart := time.Now()
 		s.stateMu.RLock()
 		observeStage("api", "admission_wait", admissionStart)
 		defer s.stateMu.RUnlock()
-		if !s.mtlsEnabled() {
-			next(w, r)
+		if r.Context().Err() != nil {
+			writeJSONError(w, http.StatusRequestTimeout, "request canceled before execution")
 			return
 		}
-
-		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 {
-			writeJSONError(w, http.StatusUnauthorized, "verified client certificate required")
+		identity, ok := s.authenticateClient(w, r, true)
+		if !ok {
 			return
 		}
-
-		cert := r.TLS.VerifiedChains[0][0]
-		identity, legacy, err := pki.CertificateNodeIdentity(cert)
-		if err != nil {
-			slog.Warn("client certificate identity rejected",
-				"fingerprint_sha256", certificateFingerprint(cert),
-				"path", r.URL.Path,
-				"err", err)
-			writeJSONError(w, http.StatusUnauthorized, "client certificate has no valid node identity")
-			return
+		if identity.id != "" {
+			r = r.WithContext(context.WithValue(r.Context(), nodeIdentityContextKey{}, identity))
 		}
-		if !s.nodeRegistered(identity) {
-			writeJSONError(w, http.StatusForbidden, "authenticated node is not registered")
-			return
-		}
-		if s.authority != nil {
-			authStart := time.Now()
-			authErr := s.authority.Observe(cert, identity)
-			observeStage("api", "certificate_authorize", authStart)
-			if err := authErr; err != nil {
-				code := http.StatusServiceUnavailable
-				if errors.Is(err, pki.ErrCertificateDenied) {
-					code = http.StatusForbidden
-				}
-				slog.Warn("certificate authorization denied", "node_id", identity, "fingerprint", certificateFingerprint(cert), "err", err)
-				metrics.PKIEventsTotal.WithLabelValues("controller", "authorize", "denied").Inc()
-				writeJSONError(w, code, "certificate authorization failed")
-				return
-			}
-		}
-		if legacy {
-			fingerprint := certificateFingerprint(cert)
-			if _, loaded := s.legacyCertLogged.LoadOrStore(fingerprint, struct{}{}); !loaded {
-				slog.Warn("legacy Common Name client identity accepted; re-enroll node to receive a URI identity",
-					"node_id", identity,
-					"fingerprint_sha256", fingerprint)
-			}
-		}
-
-		ctx := context.WithValue(r.Context(), nodeIdentityContextKey{}, authenticatedNode{
-			id:          identity,
-			fingerprint: certificateFingerprint(cert),
-		})
-		next(w, r.WithContext(ctx))
+		next(w, r)
 	}
+}
+
+// authenticateClient may skip only legacy first-use persistence during preflight.
+// Current identity and known-certificate checks still run; execution admission
+// always calls it again with first-use observation enabled.
+func (s *Server) authenticateClient(w http.ResponseWriter, r *http.Request, observeFirstUse bool) (authenticatedNode, bool) {
+	if !s.mtlsEnabled() {
+		return authenticatedNode{}, true
+	}
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 {
+		writeJSONError(w, http.StatusUnauthorized, "verified client certificate required")
+		return authenticatedNode{}, false
+	}
+
+	cert := r.TLS.VerifiedChains[0][0]
+	identity, legacy, err := pki.CertificateNodeIdentity(cert)
+	if err != nil {
+		slog.Warn("client certificate identity rejected",
+			"fingerprint_sha256", certificateFingerprint(cert),
+			"path", r.URL.Path,
+			"err", err)
+		writeJSONError(w, http.StatusUnauthorized, "client certificate has no valid node identity")
+		return authenticatedNode{}, false
+	}
+	if !s.nodeRegistered(identity) {
+		writeJSONError(w, http.StatusForbidden, "authenticated node is not registered")
+		return authenticatedNode{}, false
+	}
+	if s.authority != nil && (observeFirstUse || s.authority.CertificateObserved(cert)) {
+		authStart := time.Now()
+		authErr := s.authority.Observe(cert, identity)
+		observeStage("api", "certificate_authorize", authStart)
+		if err := authErr; err != nil {
+			code := http.StatusServiceUnavailable
+			if errors.Is(err, pki.ErrCertificateDenied) {
+				code = http.StatusForbidden
+			}
+			slog.Warn("certificate authorization denied", "node_id", identity, "fingerprint", certificateFingerprint(cert), "err", err)
+			metrics.PKIEventsTotal.WithLabelValues("controller", "authorize", "denied").Inc()
+			writeJSONError(w, code, "certificate authorization failed")
+			return authenticatedNode{}, false
+		}
+	}
+	if legacy && observeFirstUse {
+		fingerprint := certificateFingerprint(cert)
+		if _, loaded := s.legacyCertLogged.LoadOrStore(fingerprint, struct{}{}); !loaded {
+			slog.Warn("legacy Common Name client identity accepted; re-enroll node to receive a URI identity",
+				"node_id", identity,
+				"fingerprint_sha256", fingerprint)
+		}
+	}
+
+	return authenticatedNode{id: identity, fingerprint: certificateFingerprint(cert)}, true
 }
 
 func (s *Server) mtlsEnabled() bool {
@@ -505,14 +544,29 @@ func certificateFingerprint(cert *x509.Certificate) string {
 
 // handleBootstrap handles POST /bootstrap for node enrollment via token + CSR.
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost && !bufferAdmissionBody(w, r) {
+		return
+	}
 	release, err := s.pkiAdmission.acquire(r.Context())
 	if err != nil {
 		writeJSONError(w, http.StatusRequestTimeout, "bootstrap canceled before admission")
 		return
 	}
 	defer release()
+	releaseRegistry, err := s.registryAdmission.admit(r.Context(), false, "registry_writer")
+	if err != nil {
+		writeJSONError(w, http.StatusRequestTimeout, "bootstrap canceled before registry admission")
+		return
+	}
+	defer releaseRegistry()
+	s.mutationAdmission.RLock()
+	defer s.mutationAdmission.RUnlock()
 	s.stateMu.RLock()
 	defer s.stateMu.RUnlock()
+	if r.Context().Err() != nil {
+		writeJSONError(w, http.StatusRequestTimeout, "bootstrap canceled before execution")
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
