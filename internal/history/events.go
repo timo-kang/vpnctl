@@ -57,7 +57,9 @@ type Event struct {
 	Message   string    `json:"message,omitempty"`
 }
 
+// Empty NodeID is the controller-only stream. Node ingestion must reject it.
 type EventHistory struct {
+	Scope         string    `json:"scope,omitempty"`
 	SchemaVersion int       `json:"schema_version"`
 	NodeID        string    `json:"node_id"`
 	Start         time.Time `json:"start"`
@@ -112,7 +114,7 @@ func boundedEventText(v string, required bool, max int) bool {
 }
 
 func validateEvent(node string, event Event, now time.Time) error {
-	if !validLabel(node, true) || !validLabel(event.ID, true) || !validLabel(event.Source, true) || !validLabel(event.Target, false) || !boundedEventText(event.Previous, false, 2048) || !boundedEventText(event.Current, false, 2048) || !validEventText(event.Message, false) {
+	if !validLabel(node, false) || !validLabel(event.ID, true) || !validLabel(event.Source, true) || !validLabel(event.Target, false) || !boundedEventText(event.Previous, false, 2048) || !boundedEventText(event.Current, false, 2048) || !validEventText(event.Message, false) {
 		return fmt.Errorf("%w: invalid event identity or text", ErrInvalid)
 	}
 	if !eventKinds[event.Kind] || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || (event.Validity != "observed" && event.Validity != "inferred" && event.Validity != "unknown") {
@@ -213,7 +215,10 @@ func insertEventTx(ctx context.Context, tx *sql.Tx, node string, event Event) (b
 func (s *Store) QueryEvents(ctx context.Context, node string, end time.Time, window time.Duration, limit int) (EventHistory, error) {
 	end = end.UTC().Truncate(time.Microsecond)
 	out := EventHistory{SchemaVersion: 1, NodeID: node, Start: end.Add(-window), End: end, Events: []Event{}}
-	if !validLabel(node, true) || window <= 0 || window > Retention || limit < 1 || limit > 1000 {
+	if node == "" {
+		out.Scope = "controller"
+	}
+	if !validLabel(node, false) || window <= 0 || window > Retention || limit < 1 || limit > 1000 {
 		return out, ErrInvalid
 	}
 	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)

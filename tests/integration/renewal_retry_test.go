@@ -7,6 +7,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"time"
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
+	"vpnctl/internal/history"
 	"vpnctl/internal/pki"
 	"vpnctl/internal/store"
 )
@@ -179,6 +181,43 @@ exec "$VPNCTL_REAL_WG" "$@"
 	if route := netOutput(t, ns[1], "ip", "route", "get", "10.77.0.1"); !strings.Contains(route, "dev wg0") {
 		t.Fatal("controller bypassed WG", route)
 	}
+	// Exercise the shipped producer, controller writer and CLI over the VPN.
+	eventually(t, 5*time.Second, "automatic certificate and registration timeline", func() error {
+		for _, scope := range []string{"controller", "node"} {
+			args := []string{bin, "fleet", "events", "--config", nodePath, "--json"}
+			if scope == "controller" {
+				args = append(args, "--controller")
+			} else {
+				args = append(args, "--node", "node")
+			}
+			work, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			raw, err := netCommand(work, ns[1], args...).CombinedOutput()
+			cancel()
+			if err != nil {
+				return fmt.Errorf("%s events: %w: %s", scope, err, raw)
+			}
+			var timeline history.EventHistory
+			if err := json.Unmarshal(raw, &timeline); err != nil {
+				return err
+			}
+			renewed, recovered := false, false
+			for _, event := range timeline.Events {
+				if scope == "controller" && event.Current == "renew:success" {
+					renewed = true
+				}
+				if scope == "node" && event.Kind == "certificate" && event.Target == "renew" && event.Current == "installed" {
+					renewed = true
+				}
+				if event.Target == "registration" && event.Previous == "down" && event.Current == "up" {
+					recovered = true
+				}
+			}
+			if !renewed || scope == "node" && !recovered {
+				return fmt.Errorf("%s timeline missing renewal or recovery", scope)
+			}
+		}
+		return nil
+	})
 	agent.terminate(t)
 	if out := netOutput(t, ns[1], "ss", "-H", "-lun", "sport", "=", ":51900"); strings.TrimSpace(out) != "" {
 		t.Fatal("probe socket survived agent shutdown")

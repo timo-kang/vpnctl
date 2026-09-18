@@ -14,6 +14,7 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
+	"vpnctl/internal/diagnostic"
 	"vpnctl/internal/direct"
 	"vpnctl/internal/stunutil"
 	"vpnctl/internal/wireguard"
@@ -21,6 +22,9 @@ import (
 
 // Run starts the long-running node agent loop.
 func Run(ctx context.Context, cfg config.NodeConfig) error {
+	var events EventSupervisor
+	ctx = events.Configure(ctx, cfg)
+	defer events.Stop()
 	var probes ProbeSupervisor
 	defer probes.Close()
 	if err := probes.Configure(cfg); err != nil {
@@ -44,6 +48,9 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 // RunSession runs one agent attempt. Its supervisor owns credential maintenance
 // across registration failures, tunnel restoration and retry backoff.
 func RunSession(ctx context.Context, cfg config.NodeConfig) error {
+	var events EventSupervisor
+	ctx = events.Configure(ctx, cfg)
+	defer events.Stop()
 	client := newClient(cfg)
 	defer client.CloseIdleConnections()
 	return runSession(ctx, cfg, client)
@@ -81,7 +88,8 @@ func runSessionWithProbe(ctx context.Context, cfg config.NodeConfig, client *api
 	updates := make(chan directSnapshot, 1)
 	start(func() {
 		periodic(workerCtx, cfg.KeepaliveIntervalSec, func() {
-			if _, _, err := register(workerCtx, client, cfg); err != nil && workerCtx.Err() == nil {
+			_, _, err := register(workerCtx, client, cfg)
+			if err != nil && workerCtx.Err() == nil {
 				slog.Warn("keepalive register failed", "err", err)
 			}
 		})
@@ -103,14 +111,17 @@ func runSessionWithProbe(ctx context.Context, cfg config.NodeConfig, client *api
 			start(func() {
 				periodic(workerCtx, cfg.STUNIntervalSec, func() {
 					addr, nat, err := probeShared(workerCtx, shared, cfg.STUNServers, 5*time.Second)
+					diagnostic.Discovery(workerCtx, "stun", err)
 					if err != nil {
 						if workerCtx.Err() == nil {
 							slog.Warn("STUN probe failed", "err", err)
 						}
 						return
 					}
+					observeNAT(workerCtx, addr, nat)
 					snapshots.update(updates, func(s *directSnapshot) { s.publicAddr = addr; s.natType = nat })
-					if err := client.SubmitNATProbe(workerCtx, api.NATProbeRequest{NodeID: nodeID, NATType: nat, PublicAddr: addr}); err != nil && workerCtx.Err() == nil {
+					err = client.SubmitNATProbe(workerCtx, api.NATProbeRequest{NodeID: nodeID, NATType: nat, PublicAddr: addr})
+					if err != nil && workerCtx.Err() == nil {
 						slog.Warn("NAT probe submit failed", "err", err)
 					}
 				})

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"vpnctl/internal/diagnostic"
 	"vpnctl/internal/history"
 )
 
@@ -58,8 +59,8 @@ func NewTLSClient(baseURL string, tlsConfig *tls.Config) *Client {
 }
 
 // Register registers a node and returns peer candidates.
-func (c *Client) Register(ctx context.Context, req RegisterRequest) (RegisterResponse, error) {
-	var resp RegisterResponse
+func (c *Client) Register(ctx context.Context, req RegisterRequest) (resp RegisterResponse, resultErr error) {
+	defer func() { diagnostic.Discovery(ctx, "registration", resultErr) }()
 	if err := c.postJSON(ctx, "/register", req, &resp); err != nil {
 		return resp, err
 	}
@@ -76,8 +77,8 @@ func (c *Client) Bootstrap(ctx context.Context, req BootstrapRequest) (Bootstrap
 }
 
 // Candidates fetches peer candidates for a node ID.
-func (c *Client) Candidates(ctx context.Context, nodeID string) (CandidatesResponse, error) {
-	var resp CandidatesResponse
+func (c *Client) Candidates(ctx context.Context, nodeID string) (resp CandidatesResponse, resultErr error) {
+	defer func() { diagnostic.Discovery(ctx, "candidates", resultErr) }()
 	endpoint := "/candidates?node_id=" + url.QueryEscape(nodeID)
 	if err := c.getJSON(ctx, endpoint, &resp); err != nil {
 		return resp, err
@@ -91,7 +92,8 @@ func (c *Client) SubmitMetrics(ctx context.Context, req MetricsRequest) error {
 }
 
 // SubmitNATProbe sends NAT probe results to the controller.
-func (c *Client) SubmitNATProbe(ctx context.Context, req NATProbeRequest) error {
+func (c *Client) SubmitNATProbe(ctx context.Context, req NATProbeRequest) (resultErr error) {
+	defer func() { diagnostic.Discovery(ctx, "nat-report", resultErr) }()
 	return c.postJSON(ctx, "/nat-probe", req, nil)
 }
 
@@ -101,8 +103,8 @@ func (c *Client) SubmitDirectResult(ctx context.Context, req DirectResultRequest
 }
 
 // WGConfig fetches controller-provided server peer settings.
-func (c *Client) WGConfig(ctx context.Context, nodeID string) (WGConfigResponse, error) {
-	var resp WGConfigResponse
+func (c *Client) WGConfig(ctx context.Context, nodeID string) (resp WGConfigResponse, resultErr error) {
+	defer func() { diagnostic.Discovery(ctx, "server-config", resultErr) }()
 	endpoint := "/wg-config?node_id=" + url.QueryEscape(nodeID)
 	if err := c.getJSON(ctx, endpoint, &resp); err != nil {
 		return resp, err
@@ -211,6 +213,10 @@ func (c *Client) SubmitEvent(ctx context.Context, req EventRequest) error {
 func (c *Client) FleetEvents(ctx context.Context, node, window string, limit int) (history.EventHistory, error) {
 	var out history.EventHistory
 	values := url.Values{"node_id": {node}, "window": {window}, "limit": {fmt.Sprint(limit)}}
+	if node == "" {
+		values.Del("node_id")
+		values.Set("scope", "controller")
+	}
 	err := c.getJSON(ctx, "/fleet/events?"+values.Encode(), &out)
 	if err == nil && out.SchemaVersion != 1 {
 		err = fmt.Errorf("unsupported event history schema %d", out.SchemaVersion)

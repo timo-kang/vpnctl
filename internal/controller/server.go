@@ -24,6 +24,7 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
+	"vpnctl/internal/diagnostic"
 	"vpnctl/internal/direct"
 	"vpnctl/internal/history"
 	"vpnctl/internal/metrics"
@@ -59,6 +60,7 @@ type Server struct {
 	reg               *store.Registry
 	ipam              *ipam
 	history           history.Storage
+	diagnostics       *diagnostic.Queue
 	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
 	// when multiple nodes submit samples concurrently.
 	metricsMu         sync.Mutex
@@ -138,6 +140,7 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 	return &Server{
 		cfg:          cfg,
 		history:      historyStore,
+		diagnostics:  diagnostic.New("controller", ""),
 		regPath:      regPath,
 		reg:          reg,
 		ipam:         allocator,
@@ -260,6 +263,8 @@ func (s *Server) ListenAndServeContext(ctx context.Context) error {
 		defer s.StopProbeResponder()
 		slog.Info("probe responder listening", "addr", addr)
 	}
+	stopEvents := s.startDiagnosticEvents()
+	defer stopEvents()
 	admin, err := s.startAdminService()
 	if err != nil {
 		return fmt.Errorf("admin IPC: %w", err)
@@ -618,7 +623,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		result, registrationErr = s.registerWithIssuance(nodeRegistration{Name: req.Name}, s.cfg.WGApply, func() error {
 			var issueErr error
 			signedCert, issuedState, issueErr = s.authority.Issue([]byte(req.CSR), req.Name)
-			s.logPKIResult("issue", req.Name, issueErr)
+			s.logPKIResult("issue", req.Name, issueErr, certificateEventDetail(signedCert, issuedState.Generation))
 			return issueErr
 		})
 		return registrationErr

@@ -179,3 +179,26 @@ func TestPingSubmitsIndividualObservationsAndReportsUploadFailure(t *testing.T) 
 		}
 	}
 }
+
+func TestControllerEventCLIContract(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/fleet/events" || r.URL.Query().Get("scope") != "controller" || r.URL.Query().Get("node_id") != "" {
+			t.Error(r.URL.String())
+		}
+		json.NewEncoder(w).Encode(history.EventHistory{SchemaVersion: 1, Scope: "controller", Events: []history.Event{{Kind: "certificate", Current: "renew:success"}}})
+	}))
+	defer srv.Close()
+	cfg := filepath.Join(t.TempDir(), "node.yaml")
+	if err := os.WriteFile(cfg, []byte(fmt.Sprintf("node:\n  name: node-a\n  controller: %q\n", srv.URL)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := cliProcess(t, "fleet", "events", "--config", cfg, "--controller", "--json").CombinedOutput()
+	if err != nil || !strings.Contains(string(out), `"scope":"controller"`) || !strings.Contains(string(out), "renew:success") {
+		t.Fatal(string(out), err)
+	}
+	for _, args := range [][]string{{"--config", cfg}, {"--config", cfg, "--controller", "--node", "node-a"}} {
+		if err := runFleetEvents(args); err == nil {
+			t.Fatal("ambiguous scope accepted", args)
+		}
+	}
+}

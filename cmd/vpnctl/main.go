@@ -76,7 +76,7 @@ Usage:
   vpnctl fleet status --config <path> | --interface <iface>
   vpnctl fleet history --config <path> | --interface <iface> [--window 1h]
   vpnctl fleet uplinks --config <path> --node <id> [--window 7d] [--json]
-  vpnctl fleet events --config <path> --node <id> [--window 24h] [--json]
+  vpnctl fleet events --config <path> (--node <id> | --controller) [--window 24h] [--json]
   vpnctl fleet alerts --config <path> --node <id> [--json]
 
 `
@@ -630,6 +630,8 @@ func nodeServe(args []string) {
 
 	var probes agent.ProbeSupervisor
 	defer probes.Close()
+	var events agent.EventSupervisor
+	defer events.Stop()
 	var credentials credentialSupervisor
 	defer credentials.stop()
 	var observations agent.UplinkSupervisor
@@ -673,19 +675,20 @@ func nodeServe(args []string) {
 		}
 		observations.Configure(ctx, *cfg.Node)
 		credentials.configure(*cfg.Node)
+		sessionCtx := events.Configure(ctx, *cfg.Node)
 		// A provisioned node may reach its controller only through WireGuard.
 		// Restore the cached relay path before making any controller request.
 		// Incomplete first-time configurations still enroll/sync before WG up.
 		if _, err := wireguard.RenderNode(*cfg.Node); err == nil {
 			if err := upOnce(ctx, *configPath, &cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "restore cached tunnel failed: %v\n", err)
-				credentials.start(ctx)
+				credentials.start(sessionCtx)
 				goto retry
 			}
 			tunnelRestored = true
 		}
-		credentials.start(ctx)
-		if err := syncConfigOnce(ctx, *configPath, &cfg); err != nil {
+		credentials.start(sessionCtx)
+		if err := syncConfigOnce(sessionCtx, *configPath, &cfg); err != nil {
 			// A request deadline is a retryable network failure. Only cancellation
 			// of the owning process context should stop the supervisor.
 			if ctx.Err() != nil {
@@ -701,7 +704,7 @@ func nodeServe(args []string) {
 			}
 		}
 
-		if err := probes.RunSession(ctx, *cfg.Node); err != nil {
+		if err := probes.RunSession(sessionCtx, *cfg.Node); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}

@@ -8,6 +8,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+var DiagnosticDeliveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "vpnctl_diagnostic_delivery_total",
+	Help: "Best-effort automatic event delivery by fixed role and result; counters reset at process restart",
+}, []string{"role", "result"})
+
 var (
 	NodesRegistered = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "vpnctl_nodes_registered",
@@ -72,6 +77,7 @@ var PKIAuthoritySeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Help:    "PKI writer wait/hold, persistence, TLS snapshot, authorization and status duration",
 	Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5, 10, 30},
 }, []string{"stage"})
+
 // Labels describe admission outcomes, never identities or request IDs.
 var AdminAdmissionTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "vpnctl_admin_admission_total",

@@ -13,6 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"vpnctl/internal/atomicfile"
+	"vpnctl/internal/diagnostic"
+	"vpnctl/internal/history"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/pki"
 )
@@ -74,11 +77,26 @@ func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
 
 // SyncCredentials persists trust before acknowledging it, renews before expiry
 // or after an issuer change, then acknowledges using the installed certificate.
-func (c *Client) SyncCredentials(ctx context.Context, dir, nodeID string) error {
+func (c *Client) SyncCredentials(ctx context.Context, dir, nodeID string) (resultErr error) {
+	stage := "load"
+	defer func() {
+		if ctx.Err() == context.Canceled {
+			return
+		}
+		state, severity, validity := "up", "info", "observed"
+		if resultErr != nil {
+			state, severity = "down", "warning"
+		}
+		if atomicfile.Replaced(resultErr) {
+			state, validity = "uncertain", "unknown"
+		}
+		diagnostic.Observe(ctx, "credentials-sync", history.Event{Kind: "certificate", Source: "node-pki", Target: "sync", Message: stage, Current: state, Severity: severity, Validity: validity})
+	}()
 	current, err := pki.LoadCredentials(dir)
 	if err != nil {
 		return err
 	}
+	stage = "trust_fetch"
 	trust, err := c.Trust(ctx)
 	if err != nil {
 		return err
@@ -110,6 +128,7 @@ func (c *Client) SyncCredentials(ctx context.Context, dir, nodeID string) error 
 	}
 	needsRenewal := !issuerIsActive || (canExtend && time.Until(cert.NotAfter) <= time.Duration(trust.RenewBeforeSeconds*float64(time.Second)))
 	if next.Digest() != current.Digest() {
+		stage = "trust_install"
 		if err := next.ValidateForInstall(nodeID); err != nil {
 			return err
 		}
@@ -117,8 +136,10 @@ func (c *Client) SyncCredentials(ctx context.Context, dir, nodeID string) error 
 			return err
 		}
 		current = next
+		diagnostic.Emit(ctx, history.Event{Kind: "certificate", Source: "node-pki", Target: "trust", Message: fmt.Sprintf("generation=%d", current.Generation), Current: "installed", Severity: "info", Validity: "observed"})
 	}
 	if needsRenewal {
+		stage = "renew_stage"
 		if current.Pending == nil || current.Pending.Parent != pki.Fingerprint(cert) {
 			csr, key, err := pki.GenerateCSR(nodeID)
 			if err != nil {
@@ -131,6 +152,7 @@ func (c *Client) SyncCredentials(ctx context.Context, dir, nodeID string) error 
 			}
 			current = staged
 		}
+		stage = "renew_request"
 		renewed, err := c.Renew(ctx, current.Pending.CSR)
 		if err != nil {
 			return err
@@ -138,6 +160,7 @@ func (c *Client) SyncCredentials(ctx context.Context, dir, nodeID string) error 
 		if renewed.Generation < current.Generation {
 			return fmt.Errorf("stale renewal response")
 		}
+		stage = "renew_install"
 		next = pki.Credentials{Version: 1, Generation: renewed.Generation, CACert: renewed.CACert, ClientCert: renewed.ClientCert, ClientKey: current.Pending.Key}
 		if err := next.ValidateForInstall(nodeID); err != nil {
 			return err
@@ -146,6 +169,7 @@ func (c *Client) SyncCredentials(ctx context.Context, dir, nodeID string) error 
 			return err
 		}
 		current = next
+		diagnostic.Emit(ctx, history.Event{Kind: "certificate", Source: "node-pki", Target: "renew", Message: fmt.Sprintf("generation=%d", current.Generation), Current: "installed", Severity: "info", Validity: "observed"})
 		metrics.PKIEventsTotal.WithLabelValues("node", "renew", "success").Inc()
 		slog.Info("client certificate renewed", "node_id", nodeID, "generation", current.Generation)
 	}
@@ -154,6 +178,7 @@ func (c *Client) SyncCredentials(ctx context.Context, dir, nodeID string) error 
 		return err
 	}
 	metrics.PKIExpirySeconds.WithLabelValues("client").Set(time.Until(cert.NotAfter).Seconds())
+	stage = "trust_ack"
 	return c.AcknowledgeTrust(ctx, current.Generation)
 }
 

@@ -119,15 +119,16 @@ func runFleetUplinks(args []string) error {
 func runFleetEvents(args []string) error {
 	fs := flag.NewFlagSet("fleet events", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "node client YAML")
-	node := fs.String("node", "", "node identity (required)")
+	node := fs.String("node", "", "node identity (or --controller)")
+	controller := fs.Bool("controller", false, "controller PKI event stream")
 	window := fs.String("window", "24h", "event window, at most 7d")
 	limit := fs.Int("limit", 500, "recent events, 1..1000")
 	asJSON := fs.Bool("json", false, "full event history as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *cfgPath == "" || *node == "" {
-		return fmt.Errorf("--config and --node required")
+	if *cfgPath == "" || (*node != "") == *controller {
+		return fmt.Errorf("--config and exactly one of --node or --controller required")
 	}
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {

@@ -84,7 +84,7 @@ func (s *Server) handlePKIRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cert, status, err := s.authority.Renew([]byte(req.CSR), identity.id, r.TLS.VerifiedChains[0][0])
-	s.logPKIResult("renew", identity.id, err)
+	s.logPKIResult("renew", identity.id, err, certificateEventDetail(cert, status.Generation))
 	if errors.Is(err, pki.ErrRenewalBlocked) {
 		writeJSONError(w, 409, err.Error())
 		return
@@ -160,7 +160,8 @@ func (s *Server) confirmEnrollment(id string) error {
 	return nil
 }
 
-func (s *Server) logPKIResult(operation, target string, err error) {
+func (s *Server) logPKIResult(operation, target string, err error, detail ...string) {
+	s.recordPKIResult(operation, target, err, detail...)
 	result := "success"
 	if err != nil {
 		result = "failed"

@@ -150,7 +150,7 @@ func Open(path string, now time.Time) (*Store, error) {
 		if e = tx.Commit(); e != nil {
 			return nil, e
 		}
-	} else if (version != 1 && version != 2 && version != 3) || app != applicationID {
+	} else if (version != 1 && version != 2 && version != 3 && version != 4) || app != applicationID {
 		return nil, fmt.Errorf("unsupported history schema: version=%d application=%d", version, app)
 	}
 	if version < 2 {
@@ -177,6 +177,13 @@ func Open(path string, now time.Time) (*Store, error) {
 		}
 		if e = tx.Commit(); e != nil {
 			return nil, e
+		}
+	}
+	// v4 reserves the empty event owner for controller-origin diagnostics.
+	// Older binaries must refuse this database instead of misvalidating backups.
+	if version < 4 {
+		if _, err = db.ExecContext(ctx, "PRAGMA user_version=4"); err != nil {
+			return nil, err
 		}
 	}
 	var journal string
