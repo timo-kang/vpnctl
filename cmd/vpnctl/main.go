@@ -668,7 +668,8 @@ func nodeServe(args []string) {
 		// The owner retains the same socket through retry and joins it on exit.
 		if err := probes.Configure(*cfg.Node); err != nil {
 			fmt.Fprintf(os.Stderr, "probe responder configuration failed: %v\n", err)
-			goto retry
+			// Restore the tunnel and start credential maintenance even if this port
+			// is occupied. RunSession retries the bind before borrowing the socket.
 		}
 		observations.Configure(ctx, *cfg.Node)
 		credentials.configure(*cfg.Node)

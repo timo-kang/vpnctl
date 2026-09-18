@@ -140,6 +140,10 @@ retain their separate contracts. No controller API timeout, readiness deadline,
 packet loss allowance, or fleet size was relaxed. This does not remove the resource
 cost of controller registration or establish a minimum production CPU specification.
 
+A bind failure still permits cached tunnel restoration and credential maintenance;
+CLI regressions hold the port occupied beyond the original certificate expiry and
+verify renewal and later recovery after releasing the port.
+
 Regression tests cover a deliberately held initial registration, 20 failed sessions
 sharing one socket, port reload, bind collision, disable/re-enable and repeated close.
 The real-kernel initial-registration failure test additionally probes the node over
