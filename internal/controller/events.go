@@ -25,6 +25,10 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid event request")
 		return
 	}
+	if req.NodeID == "" {
+		writeJSONError(w, http.StatusBadRequest, "node_id required")
+		return
+	}
 	if !s.authorizeNode(w, r, req.NodeID) {
 		return
 	}
@@ -77,7 +81,12 @@ func (s *Server) handleFleetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node := r.URL.Query().Get("node_id")
-	if !s.nodeRegistered(node) {
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && scope != "controller" || scope == "controller" && node != "" {
+		writeJSONError(w, http.StatusBadRequest, "use node_id or scope=controller")
+		return
+	}
+	if scope != "controller" && !s.nodeRegistered(node) {
 		if node == "" {
 			writeJSONError(w, http.StatusBadRequest, "node_id required")
 		} else {

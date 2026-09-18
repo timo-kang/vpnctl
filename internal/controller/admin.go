@@ -265,7 +265,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 
 var errNodeNotFound = errors.New("node not found")
 
-func (s *Server) removeNode(nodeID string) error {
+func (s *Server) removeNode(nodeID string) (resultErr error) {
+	defer func() { s.recordPKIResult("identity.remove", nodeID, resultErr) }()
 	release, _ := s.pkiAdmission.acquirePriority(context.Background())
 	defer release()
 	s.mutationAdmission.Lock()

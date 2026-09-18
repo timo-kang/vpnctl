@@ -19,6 +19,7 @@ func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 	var out api.AdminResponse
 	if strings.HasPrefix(req.Operation, "ca.") && s.authority != nil {
 		if err := s.authority.CheckRotation(strings.TrimPrefix(req.Operation, "ca."), s.caNodeIDs()); err != nil {
+			s.recordPKIResult(req.Operation, "controller", err)
 			return out, err
 		}
 	}
@@ -71,6 +72,18 @@ func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 		out.Backup, err = s.backupLocked()
 	default:
 		err = fmt.Errorf("unknown PKI operation")
+	}
+	if req.Operation == "pki.revoke" || strings.HasPrefix(req.Operation, "ca.") {
+		target := "controller"
+		if req.Operation == "pki.revoke" {
+			target = strings.ToLower(req.Fingerprint)
+		}
+		detail := ""
+		if err == nil {
+			state := s.authority.Status()
+			detail = fmt.Sprintf("generation=%d phase=%s active=%s pending=%s previous=%s", state.Generation, state.Phase, state.Active, state.Pending, state.Previous)
+		}
+		s.recordPKIResult(req.Operation, target, err, detail)
 	}
 	if err != nil {
 		return out, err
