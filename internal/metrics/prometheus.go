@@ -39,6 +39,16 @@ var (
 		Name: "vpnctl_health_failures",
 		Help: "Current consecutive health check failures",
 	})
+
+	EventTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "vpnctl_events_total",
+		Help: "Accepted state and diagnostic events by fixed kind and severity",
+	}, []string{"kind", "severity", "result"})
+
+	AlertActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "vpnctl_alert_active",
+		Help: "Current event-derived alert state by fixed alert code and severity",
+	}, []string{"code", "severity"})
 )
 
 var (

@@ -149,7 +149,7 @@ func Open(path string, now time.Time) (*Store, error) {
 		if e = tx.Commit(); e != nil {
 			return nil, e
 		}
-	} else if (version != 1 && version != 2) || app != applicationID {
+	} else if (version != 1 && version != 2 && version != 3) || app != applicationID {
 		return nil, fmt.Errorf("unsupported history schema: version=%d application=%d", version, app)
 	}
 	if version < 2 {
@@ -158,6 +158,19 @@ func Open(path string, now time.Time) (*Store, error) {
 			return nil, e
 		}
 		if _, e = tx.ExecContext(ctx, uplinkSchema); e != nil {
+			tx.Rollback()
+			return nil, e
+		}
+		if e = tx.Commit(); e != nil {
+			return nil, e
+		}
+	}
+	if version < 3 {
+		tx, e := db.BeginTx(ctx, nil)
+		if e != nil {
+			return nil, e
+		}
+		if _, e = tx.ExecContext(ctx, eventSchema); e != nil {
 			tx.Rollback()
 			return nil, e
 		}
@@ -482,6 +495,9 @@ func (s *Store) maintainDB(ctx context.Context, db *sql.DB, now time.Time) error
 		s.mu.Unlock()
 		if n < 10000 {
 			if err = s.maintainUplinks(ctx, db, now); err != nil {
+				return err
+			}
+			if err = s.maintainEvents(ctx, db, now); err != nil {
 				return err
 			}
 			s.lastCleanup = now

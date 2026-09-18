@@ -23,11 +23,12 @@ import (
 
 // Config holds configuration for a Monitor instance.
 type Config struct {
-	Source   peersource.PeerSource
-	Store    *Store
-	Interval time.Duration // default 5s if zero
-	Peers    []string      // VPN IP filter; empty = all
-	Quality  QualityConfig
+	Source    peersource.PeerSource
+	Store     *Store
+	Interval  time.Duration // default 5s if zero
+	Retention time.Duration // local probe retention; default 24h if zero
+	Peers     []string      // VPN IP filter; empty = all
+	Quality   QualityConfig
 }
 
 // Snapshot is the result of a single probe cycle.
@@ -71,6 +72,12 @@ func New(cfg Config) (*Monitor, error) {
 	if cfg.Interval < 0 {
 		return nil, fmt.Errorf("monitor interval must be positive")
 	}
+	if cfg.Retention == 0 {
+		cfg.Retention = 24 * time.Hour
+	}
+	if cfg.Retention < time.Minute {
+		return nil, fmt.Errorf("monitor retention must be at least one minute")
+	}
 	var err error
 	cfg.Quality, err = cfg.Quality.Normalized(cfg.Interval)
 	if err != nil {
@@ -95,9 +102,45 @@ func (m *Monitor) Subscribe() <-chan Snapshot {
 // again on each tick of cfg.Interval.
 func (m *Monitor) Run(ctx context.Context) {
 	m.probeAll(ctx)
+	maintenanceDone := make(chan struct{})
+	if m.cfg.Store != nil {
+		if removed, err := m.cfg.Store.CleanupContext(ctx, m.cfg.Retention); err != nil {
+			if ctx.Err() == nil {
+				logMaintenanceError(err)
+			}
+		} else if removed > 0 {
+			slog.Debug("monitor history retention", "removed", removed)
+		}
+		go func() {
+			defer close(maintenanceDone)
+			interval := m.cfg.Retention / 24
+			if interval < time.Minute {
+				interval = time.Minute
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if removed, err := m.cfg.Store.CleanupContext(ctx, m.cfg.Retention); err != nil {
+						if ctx.Err() == nil {
+							logMaintenanceError(err)
+						}
+					} else if removed > 0 {
+						slog.Debug("monitor history retention", "removed", removed)
+					}
+				}
+			}
+		}()
+	} else {
+		close(maintenanceDone)
+	}
 
 	ticker := time.NewTicker(m.cfg.Interval)
 	defer ticker.Stop()
+	defer func() { <-maintenanceDone }()
 
 	for {
 		select {
@@ -349,4 +392,8 @@ func cloneSnapshot(s Snapshot) Snapshot {
 		s.Peers[i].Quality = s.Peers[i].Quality.Clone()
 	}
 	return s
+}
+
+func logMaintenanceError(err error) {
+	slog.Warn("monitor history retention failed", "error", err)
 }

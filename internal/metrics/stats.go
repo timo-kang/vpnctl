@@ -17,11 +17,14 @@ type Summary struct {
 	From              time.Time
 	To                time.Time
 	AvgRTTMs          float64
+	P50RTTMs          float64
 	P95RTTMs          float64
+	P99RTTMs          float64
 	MinRTTMs          float64
 	MaxRTTMs          float64
 	AvgJitterMs       float64
 	AvgLossPct        float64
+	AvailabilityPct   float64
 	AvgThroughputMbps float64
 }
 
@@ -66,7 +69,9 @@ func Summarize(items []model.Metric, since time.Time) Summary {
 	}
 
 	sort.Float64s(values)
+	p50 := percentile(values, 0.50)
 	p95 := percentile(values, 0.95)
+	p99 := percentile(values, 0.99)
 	count := float64(len(filtered))
 
 	return Summary{
@@ -74,11 +79,14 @@ func Summarize(items []model.Metric, since time.Time) Summary {
 		From:              from,
 		To:                to,
 		AvgRTTMs:          sumRTT / count,
+		P50RTTMs:          p50,
 		P95RTTMs:          p95,
+		P99RTTMs:          p99,
 		MinRTTMs:          minRTT,
 		MaxRTTMs:          maxRTT,
 		AvgJitterMs:       sumJitter / count,
 		AvgLossPct:        sumLoss / count,
+		AvailabilityPct:   100 - sumLoss/count,
 		AvgThroughputMbps: sumThroughput / count,
 	}
 }

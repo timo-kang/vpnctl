@@ -28,8 +28,11 @@ func TestSummarize_Basic(t *testing.T) {
 	if s.MinRTTMs != 10 || s.MaxRTTMs != 20 {
 		t.Fatalf("min/max=%.2f/%.2f", s.MinRTTMs, s.MaxRTTMs)
 	}
-	if s.P95RTTMs != 20 {
-		t.Fatalf("p95=%.2f", s.P95RTTMs)
+	if s.P50RTTMs != 10 || s.P95RTTMs != 20 || s.P99RTTMs != 20 {
+		t.Fatalf("percentiles=%.2f/%.2f/%.2f", s.P50RTTMs, s.P95RTTMs, s.P99RTTMs)
+	}
+	if s.AvailabilityPct != 75 {
+		t.Fatalf("availability=%.2f", s.AvailabilityPct)
 	}
 }
 
