@@ -50,14 +50,16 @@ func OpenTokenStore(path string) (*TokenStore, error) {
 
 // TokenRecord retains admission history even after expiry, consumption or revocation.
 type TokenRecord struct {
-	Token      string    `json:"token"`
-	CreatedAt  time.Time `json:"created_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	SingleUse  bool      `json:"single_use"`
-	UseCount   uint64    `json:"use_count"`
-	LastUsedAt time.Time `json:"last_used_at"`
-	LastUsedBy string    `json:"last_used_by,omitempty"`
-	RevokedAt  time.Time `json:"revoked_at"`
+	Token        string        `json:"token"`
+	RequestID    string        `json:"request_id,omitempty"`
+	RequestedTTL time.Duration `json:"requested_ttl_ns,omitempty"`
+	CreatedAt    time.Time     `json:"created_at"`
+	ExpiresAt    time.Time     `json:"expires_at"`
+	SingleUse    bool          `json:"single_use"`
+	UseCount     uint64        `json:"use_count"`
+	LastUsedAt   time.Time     `json:"last_used_at"`
+	LastUsedBy   string        `json:"last_used_by,omitempty"`
+	RevokedAt    time.Time     `json:"revoked_at"`
 }
 
 var ErrInvalidToken = errors.New("bootstrap token is invalid, expired, revoked or consumed")
@@ -71,6 +73,61 @@ func (ts *TokenStore) Create() (string, error) { return ts.CreateWithOptions(0, 
 
 // CreateWithOptions stores a token with an optional positive TTL; zero means no expiry.
 func (ts *TokenStore) CreateWithOptions(ttl time.Duration, singleUse bool) (string, error) {
+	return ts.create(ttl, singleUse, "")
+}
+
+var ErrRequestIDConflict = errors.New("request ID already used with different token options")
+var ErrRequestNotFound = errors.New("no committed token creation for request ID")
+
+// ValidateRequestID bounds persisted lookup keys; identifiers contain no secrets.
+func ValidateRequestID(id string) error {
+	if len(id) < 1 || len(id) > 128 {
+		return fmt.Errorf("request ID must contain 1 to 128 ASCII letters, digits, hyphens or underscores")
+	}
+	for _, c := range id {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return fmt.Errorf("invalid request ID")
+		}
+	}
+	return nil
+}
+
+// CreateIdempotent commits the request ID and token together. Retrying an expired,
+// consumed or revoked result returns the original token, never a fresh credential.
+func (ts *TokenStore) CreateIdempotent(ttl time.Duration, singleUse bool, requestID string) (string, error) {
+	if err := ValidateRequestID(requestID); err != nil {
+		return "", err
+	}
+	return ts.create(ttl, singleUse, requestID)
+}
+
+func (ts *TokenStore) CreationResult(requestID string) (TokenRecord, error) {
+	if err := ValidateRequestID(requestID); err != nil {
+		return TokenRecord{}, err
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	var result TokenRecord
+	err := ts.withMutationLock(func() error {
+		if err := ts.reloadLocked(); err != nil {
+			return err
+		}
+		for _, record := range ts.tokens {
+			if record.RequestID == requestID {
+				// Confirm a previously uncertain rename before reporting a durable result.
+				if err := atomicfile.SyncDir(filepath.Dir(ts.path)); err != nil {
+					return err
+				}
+				result = record
+				return nil
+			}
+		}
+		return ErrRequestNotFound
+	})
+	return result, err
+}
+
+func (ts *TokenStore) create(ttl time.Duration, singleUse bool, requestID string) (string, error) {
 	if ttl < 0 {
 		return "", fmt.Errorf("token TTL must not be negative")
 	}
@@ -81,11 +138,27 @@ func (ts *TokenStore) CreateWithOptions(ttl time.Duration, singleUse bool) (stri
 		if err := ts.reloadLocked(); err != nil {
 			return err
 		}
+		if requestID != "" {
+			for _, record := range ts.tokens {
+				if record.RequestID != requestID {
+					continue
+				}
+				if record.RequestedTTL != ttl || record.SingleUse != singleUse {
+					return ErrRequestIDConflict
+				}
+				// A previous response may have failed after rename but before directory fsync.
+				if err := atomicfile.SyncDir(filepath.Dir(ts.path)); err != nil {
+					return err
+				}
+				token = record.Token
+				return nil
+			}
+		}
 		generated, err := GenerateToken()
 		if err != nil {
 			return err
 		}
-		record := TokenRecord{Token: generated, CreatedAt: time.Now().UTC(), SingleUse: singleUse}
+		record := TokenRecord{Token: generated, CreatedAt: time.Now().UTC(), SingleUse: singleUse, RequestID: requestID, RequestedTTL: ttl}
 		if ttl > 0 {
 			record.ExpiresAt = record.CreatedAt.Add(ttl)
 		}
@@ -243,12 +316,25 @@ func (ts *TokenStore) decode(data []byte) error {
 		if file.Version != 1 {
 			return fmt.Errorf("unsupported token store version %d", file.Version)
 		}
+		requests := make(map[string]bool)
 		for _, record := range file.Tokens {
 			if record.Token == "" {
 				return fmt.Errorf("empty token in store")
 			}
 			if _, exists := tokens[record.Token]; exists {
 				return fmt.Errorf("duplicate token in store")
+			}
+			if record.RequestID != "" {
+				if err := ValidateRequestID(record.RequestID); err != nil {
+					return err
+				}
+				if requests[record.RequestID] || record.RequestedTTL < 0 {
+					return fmt.Errorf("invalid or duplicate token creation request")
+				}
+				requests[record.RequestID] = true
+				if record.CreatedAt.IsZero() || (record.RequestedTTL == 0 && !record.ExpiresAt.IsZero()) || (record.RequestedTTL > 0 && !record.ExpiresAt.Equal(record.CreatedAt.Add(record.RequestedTTL))) {
+					return fmt.Errorf("token creation options differ from record")
+				}
 			}
 			tokens[record.Token] = record
 		}

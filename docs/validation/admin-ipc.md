@@ -82,4 +82,4 @@ go test -race -shuffle=20260915 -count=3 \
 - legacy token 배열은 mutation 때 version 1 형식으로 이전한다. 운영 업그레이드 전
   전체 data directory를 백업하고, 구버전으로 단순 실행 파일 교체를 하지 않는다.
 
-253개 동시 HTTP 관리 요청의 throughput/SLO를 이 무결성 테스트로 보장하지 않는다. API timeout은 30초이며, 영속 mutation 대기열의 overload admission과 명시적 backpressure는 별도 운영 검증 대상이다.
+253개 동시 HTTP 관리 요청의 throughput/SLO를 이 무결성 테스트로 보장하지 않는다. API timeout은 30초다. 후속 #60의 [관리 과부하·취소·결과 조회 계약](admin-overload.md)은 실행 1개/대기 8개, 입장 대기 최대 2초, 명시적 503과 영속 요청 ID를 검증한다.

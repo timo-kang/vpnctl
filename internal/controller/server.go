@@ -50,10 +50,11 @@ type Server struct {
 	// mutationMu serializes registry writers while mu only protects published state.
 	mutationMu sync.Mutex
 	// stateMu drains admitted requests before removal, including metric writes.
-	stateMu sync.RWMutex
-	reg     *store.Registry
-	ipam    *ipam
-	history history.Storage
+	stateMu        sync.RWMutex
+	adminAdmission adminAdmission
+	reg            *store.Registry
+	ipam           *ipam
+	history        history.Storage
 	// metricsMu serializes appends to the metrics CSV to avoid interleaved writes
 	// when multiple nodes submit samples concurrently.
 	metricsMu         sync.Mutex
