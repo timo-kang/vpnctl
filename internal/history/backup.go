@@ -130,7 +130,7 @@ func Check(ctx context.Context, path string) error {
 	if err = db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app); err != nil {
 		return err
 	}
-	if (version != 1 && version != 2) || app != applicationID {
+	if (version != 1 && version != 2 && version != 3) || app != applicationID {
 		return fmt.Errorf("unsupported history backup schema %d", version)
 	}
 	if err = db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil {
@@ -159,7 +159,7 @@ func Check(ctx context.Context, path string) error {
 	if invalid != 0 {
 		return fmt.Errorf("invalid history measurements")
 	}
-	if version == 2 {
+	if version >= 2 {
 		var stored, actual, bad int
 		if err = db.QueryRowContext(ctx, "SELECT row_count FROM uplink_metadata WHERE id=1").Scan(&stored); err != nil {
 			return err
@@ -211,7 +211,31 @@ func Check(ctx context.Context, path string) error {
 		if e != nil {
 			return e
 		}
-
+	}
+	if version >= 3 {
+		var stored, actual int
+		if err = db.QueryRowContext(ctx, "SELECT row_count FROM event_metadata WHERE id=1").Scan(&stored); err != nil {
+			return err
+		}
+		if err = db.QueryRowContext(ctx, "SELECT count(*) FROM events").Scan(&actual); err != nil {
+			return err
+		}
+		if stored != actual || actual > MaxEvents {
+			return fmt.Errorf("invalid event history counts")
+		}
+		var bad int
+		if err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM events WHERE kind NOT IN ('route_change','relay_failover','uplink_change','nat_remap','certificate','discovery_error','probe_error','collector_error') OR severity NOT IN ('info','warning','critical') OR validity NOT IN ('observed','inferred','unknown') OR length(id)=0 OR length(node)=0)").Scan(&bad); err != nil {
+			return err
+		}
+		if bad != 0 {
+			return fmt.Errorf("invalid stored event")
+		}
+		if err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM events GROUP BY node HAVING count(*) > ?)", MaxNodeEvents).Scan(&bad); err != nil {
+			return err
+		}
+		if bad != 0 {
+			return fmt.Errorf("event history node capacity exceeded")
+		}
 	}
 
 	return nil

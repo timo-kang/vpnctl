@@ -100,6 +100,13 @@ func (s *Store) IngestUplink(ctx context.Context, node string, snapshot uplink.S
 	if err != nil {
 		return err
 	}
+	var previousSnapshot *uplink.Snapshot
+	s.mu.RLock()
+	if value, ok := s.uplinks[node]; ok {
+		copy := value
+		previousSnapshot = &copy
+	}
+	s.mu.RUnlock()
 	if err = acquire(ctx, s.writer); err != nil {
 		return err
 	}
@@ -180,13 +187,22 @@ func (s *Store) IngestUplink(ctx context.Context, node string, snapshot uplink.S
  WHERE (excluded.ts,excluded.id)>(uplink_latest.ts,uplink_latest.id)`, node, snapshot.At.UnixMicro(), snapshot.ID, payload); err != nil {
 		return err
 	}
+	isLatest := previousSnapshot == nil || snapshot.At.After(previousSnapshot.At) || snapshot.At.Equal(previousSnapshot.At) && snapshot.ID > previousSnapshot.ID
+	if isLatest {
+		for _, event := range deriveUplinkEvents(node, previousSnapshot, snapshot) {
+			event.ID = eventID(event)
+			if _, err = insertEventTx(ctx, tx, node, event); err != nil {
+				return err
+			}
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	previousSnapshot, ok := s.uplinks[node]
-	if !ok || snapshot.At.After(previousSnapshot.At) || snapshot.At.Equal(previousSnapshot.At) && snapshot.ID > previousSnapshot.ID {
+	latestSnapshot, ok := s.uplinks[node]
+	if !ok || snapshot.At.After(latestSnapshot.At) || snapshot.At.Equal(latestSnapshot.At) && snapshot.ID > latestSnapshot.ID {
 		detached, e := unpackSnapshot(payload)
 		if e != nil {
 			return e

@@ -116,6 +116,91 @@ func runFleetUplinks(args []string) error {
 	}
 	return printFleetUplinks(os.Stdout, result, *asJSON)
 }
+func runFleetEvents(args []string) error {
+	fs := flag.NewFlagSet("fleet events", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "node client YAML")
+	node := fs.String("node", "", "node identity (required)")
+	window := fs.String("window", "24h", "event window, at most 7d")
+	limit := fs.Int("limit", 500, "recent events, 1..1000")
+	asJSON := fs.Bool("json", false, "full event history as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *cfgPath == "" || *node == "" {
+		return fmt.Errorf("--config and --node required")
+	}
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Node == nil {
+		return fmt.Errorf("node config required")
+	}
+	client := newAPIClient(cfg.Node)
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := client.FleetEvents(ctx, *node, *window, *limit)
+	if err != nil {
+		return err
+	}
+	return printFleetEvents(os.Stdout, result, *asJSON)
+}
+
+func printFleetEvents(w io.Writer, result history.EventHistory, asJSON bool) error {
+	if asJSON {
+		return json.NewEncoder(w).Encode(result)
+	}
+	out := bufio.NewWriter(w)
+	fmt.Fprintf(out, "Events (%s, %s], truncated=%t\n", result.Start.Format(time.RFC3339), result.End.Format(time.RFC3339), result.Truncated)
+	fmt.Fprintln(out, "TIME  KIND  TARGET  SEVERITY  PREVIOUS  CURRENT  SOURCE  MESSAGE")
+	for _, e := range result.Events {
+		fmt.Fprintf(out, "%s  %s  %s  %s  %s  %s  %s  %s\n", e.Timestamp.Format(time.RFC3339), e.Kind, e.Target, e.Severity, e.Previous, e.Current, e.Source, e.Message)
+	}
+	return out.Flush()
+}
+
+func runFleetAlerts(args []string) error {
+	fs := flag.NewFlagSet("fleet alerts", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "node client YAML")
+	node := fs.String("node", "", "node identity (required)")
+	asJSON := fs.Bool("json", false, "alerts as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *cfgPath == "" || *node == "" {
+		return fmt.Errorf("--config and --node required")
+	}
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Node == nil {
+		return fmt.Errorf("node config required")
+	}
+	client := newAPIClient(cfg.Node)
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	alerts, err := client.FleetAlerts(ctx, *node)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(alerts)
+	}
+	return printFleetAlerts(os.Stdout, alerts)
+}
+
+func printFleetAlerts(w io.Writer, alerts []history.Alert) error {
+	out := bufio.NewWriter(w)
+	fmt.Fprintln(out, "CODE  ACTIVE  SEVERITY  LAST_SEEN  REASON")
+	for _, a := range alerts {
+		fmt.Fprintf(out, "%s  %t  %s  %s  %s\n", a.Code, a.Active, a.Severity, a.LastSeen.Format(time.RFC3339), a.Reason)
+	}
+	return out.Flush()
+}
+
 func printFleetUplinks(w io.Writer, result history.UplinkHistory, asJSON bool) error {
 	if asJSON {
 		return json.NewEncoder(w).Encode(result)

@@ -81,6 +81,8 @@ Usage:
   vpnctl fleet status --config <path> | --interface <iface>
   vpnctl fleet history --config <path> | --interface <iface> [--window 1h]
   vpnctl fleet uplinks --config <path> --node <id> [--window 7d] [--json]
+  vpnctl fleet events --config <path> --node <id> [--window 24h] [--json]
+  vpnctl fleet alerts --config <path> --node <id> [--json]
 
 `
 
@@ -1927,7 +1929,7 @@ func defaultMonitorDBPath() string {
 
 func handleFleet(args []string) {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, "fleet subcommand required (status|history|uplinks)\n")
+		fmt.Fprint(os.Stderr, "fleet subcommand required (status|history|uplinks|events|alerts)\n")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -1937,6 +1939,10 @@ func handleFleet(args []string) {
 		fleetHistory(args[1:])
 	case "uplinks":
 		fatal(runFleetUplinks(args[1:]))
+	case "events":
+		fatal(runFleetEvents(args[1:]))
+	case "alerts":
+		fatal(runFleetAlerts(args[1:]))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown fleet subcommand %q\n", args[0])
 		os.Exit(2)
@@ -2147,10 +2153,11 @@ func handleMonitor(args []string) {
 	}
 
 	mon, err := monitor.New(monitor.Config{
-		Source:   src,
-		Store:    store,
-		Interval: *interval,
-		Peers:    peerFilter,
+		Source:    src,
+		Store:     store,
+		Interval:  *interval,
+		Retention: *retention,
+		Peers:     peerFilter,
 		Quality: monitor.QualityConfig{
 			Window:          *qualityWindow,
 			StaleAfter:      *staleAfter,

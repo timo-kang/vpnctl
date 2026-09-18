@@ -122,8 +122,13 @@ func (s *Store) QueryAll(window time.Duration) ([]ProbeResult, error) {
 
 // Cleanup deletes probe records older than retention and returns the count of deleted rows.
 func (s *Store) Cleanup(retention time.Duration) (int64, error) {
+	return s.CleanupContext(context.Background(), retention)
+}
+
+// CleanupContext allows monitor shutdown to interrupt a busy SQLite cleanup.
+func (s *Store) CleanupContext(ctx context.Context, retention time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-retention).UnixMicro()
-	result, err := s.db.Exec(`DELETE FROM probes WHERE timestamp < ?`, cutoff)
+	result, err := s.db.ExecContext(ctx, `DELETE FROM probes WHERE timestamp < ?`, cutoff)
 	if err != nil {
 		return 0, err
 	}

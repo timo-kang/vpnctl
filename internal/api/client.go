@@ -203,3 +203,24 @@ func (c *Client) FleetUplinks(ctx context.Context, node, window string, limit in
 	}
 	return out, err
 }
+
+func (c *Client) SubmitEvent(ctx context.Context, req EventRequest) error {
+	return c.postJSON(ctx, "/events", req, nil)
+}
+
+func (c *Client) FleetEvents(ctx context.Context, node, window string, limit int) (history.EventHistory, error) {
+	var out history.EventHistory
+	values := url.Values{"node_id": {node}, "window": {window}, "limit": {fmt.Sprint(limit)}}
+	err := c.getJSON(ctx, "/fleet/events?"+values.Encode(), &out)
+	if err == nil && out.SchemaVersion != 1 {
+		err = fmt.Errorf("unsupported event history schema %d", out.SchemaVersion)
+	}
+	return out, err
+}
+
+func (c *Client) FleetAlerts(ctx context.Context, node string) ([]history.Alert, error) {
+	var out []history.Alert
+	values := url.Values{"node_id": {node}}
+	err := c.getJSON(ctx, "/fleet/alerts?"+values.Encode(), &out)
+	return out, err
+}

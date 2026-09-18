@@ -88,6 +88,15 @@ type UplinkRequest struct {
 	Snapshot uplink.Snapshot `json:"snapshot"`
 }
 
+// EventRequest submits one immutable diagnostic or state-transition event.
+type EventRequest struct {
+	NodeID string        `json:"node_id"`
+	Event  history.Event `json:"event"`
+}
+
+type FleetEventHistory = history.EventHistory
+type FleetAlert = history.Alert
+
 type FleetNodeStatus struct {
 	UplinkObservation *uplink.Snapshot `json:"uplink_observation,omitempty"`
 	history.Measurement
