@@ -73,3 +73,16 @@ quality/fleet history/uplink/event/alert를 요구사항·코드·기존 회귀 
   (`/tmp/vpnctl-review-monitor-smoke`). 지원 계약은 `docs/validation/backend-support.md`.
 - 이슈 #57은 재현 결함 수정, #17은 남은 M2 기능, 별도 M1 이슈는 과거 CA rotation
   timeout 원인 규명을 추적한다. 최신 CI 결과는 PR에서 확인한다.
+
+## 첫 PR CI에서 추가로 확인한 테스트 전제와 운영 한계
+
+run `35305071947`의 kernel 전체 검증은 통과했지만 Go job은 두 fixture에서 실패했다.
+253개 동시 관리 작업이 Admin client 30초 제한을 넘겼고, 32노드 CA 전환은 30초짜리
+client certificate를 사용한 상태에서 약 32초 경과 후 인증 실패가 발생했다.
+
+무결성 검증은 506 identity와 63,756 readiness 간선을 모두 구성한 채 등록/삭제/토큰
+작업을 최대 8개 동시 writer로 명시했다. 제품 API timeout 30초는 변경하지 않는다.
+CA 전환 테스트의 client lifetime을 90초로 두어 별도 short-lifetime 만료/갱신 테스트와
+분리했다. 기존 만료 거절과 자동 갱신 검증은 유지한다. 두 시나리오는 race 모드 2회
+통과했다. 253개 동시 요청의 운영상 admission·취소·결과 확인 한계는 별도 M1 이슈로
+추적하며 이번 fixture 수정으로 해결했다고 보지 않는다.

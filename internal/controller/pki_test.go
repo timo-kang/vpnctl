@@ -207,7 +207,9 @@ func TestPKIRevocationRejectsEstablishedConnectionAndRenewal(t *testing.T) {
 func TestPKICARotationVariableFleetAndNoAPIInterruption(t *testing.T) {
 	for _, size := range []int{1, 3, 8, 32} {
 		t.Run(fmt.Sprintf("nodes_%d", size), func(t *testing.T) {
-			s, h := lifecycleServer(t, "30s")
+			// Exercise CA overlap/retirement, not accidental client expiry during fleet setup.
+			// Short-lifetime expiry and renewal remain covered in separate tests.
+			s, h := lifecycleServer(t, "90s")
 			clients := make([]*api.Client, size)
 			dirs := make([]string, size)
 			for n := range clients {
