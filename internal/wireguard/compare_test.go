@@ -77,3 +77,31 @@ func TestSyncConfAlwaysInspectsRuntimeAndRepairsChanges(t *testing.T) {
 		t.Fatal("failed inspection must fall back to reconciliation")
 	}
 }
+
+func TestSyncConfPreservesUnspecifiedKernelListenPort(t *testing.T) {
+	desired := strings.ReplaceAll(desiredSetConf, "ListenPort = 51820\n", "")
+	r := &confRunner{current: strings.ReplaceAll(currentSetConf, "51820", "43721")}
+	m := NewManager(r)
+	for i := 0; i < 100; i++ {
+		if err := m.syncConf("wg0", desired); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.writes != 0 {
+		t.Fatalf("dynamic listen port caused %d unnecessary WG applies", r.writes)
+	}
+	for _, changed := range []string{
+		strings.ReplaceAll(r.current, "43721", "invalid"),
+		strings.ReplaceAll(r.current, "43721", "0"),
+		strings.ReplaceAll(r.current, "43721", "65536"),
+		strings.ReplaceAll(r.current, "test-key", "unexpected-key"),
+		strings.ReplaceAll(r.current, "10.77.0.2/32", "10.77.0.99/32"),
+	} {
+		if sameSetConf(desired, changed) {
+			t.Fatal("dynamic port hid invalid runtime state")
+		}
+	}
+	if sameSetConf(desiredSetConf, r.current) {
+		t.Fatal("explicit port drift ignored")
+	}
+}

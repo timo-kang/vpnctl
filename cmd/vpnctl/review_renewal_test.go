@@ -6,7 +6,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,10 +19,17 @@ import (
 	"time"
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
+	"vpnctl/internal/direct"
 	"vpnctl/internal/pki"
 )
 
 func TestReviewNodeServeRenewsDuringRegistrationFailure(t *testing.T) {
+	for _, busy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("probe_port_busy_%t", busy), func(t *testing.T) { testNodeServeRenewalAndProbe(t, busy) })
+	}
+}
+
+func testNodeServeRenewalAndProbe(t *testing.T, busy bool) {
 	dir := t.TempDir()
 	a, err := pki.OpenAuthority(filepath.Join(dir, "ca"), pki.Policy{CALifetime: time.Hour, ServerLifetime: time.Hour, ClientLifetime: 6 * time.Second, ClientRenewBefore: 4 * time.Second, CheckInterval: 100 * time.Millisecond, SANs: []string{"127.0.0.1"}})
 	if err != nil {
@@ -86,6 +95,17 @@ func TestReviewNodeServeRenewsDuringRegistrationFailure(t *testing.T) {
 	}
 	disabled := false
 	cfg := config.Config{Node: &config.NodeConfig{Name: "node", Controller: server.URL, PKIDir: pkiDir, WGPrivateKey: "test-private", WGPublicKey: "test-public", VPNIP: "10.7.0.2/32", ServerPublicKey: "server-public", ServerEndpoint: "127.0.0.1:51820", ServerAllowedIPs: []string{"10.7.0.0/24"}, WGConfigPath: filepath.Join(dir, "wg.conf"), DirectMode: "off", PolicyRoutingEnabled: &disabled}}
+	// The occupied-port case must still start renewal before any probe/session
+	// is possible. A collision must not bypass the maintenance supervisor.
+	occupied, err := net.ListenPacket("udp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	cfg.Node.ProbePort = occupied.LocalAddr().(*net.UDPAddr).Port
+	if !busy {
+		occupied.Close()
+	}
 	path := filepath.Join(dir, "node.yaml")
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatal(err)
@@ -107,6 +127,19 @@ func TestReviewNodeServeRenewsDuringRegistrationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !busy {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			_, err := direct.ProbePeer(context.Background(), "127.0.0.1:0", fmt.Sprintf("127.0.0.1:%d", cfg.Node.ProbePort), 100*time.Millisecond)
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("CLI sync failure blocked probe responder", err)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	time.Sleep(time.Until(leaf.NotAfter) + 200*time.Millisecond)
 	if registrations.Load() < 2 {
 		t.Fatal("registration retry fixture not exercised")
@@ -125,6 +158,7 @@ func TestReviewNodeServeRenewsDuringRegistrationFailure(t *testing.T) {
 	if trusts.Load() == 0 || renewals.Load() == 0 {
 		t.Fatal("maintenance did not run")
 	}
+	occupied.Close()
 	failRegistration.Store(false)
 	deadline := time.Now().Add(3 * time.Second)
 	for recovered.Load() < 2 && time.Now().Before(deadline) {
@@ -136,6 +170,9 @@ func TestReviewNodeServeRenewsDuringRegistrationFailure(t *testing.T) {
 	cfgAfter, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := direct.ProbePeer(context.Background(), "127.0.0.1:0", fmt.Sprintf("127.0.0.1:%d", cfg.Node.ProbePort), time.Second); err != nil {
+		t.Fatal("probe did not recover with session", err)
 	}
 	if cfgAfter.Node.Name != "node" || cfgAfter.Node.VPNIP != "10.7.0.2/32" {
 		t.Fatal("recovery changed identity/lease")

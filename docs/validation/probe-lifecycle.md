@@ -107,3 +107,75 @@ before that measurement correction. That does not establish the cause of the
 CI HTTPS latency. Issue #39 tracks profiling and repeatability with the original
 1s HTTPS criterion. Neither a single successful rerun nor this probe fix closes
 that issue, and M1 remains incomplete.
+
+## Controller-independent responder startup (#63)
+
+The post-merge #61 main run
+[35310183839](https://github.com/timo-kang/vpnctl/actions/runs/35310183839)
+failed the 32-node initial UDP responder readiness check. Earlier agents and the
+controller continued renewing certificates, while the last agent's log was empty.
+That runner had four visible CPUs, no cgroup quota/throttling, and elevated CPU
+pressure; it must not be described as the same one-CPU quota environment as the
+local startup failures recorded in `api-latency.md`.
+
+The actual startup order coupled a local responder to two controller registration
+requests: CLI `syncConfigOnce`, then agent `RunSession`, then UDP bind. A blocked
+registration reproduction returns connection-refused for an otherwise configured
+local probe. The responder is a reachability service and does not require controller
+registration to succeed. Controller-side storage/CPU delays should not themselves
+make that independent service unreachable.
+
+`ProbeSupervisor` now owns the shared UDP socket in the node process across config
+sync, initial registration, session failures and retry backoff. STUN and direct
+workers borrow that same socket, preserving its port and mapping. Sessions join
+their workers before the owner changes configuration or closes the socket. A new
+port is bound before the old socket closes; a bind failure retains the old working
+responder and prevents the new session from starting. Disabling the port closes it.
+Process shutdown closes the socket after sessions finish. Standalone `agent.Run`
+and `RunSession` also bind before registration and release their owned resources.
+
+A successful UDP probe means only responder reachability. Registration failures,
+authentication failures, retries, credential renewal and cached tunnel restoration
+retain their separate contracts. No controller API timeout, readiness deadline,
+packet loss allowance, or fleet size was relaxed. This does not remove the resource
+cost of controller registration or establish a minimum production CPU specification.
+
+A bind failure still permits cached tunnel restoration and credential maintenance;
+CLI regressions hold the port occupied beyond the original certificate expiry and
+verify renewal and later recovery after releasing the port.
+
+Regression tests cover a deliberately held initial registration, 20 failed sessions
+sharing one socket, port reload, bind collision, disable/re-enable and repeated close.
+The real-kernel initial-registration failure test additionally probes the node over
+WireGuard throughout repeated rejected registrations and beyond its original
+certificate expiry, verifies renewal, then checks identity/lease recovery and socket
+release on process shutdown. Existing 1/3/8/32 fleet, controller restart, cold node
+restart and relay fault tests remain part of the required CI gate.
+
+### Retry dataplane regression found by the new test (#65)
+
+The first kernel run of the continuous registration-failure probe test failed one
+500ms probe even after responder startup was isolated. Investigation found that
+`sameSetConf` treated an omitted desired ListenPort and a kernel-assigned port as
+different interface fields. The default dynamic-port configuration therefore invoked
+`wg syncconf` on every retry, needlessly reapplying peer AllowedIPs. A focused
+before-fix regression measured 100 writes for 100 unchanged inspections.
+
+Comparison now retains a valid kernel-assigned port when configuration deliberately
+omits it. Explicit port changes, keys, peer sets and AllowedIPs still require repair;
+malformed, zero and out-of-range reported ports do not qualify as a match. Each call
+still inspects live kernel state. After this correction the real-kernel
+registration-failure scenario passed three repeats with 80/72/73 successful probes,
+zero probe failures, renewed credentials beyond original expiry, and recovery of
+the same identity/lease. The first failed run is retained as a failure.
+
+The responder change's separate 2-CPU fleet matrix completed 139,396 planned
+UDP/TCP/HTTPS probes with zero failures/reconnects (1/3/8/32 nodes). Its accompanying
+registration-failure test was the failure that triggered #65; that whole command
+is not reported as passing until the corrected integration suite passes.
+A one-CPU 32-node repeat after responder isolation passed 106,174 planned probes,
+zero failures/reconnects, and all relay fault cycles. Its 18,095 successful HTTPS
+requests had p95/p99/max 289.38/327.02/695.62ms. The run took 221.56s, substantially
+slower than the 2-CPU 32-node run (66.26s, HTTPS p99 9.18ms). This demonstrates the
+startup improvement in the previously failing profile; it is one measured sandbox
+run, not a production capacity guarantee. Final PR/main CI records are on #63/#65.
