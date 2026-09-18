@@ -60,7 +60,8 @@ func diagnosticMetrics(text string) string {
 			continue
 		}
 		switch name[0] {
-		case "vpnctl_controller_stage_seconds_bucket", "vpnctl_controller_stage_seconds_sum", "vpnctl_controller_stage_seconds_count",
+		case "vpnctl_pki_authority_seconds_bucket", "vpnctl_pki_authority_seconds_sum", "vpnctl_pki_authority_seconds_count",
+			"vpnctl_controller_stage_seconds_bucket", "vpnctl_controller_stage_seconds_sum", "vpnctl_controller_stage_seconds_count",
 			"vpnctl_system_command_seconds_bucket", "vpnctl_system_command_seconds_sum", "vpnctl_system_command_seconds_count",
 			"process_cpu_seconds_total", "process_resident_memory_bytes", "go_goroutines", "go_memstats_alloc_bytes":
 			out.WriteString(line)

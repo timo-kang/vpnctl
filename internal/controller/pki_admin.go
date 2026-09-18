@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"vpnctl/internal/api"
 )
@@ -20,12 +21,17 @@ func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 			return out, err
 		}
 	}
-	if req.Operation == "pki.status" {
+	// Preparing only adds trust; it cannot invalidate an admitted identity.
+	// Activation/retirement/rollback/revocation retain the exclusive barrier.
+	admissionStart := time.Now()
+	if req.Operation == "pki.status" || req.Operation == "ca.prepare" {
 		s.stateMu.RLock()
 		defer s.stateMu.RUnlock()
 	} else {
 		s.stateMu.Lock()
-		defer s.stateMu.Unlock()
+		observeStage("pki_transition", "admission_wait", admissionStart)
+		held := time.Now()
+		defer func() { s.stateMu.Unlock(); observeStage("pki_transition", "exclusive_hold", held) }()
 	}
 	if s.authority == nil {
 		return out, fmt.Errorf("PKI disabled")
@@ -40,8 +46,8 @@ func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 		}
 		err = s.authority.Revoke(strings.ToLower(req.Fingerprint))
 	case "ca.prepare", "ca.activate", "ca.retire", "ca.rollback":
-		// Admission remains exclusive for actual transitions. Recollect nodes
-		// and revalidate after draining: preflight never authorizes a mutation.
+		// Revalidate against the latest committed state. Destructive transitions
+		// also recollect nodes after draining; preflight never authorizes a mutation.
 		err = s.authority.Rotate(strings.TrimPrefix(req.Operation, "ca."), s.caNodeIDs())
 	case "pki.backup":
 		out.Backup, err = s.backupLocked()
