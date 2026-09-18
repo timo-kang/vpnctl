@@ -275,3 +275,95 @@ registers before starting the first process, preserving logs on early initializa
 failure. Private keys and runtime credential files remain excluded from artifacts.
 [PR #61](https://github.com/timo-kang/vpnctl/pull/61) records the exact evidence and
 [its passing CI](https://github.com/timo-kang/vpnctl/actions/runs/35309665582).
+
+## PKI writer backlog before the security barrier (#66)
+
+Post-merge main `785ea43`, [run 35312154424](https://github.com/timo-kang/vpnctl/actions/runs/35312154424),
+failed with 84 HTTPS deadlines at 32 nodes: revocation 9, rotation 32, rollback 43.
+The 103,131 planned samples in that fleet had no UDP/TCP failure. Smaller fleets
+and the independent registration-failure/WireGuard renewal test passed. This run
+remains a failure; neither preceding PR success nor a later rerun replaces it.
+
+Unlike the earlier uninstrumented failures, the new stage metrics identify an
+admission backlog. The two CA activations held the exclusive barrier for only
+3.2/3.7ms but waited for admitted readers for 1.223/1.280s. Many renewal/ack
+handlers held `stateMu.RLock` while waiting for the one Authority writer. Once
+an administrator requested the exclusive barrier, new fleet reads stopped until
+all already admitted durable writes drained. The host exposed four CPUs without
+a quota or throttling, with CPU and I/O pressure; this is not evidence of the same
+one-CPU startup fault. HTTP traces completed TLS/request writes before timing out
+waiting for response headers.
+
+PKI writers now queue through a cancellable controller gate **before** taking
+`stateMu`. Renewal, acknowledgement, bootstrap, legacy first observation and server
+maintenance share this order. PKI admin mutations and node removal take that same
+gate before draining admitted requests. Known-certificate reads and PKI status do
+not queue for a writer. Once admitted, requests still recheck current identity,
+trust, expiry, revocation and CA acknowledgement gates. Observation classification
+is only a scheduling hint and grants no authorization. Records remain present
+after revocation/retirement; a known reader cannot silently become a first-use
+writer behind the barrier.
+
+The `pki_writer/admission_wait` controller histogram records this outer queue.
+Canceled request/maintenance waiters leave without later execution. Already
+admitted admin operations retain their durable completion/result-reconciliation
+contract. This serializes PKI writers, not all HTTP connections, and does not claim
+bounded latency for an arbitrarily slow durable commit or a held admitted handler.
+The exclusive security barrier still drains admitted work before mutation.
+
+A regression holds an authenticated PKI handler, queues 32 writers and revocation,
+and requires 32 authenticated fleet reads to finish within the unchanged 1s
+budget while that first handler remains held. It fails before this change and
+passes after it. Additional checks cover canceled waiters, authorization after
+revocation/removal, maintenance shutdown while queued, legacy first-use metadata,
+CA node-set revalidation and removal drain semantics. Authority-level blocked-write
+and pre/post-rename fault tests remain in the full race suite. Final kernel and
+PR/main evidence is recorded on #66 and the current M1 gate #13.
+
+### Follow-up: registry backlog, scheduling and slow senders
+
+The first #67 PR run 35313218533 still failed: 32 HTTPS samples at 32 nodes during
+rotation, with 1.183s API drain and only 3.184ms exclusive hold. PKI admission alone
+was insufficient because registry writers also waited inside the same reader set.
+A separate held-registration/32-writer regression reproduced this remaining fault.
+
+The final order is writer reservation, mutation admission, then state admission.
+PKI and registry use independent FIFO queues so a stalled registration does not
+serialize unrelated certificate renewal. Destructive admin work first reserves
+the PKI writer and drains slow/mutating handlers through `mutationAdmission` while
+cheap committed fleet/trust reads remain available. Only after that drain does it
+take the existing exclusive state barrier. The latter still drains admitted reads
+and rechecks current identity, trust and CA ack state. The `mutation_drain` stage
+and `registry_writer/admission_wait` distinguish these waits.
+
+A one-CPU/32-node boundary experiment of the first queue change failed the 2s
+admin revoke request. FIFO alone put administration behind the entire renewal
+backlog. Admin and normal PKI classes now alternate when both are waiting, with
+FIFO within each class; neither class can perpetually displace the other. The
+next one-CPU experiment reached revocation but its already-revoked renewal replay
+waited behind writers and missed 1s. Known-invalid identities are now rejected by
+a read-only preflight before queueing; successful preflight never bypasses the
+full authentication check after admission. The intermediate mutation-drain-only
+experiment still hit the admin deadline; registry reservation also moves that
+backlog outside the drain set. All these failed runs remain failures.
+
+Self-review also covered slow uploads: bounded request bodies are received before
+reserving a writer or joining the mutation set. A stalled bootstrap, registration
+or renewal sender therefore cannot retain the shared PKI writer during upload.
+Canceled requests are rechecked after admission and cannot execute late. Repeated
+regressions cover both writer backlogs, fair scheduling, cancellation, revoked
+preflight, post-wait reauthorization, independent renewal during a registry stall,
+and slow request bodies. Request deadlines and loss criteria are unchanged.
+
+The next complete one-CPU run reached all phases but failed 113 HTTPS samples
+at revocation because the server certificate briefly expired. The 10s fixture
+certificate renewed at 06:19:16.555Z and again at 06:19:26.273Z, immediately after
+bootstrap issuance at 06:19:26.162Z. A bootstrap reservation could retain the PKI
+writer while waiting behind the registry backlog, and maintenance still used the
+normal PKI queue. Bootstrap now uses the priority registry class, and controller
+certificate maintenance uses the priority PKI class. Class alternation preserves
+normal client progress. A real 3s-server-certificate regression holds 32 normal
+writers and verifies that the signer renews before those writers are released.
+The run with 113 failures is retained as a failure, not as a successful capacity
+measurement. Final acceptance uses the subsequent exact-commit CI and recorded
+resource profiles on #66.

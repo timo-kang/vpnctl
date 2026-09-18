@@ -4,6 +4,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,23 @@ func (s *Server) adminPKI(req api.AdminRequest) (api.AdminResponse, error) {
 		if err := s.authority.CheckRotation(strings.TrimPrefix(req.Operation, "ca."), s.caNodeIDs()); err != nil {
 			return out, err
 		}
+	}
+	// Once an admin mutation is admitted it finishes even after disconnect.
+	// Queue before stateMu so waiting for PKI work never drains healthy reads.
+	if req.Operation != "pki.status" {
+		release, _ := s.pkiAdmission.acquirePriority(context.Background())
+		defer release()
+	}
+	if req.Operation != "pki.status" {
+		drainStart := time.Now()
+		if req.Operation == "ca.prepare" {
+			s.mutationAdmission.RLock()
+			defer s.mutationAdmission.RUnlock()
+		} else {
+			s.mutationAdmission.Lock()
+			defer s.mutationAdmission.Unlock()
+		}
+		observeStage("pki_transition", "mutation_drain", drainStart)
 	}
 	// Preparing only adds trust; it cannot invalidate an admitted identity.
 	// Activation/retirement/rollback/revocation retain the exclusive barrier.
