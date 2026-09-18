@@ -29,7 +29,10 @@ func (s *EventSupervisor) Configure(ctx context.Context, cfg config.NodeConfig) 
 		s.Stop()
 		s.key = string(key)
 		s.queue = diagnostic.New("node", cfg.Name)
-		work, cancel := context.WithCancel(ctx)
+		// The lifecycle owner stops delivery after joining producers. Detaching
+		// parent cancellation lets an in-flight durable install enqueue its final
+		// outcome before Stop accounts for every remaining event.
+		work, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		s.cancel, s.done = cancel, make(chan struct{})
 		q, done := s.queue, s.done
 		go func() {

@@ -206,3 +206,27 @@ func TestEventSupervisorSurvivesRegistrationFailureAndReconfigures(t *testing.T)
 		}
 	}
 }
+
+func TestEventSupervisorAccountsForLateOutcomeBeforeOwnerStop(t *testing.T) {
+	received := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parent, cancel := context.WithCancel(context.Background())
+	var events EventSupervisor
+	events.Configure(parent, config.NodeConfig{Name: "robot", Controller: server.URL})
+	defer events.Stop()
+	cancel()
+	// A durable install can finish just after parent cancellation. Its lifecycle
+	// owner has not joined that producer yet, so delivery must still be alive.
+	events.queue.Emit(history.Event{Kind: "certificate", Source: "node-pki", Target: "renew", Current: "installed", Severity: "info", Validity: "observed"})
+	select {
+	case <-received:
+	case <-events.done:
+		t.Fatal("delivery stopped before producer joined")
+	case <-time.After(time.Second):
+		t.Fatal("late outcome lost before owner stop")
+	}
+}
