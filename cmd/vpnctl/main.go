@@ -630,6 +630,8 @@ func nodeServe(args []string) {
 
 	var probes agent.ProbeSupervisor
 	defer probes.Close()
+	var probeHistory agent.ProbeHistorySupervisor
+	defer probeHistory.Stop()
 	var events agent.EventSupervisor
 	defer events.Stop()
 	var credentials credentialSupervisor
@@ -676,6 +678,7 @@ func nodeServe(args []string) {
 		observations.Configure(ctx, *cfg.Node)
 		credentials.configure(*cfg.Node)
 		sessionCtx := events.Configure(ctx, *cfg.Node)
+		sessionCtx = probeHistory.Configure(sessionCtx, *cfg.Node)
 		// A provisioned node may reach its controller only through WireGuard.
 		// Restore the cached relay path before making any controller request.
 		// Incomplete first-time configurations still enroll/sync before WG up.
@@ -1265,7 +1268,7 @@ func handlePing(args []string) {
 		for i := 0; i < *count; i++ {
 			rtt, err := direct.ProbePeer(ctx, ":0", peerAddr, *timeout)
 			success := err == nil
-			o := history.Observation{ID: rand.Text(), Timestamp: time.Now().UTC().Truncate(time.Microsecond), PeerID: p.ID, Path: pathLabel, Success: &success}
+			o := history.Observation{Source: "cli-ping", ID: rand.Text(), Timestamp: time.Now().UTC().Truncate(time.Microsecond), PeerID: p.ID, Path: pathLabel, Success: &success}
 			if success {
 				ms := float64(rtt.Microseconds()) / 1000
 				o.RTTMs = &ms

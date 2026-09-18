@@ -5,17 +5,22 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
 	"vpnctl/internal/addrutil"
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
+	"vpnctl/internal/history"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
+	"vpnctl/internal/observation"
 	"vpnctl/internal/wireguard"
 )
 
@@ -107,7 +112,7 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 				continue
 			}
 			// Up to 32 peers per round, eight concurrent probes/reports. A 15s
-			// round budget plus 1s metrics budget bounds work independently of fleet size.
+			// round budget bounds work independently of fleet size. History delivery is separate.
 			count := min(directRoundPeers, len(snapshot.peers))
 			batch := make([]api.PeerCandidate, count)
 			for i := range batch {
@@ -157,20 +162,32 @@ func measureDirect(ctx context.Context, client *api.Client, cfg config.NodeConfi
 		go func() {
 			defer group.Done()
 			for peer := range jobs {
-				if budget.Err() != nil {
+				if ctx.Err() != nil {
 					return
 				}
+				if budget.Err() != nil {
+					observation.Emit(ctx, unknownDirect(peer.ID, "round_budget_exhausted"))
+					continue
+				}
 				addr, ok := addrutil.ProbeAddr(peer.PublicAddr, peer.Endpoint, peer.ProbePort)
-				if !ok {
+				if !ok || peer.ProbePort > 65535 {
+					observation.Emit(ctx, unknownDirect(peer.ID, "invalid_probe_target"))
 					continue
 				}
 				func() {
 					attempt, stop := context.WithTimeout(budget, 3*time.Second)
 					defer stop()
 					rtt, err := shared.ProbePeer(attempt, addr, 2*time.Second)
+					if ctx.Err() != nil {
+						return
+					} // Shutdown/superseded work is not link failure.
+					o := directObservation(peer.ID, rtt, err)
+					observation.Emit(ctx, o)
 					if attempt.Err() != nil {
 						return
 					}
+					// Keep the existing conservative readiness decision independent of
+					// the history denominator: local errors still invalidate readiness.
 					result := api.DirectResultRequest{NodeID: nodeID, PeerID: peer.ID, Success: err == nil}
 					if err != nil {
 						result.Reason = err.Error()
@@ -206,9 +223,40 @@ func measureDirect(ctx context.Context, client *api.Client, cfg config.NodeConfi
 			slog.Warn("append metrics failed", "err", err)
 		}
 	}
-	report, stop := context.WithTimeout(ctx, time.Second)
-	defer stop()
-	if err := client.SubmitMetrics(report, api.MetricsRequest{NodeID: nodeID, Samples: collected}); err != nil && ctx.Err() == nil {
-		slog.Warn("submit metrics failed", "err", err)
+}
+
+func unknownDirect(peer, reason string) history.Observation {
+	return history.Observation{PeerID: peer, Path: "direct", Source: "agent-direct", Timestamp: time.Now().UTC(), Validity: "unknown", Reason: reason}
+}
+
+// This tests the candidate's public UDP responder, not the WireGuard data path.
+// Local collector/socket failures do not enter the network-attempt denominator.
+func directObservation(peer string, rtt time.Duration, err error) history.Observation {
+	o := unknownDirect(peer, "collector_unavailable")
+	if err == nil {
+		yes, ms := true, float64(rtt.Microseconds())/1000
+		o.Success, o.RTTMs, o.Validity, o.Reason = &yes, &ms, "observed", ""
+		return o
 	}
+	var probeErr *direct.ProbeError
+	if errors.As(err, &probeErr) && !probeErr.Sent && !errors.Is(err, syscall.ENETUNREACH) && !errors.Is(err, syscall.EHOSTUNREACH) && !errors.Is(err, syscall.ECONNREFUSED) {
+		return o
+	}
+	reason := ""
+	var netErr net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		reason = "probe_timeout"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		reason = "responder_unavailable"
+	case errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.EHOSTUNREACH):
+		reason = "route_unreachable"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		reason = "probe_timeout"
+	}
+	if reason != "" {
+		no := false
+		o.Success, o.Validity, o.Reason = &no, "observed", reason
+	}
+	return o
 }

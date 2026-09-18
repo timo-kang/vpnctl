@@ -7,6 +7,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -116,6 +117,25 @@ func TestNetns_AutoSilentFleet(t *testing.T) {
 			observed := netOutput(t, ns[1], "env", "VPNCTL_WORKER=plaintext-metrics", testBin, "-test.run=^TestNetworkWorker$")
 			if !strings.Contains(observed, "vpnctl_direct_probes_total{") || !strings.Contains(observed, "silent-") {
 				t.Fatal("direct failures were not exercised", observed)
+			}
+			// The production agent must upload real failed attempts, not only Prometheus
+			// counters or successful probes. Quotas remain enforced at larger sizes.
+			historyJSON := netOutput(t, ns[1], bin, "fleet", "history", "--config", nodePath, "--node", "node", "--window", "1h", "--bucket", "1h", "--json")
+			var historyResponse api.FleetHistoryResponse
+			if err := json.Unmarshal([]byte(historyJSON), &historyResponse); err != nil {
+				t.Fatal(err, historyJSON)
+			}
+			failed := 0
+			for _, node := range historyResponse.Nodes {
+				for _, bucket := range node.Buckets {
+					if bucket.Source != "agent-direct" || bucket.Successes != 0 || bucket.AvgRTTMs != nil || bucket.Count > 0 && (bucket.LossPct == nil || *bucket.LossPct != 100) {
+						t.Fatal("silent candidate history is misleading", bucket)
+					}
+					failed += bucket.Count
+				}
+			}
+			if failed == 0 {
+				t.Fatal("automatic failed probes missing from central API", historyJSON)
 			}
 			if route := netOutput(t, ns[1], "ip", "route", "get", "10.77.0.1"); !strings.Contains(route, "dev wg0") {
 				t.Fatal("uplink bypassed WG", route)

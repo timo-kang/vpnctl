@@ -8,6 +8,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+var ProbeHistoryDeliveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "vpnctl_probe_history_delivery_total",
+	Help: "Best-effort raw probe history delivery by fixed result; resets at restart",
+}, []string{"result"})
+
 var DiagnosticDeliveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "vpnctl_diagnostic_delivery_total",
 	Help: "Best-effort automatic event delivery by fixed role and result; counters reset at process restart",

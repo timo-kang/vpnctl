@@ -92,20 +92,13 @@ func TestUplinkPersistenceRetryUnknownAndBackup(t *testing.T) {
 	}
 }
 func TestUplinkMigrationFromV1PreservesPeerData(t *testing.T) {
-	now := time.Now()
-	path := filepath.Join(t.TempDir(), "old.db")
-	s, e := Open(path, now)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = s.Ingest(context.Background(), "robot", []Observation{obs("before-migration", now, pointer(9.))}, now); e != nil {
-		t.Fatal(e)
-	}
+	s, now := legacyStore(t, 1)
+	path := s.path
 	db, e := connect(path, false)
 	if e != nil {
 		t.Fatal(e)
 	}
-	_, e = db.Exec(`DROP TABLE events;DROP TABLE event_metadata;DROP TABLE uplink_series;DROP TABLE uplink_results;DROP TABLE uplink_snapshots;DROP TABLE uplink_latest;DROP TABLE uplink_metadata;PRAGMA user_version=1;`)
+	_, e = db.Exec(`INSERT INTO streams(node,peer,path,relay,uplink) VALUES('robot','peer','relay','controller','wlan0'); INSERT INTO probes(stream,id,ts,rtt) VALUES(1,'before-migration',?,9000); UPDATE metadata SET row_count=1`, now.UnixMicro())
 	db.Close()
 	if e != nil {
 		t.Fatal(e)

@@ -34,10 +34,13 @@ var (
 	ErrCapacity = errors.New("history capacity reached")
 )
 
-// Observation is one completed probe, not a mean over an unspecified batch.
+// Observation is one probe outcome, including an explicit unavailable observation.
 // Path/relay/uplink are reporter claims, not independently verified route state.
 type Observation struct {
 	ID        string    `json:"id"`
+	Source    string    `json:"source,omitempty"`
+	Validity  string    `json:"validity,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 	PeerID    string    `json:"peer_id"`
 	Path      string    `json:"path"`
@@ -48,6 +51,7 @@ type Observation struct {
 }
 
 type Stream struct {
+	Source  string `json:"source"`
 	NodeID  string `json:"node_id"`
 	PeerID  string `json:"peer_id"`
 	Path    string `json:"path"`
@@ -58,12 +62,15 @@ type Stream struct {
 type Measurement struct {
 	Stream
 	quality.PeerQuality
+	Validity string `json:"validity"`
+	Reason   string `json:"reason"`
 }
 
 type Bucket struct {
 	Stream
 	Time            time.Time `json:"time"` // lower, exclusive edge; upper edge is time + width
 	Count           int       `json:"sample_count"`
+	UnknownCount    int       `json:"unknown_count"`
 	Successes       int       `json:"success_count"`
 	AvailabilityPct *float64  `json:"availability_pct"` // successes / attempts, not wall-time uptime
 	AvgRTTMs        *float64  `json:"avg_rtt_ms"`
@@ -95,7 +102,28 @@ func Validate(node string, o Observation, now time.Time) error {
 	if o.Timestamp.IsZero() || o.Timestamp.After(now) || !o.Timestamp.After(now.Add(-Retention)) {
 		return fmt.Errorf("%w: timestamp must be in (now-7d, now]", ErrInvalid)
 	}
-	if o.Success == nil || (*o.Success && o.RTTMs == nil) || (!*o.Success && o.RTTMs != nil) {
+	switch o.Source {
+	case "", "legacy-probe", "cli-ping", "agent-direct", "monitor-overlay":
+	default:
+		return fmt.Errorf("%w: unsupported probe source", ErrInvalid)
+	}
+	if o.Source == "agent-direct" && o.Path != "direct" {
+		return fmt.Errorf("%w: candidate probe requires direct path", ErrInvalid)
+	}
+	if o.Success != nil && *o.Success && o.Reason != "" {
+		return fmt.Errorf("%w: successful probe cannot carry an error reason", ErrInvalid)
+	}
+	if !validLabel(o.Reason, false) || len(o.Reason) > 64 {
+		return fmt.Errorf("%w: invalid probe reason", ErrInvalid)
+	}
+	if o.Success == nil {
+		if o.Validity != "unknown" || o.Reason == "" || o.RTTMs != nil {
+			return fmt.Errorf("%w: unknown requires reason and null success/RTT", ErrInvalid)
+		}
+	} else if o.Validity != "" && o.Validity != "observed" {
+		return fmt.Errorf("%w: completed probe requires observed validity", ErrInvalid)
+	}
+	if o.Success != nil && ((*o.Success && o.RTTMs == nil) || (!*o.Success && o.RTTMs != nil)) {
 		return fmt.Errorf("%w: success requires RTT; failure requires null RTT", ErrInvalid)
 	}
 	if o.RTTMs != nil && (math.IsNaN(*o.RTTMs) || math.IsInf(*o.RTTMs, 0) || *o.RTTMs < 0 || *o.RTTMs > 60_000) {
@@ -121,3 +149,15 @@ type Storage interface {
 }
 
 var _ Storage = (*Store)(nil)
+
+// Canonicalize preserves compatibility with the original completed-probe API.
+func (o Observation) Canonicalize() Observation {
+	if o.Source == "" {
+		o.Source = "legacy-probe"
+	}
+	if o.Validity == "" && o.Success != nil {
+		o.Validity = "observed"
+	}
+	o.Timestamp = o.Timestamp.UTC().Truncate(time.Microsecond)
+	return o
+}

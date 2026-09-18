@@ -155,7 +155,7 @@ func TestOutOfOrderAndWindowEdges(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer db.Close()
-	if _, e = db.Exec("INSERT INTO probes VALUES(1,'future',?,999999)", now.Add(time.Hour).UnixMicro()); e != nil {
+	if _, e = db.Exec("INSERT INTO probes(stream,id,ts,rtt) VALUES(1,'future',?,999999)", now.Add(time.Hour).UnixMicro()); e != nil {
 		t.Fatal(e)
 	}
 	if query(t, s, now)[3].Count != 2 {

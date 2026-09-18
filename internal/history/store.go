@@ -150,7 +150,7 @@ func Open(path string, now time.Time) (*Store, error) {
 		if e = tx.Commit(); e != nil {
 			return nil, e
 		}
-	} else if (version != 1 && version != 2 && version != 3 && version != 4) || app != applicationID {
+	} else if (version != 1 && version != 2 && version != 3 && version != 4 && version != 5) || app != applicationID {
 		return nil, fmt.Errorf("unsupported history schema: version=%d application=%d", version, app)
 	}
 	if version < 2 {
@@ -183,6 +183,11 @@ func Open(path string, now time.Time) (*Store, error) {
 	// Older binaries must refuse this database instead of misvalidating backups.
 	if version < 4 {
 		if _, err = db.ExecContext(ctx, "PRAGMA user_version=4"); err != nil {
+			return nil, err
+		}
+	}
+	if version < 5 {
+		if err = migrateProbes(ctx, db); err != nil {
 			return nil, err
 		}
 	}
@@ -234,13 +239,13 @@ type streamRow struct {
 }
 
 func readStreams(ctx context.Context, db reader, node string) ([]streamRow, error) {
-	query := "SELECT id,node,peer,path,relay,uplink FROM streams"
+	query := "SELECT id,node,peer,path,relay,uplink,source FROM streams"
 	var args []any
 	if node != "" {
 		query += " WHERE node=?"
 		args = append(args, node)
 	}
-	query += " ORDER BY node,peer,path,relay,uplink LIMIT 257"
+	query += " ORDER BY node,peer,path,relay,uplink,source LIMIT 257"
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -249,7 +254,7 @@ func readStreams(ctx context.Context, db reader, node string) ([]streamRow, erro
 	var out []streamRow
 	for rows.Next() {
 		var s streamRow
-		if err = rows.Scan(&s.id, &s.NodeID, &s.PeerID, &s.Path, &s.RelayID, &s.Uplink); err != nil {
+		if err = rows.Scan(&s.id, &s.NodeID, &s.PeerID, &s.Path, &s.RelayID, &s.Uplink, &s.Source); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -266,7 +271,7 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 	now = now.UTC().Truncate(time.Microsecond)
 	observations = append([]Observation(nil), observations...)
 	for i := range observations {
-		observations[i].Timestamp = observations[i].Timestamp.UTC().Truncate(time.Microsecond)
+		observations[i] = observations[i].Canonicalize()
 	}
 	for _, o := range observations {
 		if err := Validate(node, o, now); err != nil {
@@ -298,9 +303,9 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 	affected := map[int64]Stream{}
 	added := int64(0)
 	for _, o := range observations {
-		st := Stream{node, o.PeerID, o.Path, o.RelayID, o.Uplink}
+		st := Stream{NodeID: node, PeerID: o.PeerID, Path: o.Path, RelayID: o.RelayID, Uplink: o.Uplink, Source: o.Source}
 		var id int64
-		err = tx.QueryRowContext(ctx, "SELECT id FROM streams WHERE node=? AND peer=? AND path=? AND relay=? AND uplink=?", node, o.PeerID, o.Path, o.RelayID, o.Uplink).Scan(&id)
+		err = tx.QueryRowContext(ctx, "SELECT id FROM streams WHERE node=? AND peer=? AND path=? AND relay=? AND uplink=? AND source=?", node, o.PeerID, o.Path, o.RelayID, o.Uplink, o.Source).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			var total, own int
 			if err = tx.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(node=?),0) FROM streams", node).Scan(&total, &own); err != nil {
@@ -309,7 +314,7 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 			if total >= MaxStreams || own >= MaxNodeStreams {
 				return ErrCapacity
 			}
-			res, e := tx.ExecContext(ctx, "INSERT INTO streams(node,peer,path,relay,uplink) VALUES(?,?,?,?,?)", node, o.PeerID, o.Path, o.RelayID, o.Uplink)
+			res, e := tx.ExecContext(ctx, "INSERT INTO streams(node,peer,path,relay,uplink,source) VALUES(?,?,?,?,?,?)", node, o.PeerID, o.Path, o.RelayID, o.Uplink, o.Source)
 			if e != nil {
 				return e
 			}
@@ -322,7 +327,7 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 		if o.RTTMs != nil {
 			rtt = int64(math.Round(*o.RTTMs * 1000))
 		}
-		res, e := tx.ExecContext(ctx, "INSERT INTO probes(stream,id,ts,rtt) VALUES(?,?,?,?) ON CONFLICT(stream,id) DO NOTHING", id, o.ID, o.Timestamp.UnixMicro(), rtt)
+		res, e := tx.ExecContext(ctx, "INSERT INTO probes(stream,id,ts,rtt,unknown,reason) VALUES(?,?,?,?,?,?) ON CONFLICT(stream,id) DO NOTHING", id, o.ID, o.Timestamp.UnixMicro(), rtt, o.Success == nil, o.Reason)
 		if e != nil {
 			return e
 		}
@@ -333,10 +338,12 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 		if n == 0 {
 			var ts int64
 			var old sql.NullInt64
-			if e = tx.QueryRowContext(ctx, "SELECT ts,rtt FROM probes WHERE stream=? AND id=?", id, o.ID).Scan(&ts, &old); e != nil {
+			var unknown bool
+			var reason string
+			if e = tx.QueryRowContext(ctx, "SELECT ts,rtt,unknown,reason FROM probes WHERE stream=? AND id=?", id, o.ID).Scan(&ts, &old, &unknown, &reason); e != nil {
 				return e
 			}
-			if ts != o.Timestamp.UnixMicro() || old.Valid != (rtt != nil) || (old.Valid && old.Int64 != rtt.(int64)) {
+			if unknown != (o.Success == nil) || reason != o.Reason || ts != o.Timestamp.UnixMicro() || old.Valid != (rtt != nil) || (old.Valid && old.Int64 != rtt.(int64)) {
 				return ErrConflict
 			}
 		}
@@ -386,7 +393,7 @@ func replay(ctx context.Context, db reader, id int64, st Stream) (Measurement, e
 	}
 	samples := []quality.Sample{}
 	if last.Valid {
-		rows, err := db.QueryContext(ctx, "SELECT ts,rtt FROM probes WHERE stream=? AND ts>? AND ts<=? ORDER BY ts,id LIMIT ?", id, last.Int64-int64(2*time.Minute/time.Microsecond), last.Int64, MaxWindowSamples+1)
+		rows, err := db.QueryContext(ctx, "SELECT ts,rtt,unknown,reason FROM probes WHERE stream=? AND ts>? AND ts<=? ORDER BY ts,id LIMIT ?", id, last.Int64-int64(2*time.Minute/time.Microsecond), last.Int64, MaxWindowSamples+1)
 		if err != nil {
 			return Measurement{}, err
 		}
@@ -394,10 +401,12 @@ func replay(ctx context.Context, db reader, id int64, st Stream) (Measurement, e
 		for rows.Next() {
 			var ts int64
 			var rtt sql.NullInt64
-			if err = rows.Scan(&ts, &rtt); err != nil {
+			var unknown bool
+			var reason string
+			if err = rows.Scan(&ts, &rtt, &unknown, &reason); err != nil {
 				return Measurement{}, err
 			}
-			samples = append(samples, quality.Sample{Timestamp: time.UnixMicro(ts).UTC(), RTTus: rtt.Int64, Success: rtt.Valid})
+			samples = append(samples, quality.Sample{Timestamp: time.UnixMicro(ts).UTC(), RTTus: rtt.Int64, Success: rtt.Valid, Unknown: unknown, Reason: reason})
 		}
 		if err = rows.Err(); err != nil {
 			return Measurement{}, err
@@ -416,7 +425,22 @@ func replay(ctx context.Context, db reader, id int64, st Stream) (Measurement, e
 		at := time.UnixMicro(lastSuccess.Int64).UTC()
 		q.LastSuccessAt = &at
 	}
-	return Measurement{Stream: st, PeerQuality: q}, nil
+	m := Measurement{Stream: st, PeerQuality: q, Validity: "unknown", Reason: "no_samples"}
+	if len(samples) > 0 {
+		last := samples[len(samples)-1]
+		m.Reason = last.Reason
+		if !last.Unknown {
+			m.Validity = "observed"
+		}
+	}
+	// A public candidate echo is not evidence about the installed VPN path.
+	if st.Source == "agent-direct" {
+		m.SetLevel(quality.QualityUnknown)
+		if m.Validity == "observed" {
+			m.ErrorReason = "candidate_probe_only"
+		}
+	}
+	return m, nil
 }
 
 func (s *Store) Latest(now time.Time) map[string][]Measurement {

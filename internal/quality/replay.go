@@ -13,7 +13,7 @@ func ReplayQuality(samples []Sample) PeerQuality {
 	w := NewWindow()
 	q := PeerQuality{Quality: "unknown", Level: QualityUnknown, Window: cfg.Window.Seconds(), Stale: true, ErrorReason: "no_samples"}
 	for _, s := range samples {
-		q = w.Observe(s.Timestamp, Outcome{RTTus: s.RTTus, Success: s.Success}, cfg)
+		q = w.Observe(s.Timestamp, Outcome{RTTus: s.RTTus, Success: s.Success, Unknown: s.Unknown, Reason: s.Reason}, cfg)
 	}
 	return q
 }
@@ -41,4 +41,6 @@ type Sample struct {
 	Timestamp time.Time
 	RTTus     int64
 	Success   bool
+	Unknown   bool
+	Reason    string
 }

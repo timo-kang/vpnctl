@@ -12,7 +12,7 @@ snapshot 경쟁 및 명시적 direct 실패 무시도 함께 수정했다. #14/#
 | #43 | registry schema/version 검증, 초기화 표식, restore에 표식 포함 | 기존 누락/빈/null 상태는 WG 적용 전에 거부. 정상 빈 registry와 legacy migration은 허용 |
 | #44 | registry/token/config/PKI의 공통 원자 저장기 및 디렉터리 체인 fsync | 교체 전 실패는 이전 상태 유지. 교체 후 fsync 실패는 새 파일·메모리·WG 유지, 오류 반환 및 다음 변경 전 동기화 재확인 |
 | #45 | node serve 수명의 PKI worker | cached VPN 복원 시도 후 시작, 초기 등록 실패·agent 재시도 중 유지, 설정 대상 변경 시 교체, 종료 시 join |
-| #46 | heartbeat, health, 후보 조회, STUN, direct 측정의 실행 분리 | direct는 동시 요청 8개, round당 최대 32 peer, probe/report 15초+metrics 1초. peer별 2초 probe/3초 총 요청 한도. 큰 fleet은 round-robin |
+| #46 | heartbeat, health, 후보 조회, STUN, direct 측정의 실행 분리 | direct는 동시 요청 8개, round당 최대 32 peer, probe/report 15초, 이력 업로드는 별도 유한 큐. peer별 2초 probe/3초 총 요청 한도. 큰 fleet은 round-robin |
 | #47 | 발급 후 registry 게시, pending→enrolled/online 가입 상태 | single-use 소비 유지. 실패한 신규 발급은 node/lease 없음. 응답 유실은 같은 이름+새 token으로 복구. 미사용 pending은 관리 삭제 |
 | #14 부분 | snapshot mutex 및 각 reader/subscriber에 slice 복제 | consumer 변경이 다른 snapshot을 덮어쓰지 않음. 짧은 key의 표시용 slicing도 안전하게 처리 |
 | #20 부분 | 실패 보고 시 양방향 과거 성공 제거 | mutual/either 모드 모두 과거 성공으로 계속 ready가 되지 않음 |

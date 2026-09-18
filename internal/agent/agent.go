@@ -25,6 +25,9 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 	var events EventSupervisor
 	ctx = events.Configure(ctx, cfg)
 	defer events.Stop()
+	var history ProbeHistorySupervisor
+	ctx = history.Configure(ctx, cfg)
+	defer history.Stop()
 	var probes ProbeSupervisor
 	defer probes.Close()
 	if err := probes.Configure(cfg); err != nil {
@@ -51,6 +54,9 @@ func RunSession(ctx context.Context, cfg config.NodeConfig) error {
 	var events EventSupervisor
 	ctx = events.Configure(ctx, cfg)
 	defer events.Stop()
+	var history ProbeHistorySupervisor
+	ctx = history.Configure(ctx, cfg)
+	defer history.Stop()
 	client := newClient(cfg)
 	defer client.CloseIdleConnections()
 	return runSession(ctx, cfg, client)

@@ -1,10 +1,10 @@
 # 중앙 fleet 관측 계약 v2
 
 `/fleet/status`, `/fleet/history`는 `schema_version: 2`를 반환한다. controller의
-`data_dir/history.db`에 실제 개별 probe를 저장한다. `ping --config node.yaml`이
-생산자이며 기본 `--submit=true`이다. `node serve`의 heartbeat/direct 후보 탐색이나
-독립 `monitor`의 표본이 자동으로 중앙 업로드되는 것은 아니다. 연속 관측은 배포 측에서
-주기적으로 ping을 실행하거나 아래 ingestion 계약을 구현해야 한다.
+`data_dir/history.db`에 실제 개별 probe를 저장한다. `ping --config node.yaml`은
+기본 `--submit=true`이고, `node serve`의 자동 direct 후보 탐색도 기존 probe 결과를
+중앙에 전송한다. direct 후보의 public UDP 응답은 설치된 VPN 경로의 품질 증거가 아니다.
+독립 `monitor`의 로컬 DB는 아직 자동 업로드하지 않는다(#70 후속).
 
 ```sh
 vpnctl ping --config node.yaml --peer robot-b --path relay --count 12 --interval 5s
@@ -29,6 +29,8 @@ underlay 사이의 실제 경로 선택·전환 검증은 M3의 범위다.
   "node_id": "robot-a",
   "observations": [{
     "id": "producer-generated-unique-id",
+    "source": "cli-ping",
+    "validity": "observed",
     "timestamp": "2026-09-17T05:00:00.123456Z",
     "peer_id": "robot-b",
     "path": "relay",
@@ -42,7 +44,7 @@ underlay 사이의 실제 경로 선택·전환 검증은 M3의 범위다.
 
 - `node_id`는 인증서의 등록 identity와 같아야 한다. peer는 다른 등록 노드여야 한다.
   relay는 다른 등록 노드, `controller`, 또는 미확인인 빈 문자열이다.
-- `(node_id, peer_id, path, relay_id, uplink)`를 하나의 stream으로 구분한다. 서로 다른
+- `(node_id, peer_id, path, relay_id, uplink, source)`를 하나의 stream으로 구분한다. 서로 다른
   peer/경로/망 표본을 한 품질 값으로 섞지 않는다. path는 `direct|relay|unknown`이다.
 - ID는 stream 안에서 고유하다. 같은 ID와 같은 정규화 내용의 재전송은 204로 응답하되
   한 번만 집계한다. 같은 ID의 내용이 바뀌면 409이며 같은 batch의 다른 신규 표본도
@@ -51,8 +53,14 @@ underlay 사이의 실제 경로 선택·전환 검증은 M3의 범위다.
 - timestamp는 UTC microsecond로 정규화한다. `(수신 현재 시각 - 7일, 현재 시각]`만
   허용한다. 순서가 뒤바뀐 정상 표본은 수용하며 최신 시각 기준으로 품질을 재계산한다.
   생산자와 controller 시계가 동기화되어야 한다. 미래 표본은 400으로 거절한다.
-- `success`는 필수다. 성공은 유한한 RTT `[0,60000]` ms가 필수이고, 실패는 RTT가
-  `null`이어야 한다. 0 ms 성공과 RTT 미측정을 구별한다. 저장 RTT는 microsecond 반올림이다.
+- `source`는 `legacy-probe|cli-ping|agent-direct|monitor-overlay`다. 생략한 구형 요청은
+  `legacy-probe`로 저장한다. `monitor-overlay`는 후속 생산자를 위한 허용값이며 현재 자동
+  생산자가 아니다. source 역시 인증된 노드의 보고값으로 별도 원격 검증을 뜻하지 않는다.
+- 완료된 probe는 `success: true|false`, `validity: observed`다(구형 요청은 validity 생략 가능).
+  성공은 유한한 RTT `[0,60000]` ms가 필수이고 실패는 RTT가 `null`이어야 한다.
+  미실행/수집 불가는 `success: null`, `rtt_ms: null`, `validity: unknown`과 비어 있지 않은
+  `reason`(제어문자 없는 64 bytes 이하)을 보낸다. unknown은 실패/성공 분모에서 제외한다.
+  0 ms 성공과 미측정을 구별하며 저장 RTT는 microsecond 반올림이다.
 - ID와 label은 128 bytes 이하이며 제어문자를 허용하지 않는다. 한 노드 최대 16개,
   전체 최대 256개의 보존 stream을 허용한다. 최근 2분 replay는 stream당 1,200개까지다.
 - 잘못된 요청은 400, 다른 identity는 403, ID 충돌은 409, 용량/저장/시간 제한은 503이다.
@@ -90,9 +98,9 @@ history는 controller가 잡은 `(start,end]` snapshot을 조회한다. 기본 w
 `node_id`로 보고 노드를 제한할 수 있고 미등록 노드는 404다.
 
 - 각 bucket의 `time`은 열린 하한이며 상한은 `min(time + bucket_seconds, end)`이다.
-- `sample_count`, `success_count`, 성공 RTT 평균, 성공 RTT의 **정확한 nearest-rank p95**,
+- `sample_count`(실제 시도), `success_count`, `unknown_count`(미실행/수집 불가), 성공 RTT 평균, 성공 RTT의 **정확한 nearest-rank p95**,
   `loss_pct`, `availability_pct`를 반환한다. p95는 batch 평균의 percentile이 아니다.
-- availability는 `성공 probe / 전체 probe × 100`이다. 시간 가동률이나 수집 공백의
+- availability는 `성공 probe / 실제 시도 probe × 100`이다. unknown과 표본 공백은 분모에서 제외한다. 시간 가동률이나 수집 공백의
   도달 가능성을 추정하지 않는다. 모든 빈 bucket의 측정값은 null이다.
 - 보존된 stream에는 빈 시간 bucket도 반환한다. 표본이 전혀 없는 노드는 `buckets: []`다.
 - query는 read transaction 하나로 일관된 snapshot을 읽는다. 긴 SQLite 읽기는 인증 상태
@@ -102,7 +110,7 @@ history는 controller가 잡은 `(start,end]` snapshot을 조회한다. 기본 w
 
 ## 용량, retention, 배포와 복구
 
-영속 schema v2 (기존 peer tables는 v1 계약 유지), application ID `0x76706368`, SQLite 4096-byte page, FULL 동기화의 WAL을
+영속 schema v5 (v1~v4에서 자동 전환), application ID `0x76706368`, SQLite 4096-byte page, FULL 동기화의 WAL을
 사용한다. modernc SQLite v1.46.2 (SQLite 3.51.3)와 해당 릴리스의 libc v1.70.0을 사용한다.
 긴 read snapshot 동안에도 새 표본을 commit할 수 있다. 빈 v0 DB는 v1 초기화 후 v2로, 기존 v1 DB는 v2로 원자적 단계 이관한다. 알 수 없는 미래 버전이나 다른 제품의
 DB를 덮어쓰지 않는다. DB는 0600이며 파일이 아닌 경로와 symlink는 거절한다.
@@ -173,8 +181,54 @@ VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 ./scripts/test-netns.sh
 
 ## Staged uplink extension
 
-Schema 2 of the SQLite database additionally stores separate robot → target
+The uplink tables introduced in database schema 2 store separate robot → target
 snapshots and target/protocol summaries. The fleet peer API remains schema 2.
 See [uplink observation](uplink-observation.md) for the new opt-in automatic
 producer, endpoint schema 1 API, shared capacity budgets and migration/rollback
 procedure. Startup maintenance for the combined datasets has a 60-second budget.
+
+## 자동 direct 생산자와 운영 한계
+
+`node serve` 및 agent 실행은 추가 probe 없이 같은 direct 결과를 `source: agent-direct`,
+`path: direct`로 전송한다. `probe_timeout`, `responder_unavailable`, `route_unreachable`은
+실제 시도 실패다. 잘못된 대상/포트는 `invalid_probe_target`, DNS·로컬 socket/자원 오류나
+송신 이전 timeout은 `collector_unavailable`, round 예산 때문에 미실행한 대상은
+`round_budget_exhausted` unknown이다. 종료 또는 새 후보 목록으로 취소된 진행 중 작업은
+네트워크 실패로 기록하지 않는다. readiness 제어용 `/direct-result`와 raw 이력 전송은 별도다.
+
+public UDP 성공만으로 WireGuard, relay 또는 서버 uplink가 정상이라고 판정하지 않는다.
+이 source의 fleet `quality`는 항상 `unknown`이고, 완료된 표본은 `candidate_probe_only`를
+표시한다. 관측 RTT/loss와 시각·source는 그대로 확인할 수 있다. 수집 불가 표본은 live
+품질 판단을 초기화하며 RTT/loss는 null이 된다. 시간 bucket은 보존된 성공·실패의 분모를
+계속 제공한다. status의 17초 신선도와 60초 품질 window는 기존 계약을 유지한다.
+
+프로세스별 큐는 최대 256개 대기 + 1개 전송 중이며 표본마다 128-bit 난수 ID를 부여한다.
+프로세스 재시작도 ID를 재사용하지 않고, 재전송은 ID/UTC microsecond timestamp/본문을
+변경하지 않는다. 한 표본 최대 5회, 요청당 3초, backoff 1/2/4/8초다. 400/404/409/413은
+즉시 폐기하며 401/403/503 및 네트워크 실패는 유한 재시도한다. 인증 정보는 기존 credential
+client로 매 요청 갱신한다. 이 큐는 heartbeat·PKI 갱신·route apply를 기다리게 하지 않는다.
+
+메모리 큐이므로 종료·overflow·거절·retry 소진에 따른 손실은 가능하다. 이력은 전달된
+표본의 집계이며 수집 공백을 시간 가동률 100%로 바꾸지 않는다. 손실은 node 로그의
+`probe history incomplete` 누계와 `vpnctl_probe_history_delivery_total{result}`에 기록한다.
+result는 queued/delivered/retry 및 overflow_dropped/stopped_dropped/shutdown_dropped/
+rejected_dropped/exhausted_dropped로 고정한다. node serve 자체는 Prometheus HTTP
+listener를 제공하지 않으므로 현 배포의 기본 운영 신호는 node 로그다.
+
+7일·4백만 raw rows·노드당 16/전체 256 stream·1 GiB 한도는 유지한다. source별로 별도
+stream을 사용하므로 legacy와 새 source가 공존하면 둘 다 quota를 소비한다. 32노드 시험은
+노드당 1 stream × 5초 표본의 예산이며 32×31 full mesh 관측 보장과 다르다. 31-peer 자동
+탐색은 기본 60초 간격이어도 7일에 천만 건 수준이므로 현재 모든 raw 표본을 보존할 수
+없다. 초과는 503/큐 손실로 명시되며 무제한 메모리·디스크 증가로 우회하지 않는다.
+생산자 cadence/선택 정책, downsampling, 용량 health 및 모든 peer의 공정한 관측은
+#71에서 집중 처리하며 #17/#70 후속 검증과 연결한다.
+
+기존 node의 선택적 `metrics_path` CSV는 성공 표본만 보존하는 호환 출력이다. 자동 agent는
+중앙 legacy `/metrics.samples`로 같은 성공 표본을 이중 저장하지 않으며 중앙 조회는
+`fleet history`를 사용한다. perf 등 다른 legacy 생산자와 기존 CSV 파일은 유지된다.
+
+배포 전 controller를 정지하고 위 명령으로 v1~v4 백업을 보관한다. 최초 새 바이너리 실행은
+stream ID와 모든 probe를 보존하며 작은 streams 표만 재구성하고 raw probe에 validity/reason
+열을 추가한다. unknown도 retention/row quota에 포함된다. 구버전 바이너리는 v5 DB를
+거부하므로 롤백은 정지 상태에서 구버전 바이너리와 해당 버전의 DB 백업을 함께 복원한다.
+`user_version`을 강제로 낮추지 않는다.

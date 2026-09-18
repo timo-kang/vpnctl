@@ -33,14 +33,17 @@ func TestHistoryScale(t *testing.T) {
 	}
 	total := 0
 	for n := 0; n < 32; n++ {
-		res, e := tx.Exec("INSERT INTO streams(node,peer,path,relay,uplink) VALUES(?,'server','relay','controller','wlan0')", fmt.Sprintf("robot-%02d", n))
+		res, e := tx.Exec("INSERT INTO streams(node,peer,path,relay,uplink,source) VALUES(?,'server','direct','','','agent-direct')", fmt.Sprintf("robot-%02d", n))
 		if e != nil {
 			t.Fatal(e)
 		}
 		id, _ := res.LastInsertId()
 		count := int(Retention / step)
 		_, e = tx.Exec(`WITH RECURSIVE samples(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM samples WHERE i<?)
-    INSERT INTO probes(stream,id,ts,rtt) SELECT ?,cast(i AS TEXT),?+i*?,CASE WHEN i%10=0 THEN NULL ELSE 12000 END FROM samples`, count, id, now.Add(-Retention).UnixMicro(), step.Microseconds())
+    INSERT INTO probes(stream,id,ts,rtt,unknown,reason)
+    SELECT ?,printf('%016x%06x',0,i),?+i*?,CASE WHEN i%10=0 THEN NULL ELSE 12000 END,
+    CASE WHEN i%20=0 THEN 1 ELSE 0 END,
+    CASE WHEN i%20=0 THEN 'collector_unavailable' WHEN i%10=0 THEN 'probe_timeout' ELSE '' END FROM samples`, count, id, now.Add(-Retention).UnixMicro(), step.Microseconds())
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -74,7 +77,7 @@ func TestHistoryScale(t *testing.T) {
 		}
 		got := 0
 		for _, b := range bs {
-			got += b.Count
+			got += b.Count + b.UnknownCount
 			if b.Successes > 0 && (b.P95RTTMs == nil || *b.P95RTTMs != 12) {
 				t.Fatal(b)
 			}
