@@ -4,32 +4,25 @@ controller의 `history.db`는 peer probe, uplink snapshot, 상태 전환 이벤�
 
 ## 공통 측정 봉투
 
-모든 producer는 다음 의미를 유지한다.
+공통 `metrics.Envelope`/`Measurement` 타입은 현재 설계용이며 producer와 영속 저장 경로에 연결되지 않았다. 실제 계약은 peer `history.Observation`, uplink `uplink.Snapshot`, 진단 `history.Event`다. #17은 아직 완료되지 않았다.
 
-| 필드 | 의미 |
-| --- | --- |
-| `node_id` | 보고한 로봇의 등록 identity |
-| `target` | peer, server/relay target 또는 link ID |
-| `relay` | 선택된 relay identity 또는 빈 값 |
-| `underlay` | ethernet/wifi/lte 등 실제 관측한 링크 |
-| `overlay_path` | direct/relay/unknown. 보고값이며 경로 증명으로 해석하지 않는다 |
-| `timestamp` | cycle 완료 시각(UTC, microsecond) |
-| `source` | `uplink-observer`, `agent`, `controller`, `monitor`처럼 고정된 producer |
-| `unit` | RTT는 ms, loss/availability는 percent, transfer는 bytes |
-| `validity` | `observed`, `inferred`, `unknown` |
-
-RTT 집계는 평균과 nearest-rank p50/p95/p99를 함께 제공한다. `unknown` 표본은 손실률 분모나 availability 성공/실패 분모에 넣지 않는다. handshake age와 transfer counter는 원시 snapshot의 시각과 누적 counter에서 계산하며, counter reset은 새 시계열로 취급한다.
+- fleet peer history는 평균/p95/loss/availability를 제공한다. p50/p99는 legacy CSV summary에만 있다.
+- uplink history는 target별 평균 RTT와 availability, 성공/실패/unknown 건수를 제공한다.
+- handshake age·transfer counter의 공통 이력 저장, jitter·percentile 통합, downsampling, DB size/health metric 및 전체 producer를 포함한 장기 soak은 후속 구현 대상이다.
+- `unknown`은 성공/실패 분모에 포함하지 않는다. `source`는 제출자가 적는 진단 메타데이터이며 신뢰된 producer임을 증명하지 않는다.
 
 ## 이벤트 스트림
 
 `POST /events`는 node-bound mTLS로 한 개의 immutable event를 제출한다. uplink snapshot이 수집되면 controller가 같은 DB transaction 안에서 다음 변화를 자동 기록한다.
 
-- `uplink_change`: underlay 또는 link controller 상태 변화
-- `route_change`: target transport interface/gateway 변화
-- `relay_failover`: relay 상태 또는 peer fingerprint 변화
+- `uplink_change`: aggregate underlay 상태 변화
+- `route_change`: target overlay/transport 상태·interface·source·gateway·destination 변화. previous/current는 JSON 문자열이다
+- `relay_failover`: relay 상태·expected relay ID·실제 peer fingerprint 변화. previous/current에 교체 전후 식별자를 보존한다
 - `probe_error`: target service/failure stage 변화
-- `collector_error`: link controller 수집 실패
-- `nat_remap`, `certificate`, `discovery_error`: agent/controller가 제출하는 명시적 진단 event
+- `collector_error`: link controller 도달성 변화와 복구 (collector freshness 경보와 별개)
+- `nat_remap`, `certificate`, `discovery_error`: API로 수동 제출 가능한 진단 종류. 자동 producer 연결은 아직 없다
+
+target 삭제는 `current: removed`로 기록한다. snapshot 전환은 writer 직렬화 이후의 직전 committed snapshot과 비교하며, 늦게 도착한 과거 snapshot은 현재 상태를 되돌리지 않는다. 자동 이벤트 ID에는 snapshot ID도 포함한다.
 
 이벤트 ID를 생략하면 canonical 필드의 SHA-256으로 결정적으로 생성된다. 같은 ID와 같은 payload의 재전송은 성공으로 처리하고 다른 payload는 conflict로 거부한다. timestamp는 `(now-7d, now]`에 있어야 하며 이벤트·메시지·label 길이는 제한된다.
 
@@ -38,6 +31,8 @@ RTT 집계는 평균과 nearest-rank p50/p95/p99를 함께 제공한다. `unknow
 ## 보존과 용량
 
 - peer/uplink/event 모두 7일 보존이며 실행 중 controller maintenance가 1분마다 bounded transaction으로 정리한다.
+- 자동 이벤트 저장 한도 초과 시 snapshot은 저장하고 해당 이벤트를 생략한다. `vpnctl_events_total{result="capacity_dropped"}`로 확인해야 하며 타임라인을 완전한 감사 로그로 사용하면 안 된다. 수동 제출은 503/ErrCapacity로 실패한다. 이 counter는 프로세스 재시작 시 초기화되므로 외부 Prometheus 보존이 필요하다. 경보는 snapshot으로 계산하므로 이벤트 누락으로 장애가 가려지지 않는다.
+- monitor는 시작 시 및 1분마다 1,000행 단위로 정리한다. 정리 작업은 10초 제한이며 누적 backlog가 있으면 다음 주기에 계속한다.
 - 이벤트는 전체 1,000,000건, 노드당 50,400건으로 제한한다. uplink target series는 기존 256/노드 16 제한을 유지한다.
 - `event_metadata.row_count`와 `uplink_metadata.row_count`를 실제 행 수와 비교해 backup `Check`에서 검증한다.
 - node, target, kind, source는 SQLite row나 Prometheus label의 무제한 사용자 입력으로 사용하지 않는다. Prometheus 이벤트 counter는 고정 kind/severity/result만 label로 갖는다.
@@ -45,14 +40,18 @@ RTT 집계는 평균과 nearest-rank p50/p95/p99를 함께 제공한다. `unknow
 
 ## 경보와 Prometheus
 
-`GET /fleet/alerts?node_id=<id>`는 항상 다음 네 코드를 고정된 순서로 반환한다. 최근 전환이 없으면 `active: false`인 빈 상태를 반환한다.
+`GET /fleet/alerts?node_id=<id>`는 다음 네 코드를 반환한다. `known: false`는 증거 부족이며 정상 판정이 아니다. 경보는 최신 committed snapshot 3개로 계산하고 재시작 시 같은 표본을 복원한다. 수동 진단 이벤트는 경보 상태를 변경하지 않는다. `targets`는 장애 대상 목록이며 하나의 target 복구가 다른 target 장애를 지우지 않는다.
 
 | 코드 | 활성 조건 | 복구 조건 |
 | --- | --- | --- |
-| `no_uplink` | underlay `down` 또는 `unknown` | underlay `up` |
-| `relay_failure` | relay가 `down` 또는 `unknown` | relay `up` |
-| `persistent_loss` | probe service가 `down` | probe service가 `up` |
-| `stale_collector` | collector가 `stale`/`down` | collector `up` |
+| `no_uplink` | fresh underlay `down` | fresh underlay `up` (`unknown`은 판정 불가) |
+| `relay_failure` | fresh target 중 relay `down`이 하나 이상 | 모든 configured relay probe가 `up` |
+| `persistent_loss` | 동일 target/protocol의 최근 3회 연속 service `down`; 표본 간격은 설정 주기의 0.5배 이상, 3배 미만 | 새 service 성공 또는 연속 실패 조건 해제 |
+| `stale_collector` | 마지막 관측 이후 설정 주기 3배 경과 또는 controller 시각 역전 | fresh snapshot 수신 |
+
+과거 관측이 stale이면 다른 세 경보는 unknown으로 표시한다. 한 번도 보고하지 않은 노드는 네 경보 모두 unknown이다. `first_seen`은 판정에 사용한 가장 오래된 증거의 시각이며 장애 시작 전체 이력을 뜻하지 않는다.
+
+`vpnctl_alert_active{code,severity}`는 scrape 시점에 계산한 **활성 경보를 가진 등록 노드 수**다. `vpnctl_alert_unknown`은 증거 부족 노드 수다. API 호출 순서에 영향을 받지 않으며 label은 네 code와 고정 severity뿐이다. 노드별 상세는 인증된 alerts API를 사용한다.
 
 고정 rule 예시는 다음과 같다.
 
@@ -61,24 +60,26 @@ groups:
 - name: vpnctl-event-health
   rules:
   - alert: VPNCTLNoUplink
-    expr: vpnctl_alert_active{code="no_uplink"} == 1
+    expr: vpnctl_alert_active{code="no_uplink"} > 0
     for: 2m
     labels: {severity: critical}
   - alert: VPNCTLRelayFailure
-    expr: vpnctl_alert_active{code="relay_failure"} == 1
+    expr: vpnctl_alert_active{code="relay_failure"} > 0
     for: 1m
     labels: {severity: warning}
   - alert: VPNCTLPersistentLoss
-    expr: vpnctl_alert_active{code="persistent_loss"} == 1
+    expr: vpnctl_alert_active{code="persistent_loss"} > 0
     for: 2m
     labels: {severity: critical}
   - alert: VPNCTLStaleCollector
-    expr: vpnctl_alert_active{code="stale_collector"} == 1
+    expr: vpnctl_alert_active{code="stale_collector"} > 0
     for: 3m
     labels: {severity: warning}
 ```
 
-`vpnctl events --config node.yaml --node robot-01 --window 24h`와 `vpnctl alerts --config node.yaml --node robot-01`은 이 계약을 그대로 출력한다. 알림은 동작이나 route를 변경하지 않는다. VPN은 로봇이 서버 uplink에 도달하는 underlay 선택지 중 하나이며, 이 제품은 선택된 경로를 관측하고 전환 결과를 검증할 수 있게 하는 역할만 한다.
+`vpnctl events --config node.yaml --node robot-01 --window 24h`와 `vpnctl alerts --config node.yaml --node robot-01`은 이 계약을 그대로 출력한다. 알림은 동작이나 route를 변경하지 않는다. VPN은 로봇이 사용 가능한 물리 링크와 relay를 통해 서버 uplink에 도달하는 방법 중 하나이며, 이 제품은 선택된 경로를 관측하고 전환 결과를 검증할 수 있게 하는 역할만 한다.
+
+규칙에 `increase(vpnctl_events_total{result="capacity_dropped"}[5m]) > 0`와 `vpnctl_alert_unknown > 0`도 포함해 타임라인 누락·관측 미설정을 구분해야 한다.
 
 ## 검증 시나리오
 

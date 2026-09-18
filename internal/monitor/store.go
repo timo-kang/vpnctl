@@ -6,6 +6,7 @@ package monitor
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -57,6 +58,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 
+	db.SetMaxOpenConns(1) // serialize in-process writes; cleanup yields between batches
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -127,12 +129,24 @@ func (s *Store) Cleanup(retention time.Duration) (int64, error) {
 
 // CleanupContext allows monitor shutdown to interrupt a busy SQLite cleanup.
 func (s *Store) CleanupContext(ctx context.Context, retention time.Duration) (int64, error) {
-	cutoff := time.Now().Add(-retention).UnixMicro()
-	result, err := s.db.ExecContext(ctx, `DELETE FROM probes WHERE timestamp < ?`, cutoff)
-	if err != nil {
-		return 0, err
+
+	if retention < time.Minute {
+		return 0, fmt.Errorf("retention must be at least one minute")
 	}
-	return result.RowsAffected()
+	cutoff := time.Now().Add(-retention).UnixMicro()
+	var removed int64
+	for {
+		result, err := s.db.ExecContext(ctx, `DELETE FROM probes WHERE rowid IN (SELECT rowid FROM probes WHERE timestamp < ? LIMIT 1000)`, cutoff)
+		if err != nil {
+			return removed, err
+		}
+		n, err := result.RowsAffected()
+		removed += n
+		if err != nil || n < 1000 {
+			return removed, err
+		}
+	}
+
 }
 
 // Summarize returns aggregated per-peer statistics over the given time window.

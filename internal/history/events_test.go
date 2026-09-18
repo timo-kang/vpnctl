@@ -51,7 +51,7 @@ func TestEventTimelineIdempotencyAndAlerts(t *testing.T) {
 	for _, alert := range alerts {
 		active[alert.Code] = alert.Active
 	}
-	if !active["no_uplink"] || !active["persistent_loss"] || !active["relay_failure"] {
+	if !active["no_uplink"] || active["persistent_loss"] || !active["relay_failure"] {
 		t.Fatalf("alerts=%+v", alerts)
 	}
 

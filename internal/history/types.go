@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"vpnctl/internal/quality"
 )
@@ -71,7 +72,7 @@ type Bucket struct {
 }
 
 func validLabel(s string, required bool) bool {
-	if len(s) > 128 || (required && s == "") || strings.TrimSpace(s) != s {
+	if !utf8.ValidString(s) || len(s) > 128 || (required && s == "") || strings.TrimSpace(s) != s {
 		return false
 	}
 	for _, r := range s {

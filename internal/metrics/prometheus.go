@@ -42,13 +42,8 @@ var (
 
 	EventTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "vpnctl_events_total",
-		Help: "Accepted state and diagnostic events by fixed kind and severity",
+		Help: "State and diagnostic events by fixed kind, severity and result (accepted or capacity_dropped)",
 	}, []string{"kind", "severity", "result"})
-
-	AlertActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "vpnctl_alert_active",
-		Help: "Current event-derived alert state by fixed alert code and severity",
-	}, []string{"code", "severity"})
 )
 
 var (

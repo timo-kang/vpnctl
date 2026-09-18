@@ -45,13 +45,14 @@ PRAGMA user_version=1;
 // descriptors. Status reads use only published snapshots, never SQLite locks.
 // Writers and expensive history queries are separately bounded and cancellable.
 type Store struct {
-	path        string
-	writer      chan struct{}
-	query       chan struct{}
-	mu          sync.RWMutex
-	latest      map[int64]Measurement
-	uplinks     map[string]uplink.Snapshot
-	lastCleanup time.Time // writer-owned
+	path         string
+	writer       chan struct{}
+	query        chan struct{}
+	mu           sync.RWMutex
+	latest       map[int64]Measurement
+	uplinks      map[string]uplink.Snapshot
+	uplinkRecent map[string][]uplink.Snapshot
+	lastCleanup  time.Time // writer-owned
 }
 
 func connect(path string, readOnly bool) (*sql.DB, error) {
@@ -185,7 +186,7 @@ func Open(path string, now time.Time) (*Store, error) {
 	if journal != "wal" {
 		return nil, fmt.Errorf("WAL unavailable: %s", journal)
 	}
-	s := &Store{path: path, writer: make(chan struct{}, 1), query: make(chan struct{}, 1), latest: make(map[int64]Measurement), uplinks: make(map[string]uplink.Snapshot)}
+	s := &Store{path: path, writer: make(chan struct{}, 1), query: make(chan struct{}, 1), latest: make(map[int64]Measurement), uplinks: make(map[string]uplink.Snapshot), uplinkRecent: make(map[string][]uplink.Snapshot)}
 	// A fresh process replays retained observations; never restores a stale 'good'
 	// flag. Empty/old history remains explicitly unknown at read time.
 	if err = s.maintainDB(ctx, db, now); err != nil {
