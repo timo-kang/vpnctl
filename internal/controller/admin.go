@@ -147,7 +147,37 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 400, "invalid admin request")
 		return
 	}
-	var response api.AdminResponse
+	// Validate operation and retry keys before consuming bounded mutation capacity.
+	switch req.Operation {
+	case "node.remove", "pki.status", "pki.revoke", "ca.prepare", "ca.activate", "ca.retire", "ca.rollback", "pki.backup", "token.create", "token.list", "token.revoke", "token.result":
+	default:
+		writeJSONError(w, 400, "unknown admin operation")
+		return
+	}
+	operation = req.Operation
+	if req.Operation == "token.create" || req.Operation == "token.result" {
+		if err := pki.ValidateRequestID(req.RequestID); err != nil {
+			writeJSONError(w, 400, err.Error())
+			return
+		}
+	}
+	if req.Operation != "pki.status" && req.Operation != "token.list" && req.Operation != "token.result" {
+		release, admissionErr := s.adminAdmission.acquire(r.Context())
+		if admissionErr != nil {
+			if errors.Is(admissionErr, errAdminOverloaded) {
+				result = "overload"
+				w.Header().Set("Retry-After", "1")
+				writeJSONError(w, http.StatusServiceUnavailable, admissionErr.Error())
+			} else {
+				result = "canceled"
+				writeJSONError(w, http.StatusRequestTimeout, "admin request canceled before admission; operation not started")
+			}
+			return
+		}
+		defer release()
+		defer observeStage("admin_mutation", "execution", time.Now())
+	}
+	response := api.AdminResponse{RequestID: req.RequestID}
 	var err error
 	switch req.Operation {
 	case "node.remove":
@@ -173,7 +203,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusConflict, err.Error())
 			return
 		}
-	case "token.create", "token.list", "token.revoke":
+	case "token.create", "token.list", "token.revoke", "token.result":
 		s.stateMu.RLock()
 		defer s.stateMu.RUnlock()
 		operation, target = req.Operation, "tokens"
@@ -191,9 +221,15 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, 400, "TTL must be a nonnegative duration")
 				return
 			}
-			response.Token, err = s.tokenStore.CreateWithOptions(ttl, req.SingleUse)
+			response.Token, err = s.tokenStore.CreateIdempotent(ttl, req.SingleUse, req.RequestID)
 			if err == nil {
 				target = tokenAuditID(response.Token)
+			}
+		case "token.result":
+			var record pki.TokenRecord
+			record, err = s.tokenStore.CreationResult(req.RequestID)
+			if err == nil {
+				response.TokenRecord = &record
 			}
 		case "token.list":
 			response.Tokens, err = s.tokenStore.Records()
@@ -207,6 +243,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		writeJSONError(w, 400, "unknown admin operation")
+		return
+	}
+	if errors.Is(err, pki.ErrRequestIDConflict) {
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, pki.ErrRequestNotFound) {
+		writeJSONError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	if err != nil {

@@ -104,7 +104,14 @@ func TestAdminCLIProcessesAndCrashRestart(t *testing.T) {
 	if out, err := cliProcess(t, "controller", "init", "--config", cfg).CombinedOutput(); err == nil || !bytes.Contains(out, []byte("already owns data_dir")) {
 		t.Fatalf("second owner: %v: %s", err, out)
 	}
-	token := run("token", "create", "--config", cfg, "--ttl", "2h", "--single-use")
+	token := run("token", "create", "--config", cfg, "--ttl", "2h", "--single-use", "--request-id", "cli-retry")
+	if retry := run("token", "create", "--config", cfg, "--ttl", "2h", "--single-use", "--request-id", "cli-retry"); retry != token {
+		t.Fatal("CLI retry created another token")
+	}
+	var creation pki.TokenRecord
+	if err := json.Unmarshal([]byte(run("token", "result", "--config", cfg, "--request-id", "cli-retry")), &creation); err != nil || creation.Token != token {
+		t.Fatal("CLI could not recover creation result", err)
+	}
 	var records []pki.TokenRecord
 	if err := json.Unmarshal([]byte(run("token", "list", "--json", "--config", cfg)), &records); err != nil {
 		t.Fatal(err)

@@ -72,3 +72,8 @@ var PKIAuthoritySeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Help:    "PKI writer wait/hold, persistence, TLS snapshot, authorization and status duration",
 	Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5, 10, 30},
 }, []string{"stage"})
+// Labels describe admission outcomes, never identities or request IDs.
+var AdminAdmissionTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "vpnctl_admin_admission_total",
+	Help: "Administrative mutations accepted, rejected for overload or canceled before admission",
+}, []string{"result"})

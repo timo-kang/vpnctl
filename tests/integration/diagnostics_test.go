@@ -48,7 +48,9 @@ func TestTraceDistinguishesResponseWait(t *testing.T) {
 }
 
 func TestTelemetryFilterExcludesUnrelatedLabels(t *testing.T) {
-	input := "vpnctl_pki_authority_seconds_bucket{stage=\"persist\",le=\"1\"} 2\n" +
+	input := "vpnctl_admin_admission_total{result=\"overload\"} 3\n" +
+		"vpnctl_admin_admission_secret{key=\"private-marker\"} 1\n" +
+		"vpnctl_pki_authority_seconds_bucket{stage=\"persist\",le=\"1\"} 2\n" +
 		"vpnctl_pki_authority_seconds_secret{key=\"private-marker\"} 1\n" +
 		"vpnctl_system_command_seconds_count{command=\"wg\",result=\"success\"} 1\n" +
 		"vpnctl_controller_stage_seconds_sum{operation=\"identity\",stage=\"registry_wait\"} 0.01\n" +
@@ -56,7 +58,7 @@ func TestTelemetryFilterExcludesUnrelatedLabels(t *testing.T) {
 		"vpnctl_probe_total{peer=\"unrelated-marker\"} 5\n" +
 		"process_cpu_seconds_total 2\n"
 	got := diagnosticMetrics(input)
-	if strings.Contains(got, "marker") || !strings.Contains(got, "process_cpu_seconds_total 2") || strings.Count(got, "\n") != 4 {
+	if strings.Contains(got, "marker") || !strings.Contains(got, "process_cpu_seconds_total 2") || strings.Count(got, "\n") != 5 {
 		t.Fatalf("incorrect diagnostic filtering: %s", got)
 	}
 }

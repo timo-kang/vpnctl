@@ -53,7 +53,7 @@ Usage:
   vpnctl controller status --config <path>
   vpnctl controller history backup --config <path> --out <history.db>
   vpnctl controller history restore --config <path> --file <history.db>
-  vpnctl controller token create|list|revoke --config <path>
+  vpnctl controller token create|list|revoke|result --config <path>
   vpnctl controller pki status|trust|revoke|ca-prepare|ca-activate|ca-retire|ca-rollback|backup --config <path>
   vpnctl controller pki restore --file <backup> --data-dir <fresh-dir> --config-out <path>
   vpnctl node join --config <path> [--token <bootstrap-token> --ca-cert <trusted-ca.pem>]
@@ -289,10 +289,11 @@ func controllerToken(args []string) {
 
 func runControllerToken(args []string) error {
 	if len(args) == 0 {
-		return errors.New("controller token subcommand required (create|list|revoke)")
+		return errors.New("controller token subcommand required (create|list|revoke|result)")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("controller token "+sub, flag.ContinueOnError)
+	requestID := fs.String("request-id", "", "stable token creation request ID; required for result lookup")
 	configPath := fs.String("config", "", "path to YAML config")
 	ttl := fs.String("ttl", "24h", "token lifetime (0s disables expiry)")
 	singleUse := fs.Bool("single-use", false, "consume on the first admitted enrollment attempt")
@@ -312,8 +313,11 @@ func runControllerToken(args []string) error {
 	} else if len(fs.Args()) != 0 {
 		return errors.New("unexpected positional arguments")
 	}
-	if sub != "create" && sub != "list" && sub != "revoke" {
+	if sub != "create" && sub != "list" && sub != "revoke" && sub != "result" {
 		return fmt.Errorf("unknown token subcommand %q", sub)
+	}
+	if sub == "result" && *requestID == "" {
+		return errors.New("--request-id is required for token result")
 	}
 	if sub == "revoke" && token == "" {
 		return errors.New("token value is required")
@@ -326,12 +330,14 @@ func runControllerToken(args []string) error {
 		return errors.New("controller config required")
 	}
 	response, err := api.Admin(context.Background(), cfg.Controller.DataDir, api.AdminRequest{
-		Operation: "token." + sub, Token: token, TTL: *ttl, SingleUse: *singleUse,
+		Operation: "token." + sub, Token: token, TTL: *ttl, SingleUse: *singleUse, RequestID: *requestID,
 	})
 	if err != nil {
 		return err
 	}
 	switch sub {
+	case "result":
+		return json.NewEncoder(os.Stdout).Encode(response.TokenRecord)
 	case "create":
 		fmt.Fprintln(os.Stdout, response.Token)
 	case "revoke":
