@@ -430,7 +430,9 @@ func FuzzValidateAuthoritySnapshot(f *testing.F) {
 				t.Fatal(err)
 			}
 			// Accepted snapshots must also be safe to expose through redacted status.
-			status := (&Authority{state: state}).Status()
+			a := &Authority{}
+			a.publish(state)
+			status := a.Status()
 			if status.Active == "" || status.CACert == "" {
 				t.Fatal("accepted unusable authority")
 			}

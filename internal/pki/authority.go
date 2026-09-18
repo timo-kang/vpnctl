@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"vpnctl/internal/atomicfile"
@@ -97,11 +98,12 @@ type authorityState struct {
 // Authority commits keys, trust, revocations and issuance metadata as one file.
 // Controller ownership must already be held; callers serialize registry changes.
 type Authority struct {
-	mu     sync.RWMutex
-	path   string
-	state  authorityState
-	policy Policy
-	write  func(string, []byte, os.FileMode) error
+	mu        sync.Mutex // serializes writers; never held by committed readers
+	published atomic.Pointer[authorityState]
+	path      string
+	state     authorityState
+	policy    Policy
+	write     func(string, []byte, os.FileMode) error
 }
 
 type AuthorityStatus struct {
@@ -173,6 +175,7 @@ func OpenAuthority(dir string, policy Policy) (*Authority, error) {
 	if err := validateAuthority(a.state); err != nil {
 		return nil, err
 	}
+	a.publish(a.state)
 	if _, err := a.MaintainServer(); err != nil && !errors.Is(err, ErrCARenewalRequired) {
 		return nil, err
 	}
@@ -304,6 +307,7 @@ func (a *Authority) clone() authorityState {
 }
 
 func (a *Authority) commit(next authorityState) error {
+	defer observeAuthority("persist", time.Now())
 	data, err := json.Marshal(next)
 	if err != nil {
 		return err
@@ -312,12 +316,19 @@ func (a *Authority) commit(next authorityState) error {
 		// Rename may have committed before directory fsync failed. Reload the exact
 		// committed bytes so memory never keeps an older revocation/trust decision.
 		if disk, readErr := os.ReadFile(a.path); readErr == nil && string(disk) == string(data) {
-			a.state = next
+			a.publish(next)
 		}
 		return err
 	}
-	a.state = next
+	a.publish(next)
 	return nil
+}
+
+// publish runs under the writer lock (or during construction). Writers only
+// mutate clones, so maps referenced by an older published generation stay immutable.
+func (a *Authority) publish(next authorityState) {
+	a.state = next
+	a.published.Store(&next)
 }
 
 func trustBundle(s authorityState) string {
@@ -338,9 +349,8 @@ func certRecord(cert *x509.Certificate, id, issuer string) CertificateRecord {
 }
 
 func (a *Authority) Status() AuthorityStatus {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	s := a.state
+	defer observeAuthority("status", time.Now())
+	s := *a.published.Load()
 	out := AuthorityStatus{Generation: s.Generation, Phase: s.Phase, Active: s.Active, Previous: s.Previous, Pending: s.Pending, OverlapUntil: s.OverlapUntil, CACert: trustBundle(s), RenewBeforeSeconds: a.policy.ClientRenewBefore.Seconds(), Acks: map[string]TrustAck{}}
 	server, _ := ParseCertificate(s.Server.Cert)
 	out.Server = certRecord(server, "controller", s.Active)
@@ -368,14 +378,14 @@ func (a *Authority) Status() AuthorityStatus {
 }
 
 func (a *Authority) TLSConfig() (*tls.Config, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	pair, err := tls.X509KeyPair([]byte(a.state.Server.Cert), []byte(a.state.Server.Key))
+	defer observeAuthority("tls_snapshot", time.Now())
+	s := *a.published.Load()
+	pair, err := tls.X509KeyPair([]byte(s.Server.Cert), []byte(s.Server.Key))
 	if err != nil {
 		return nil, err
 	}
 	roots := x509.NewCertPool()
-	roots.AppendCertsFromPEM([]byte(trustBundle(a.state)))
+	roots.AppendCertsFromPEM([]byte(trustBundle(s)))
 	return &tls.Config{MinVersion: tls.VersionTLS13, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: roots, Certificates: []tls.Certificate{pair}, SessionTicketsDisabled: true}, nil
 }
 
@@ -393,14 +403,18 @@ var ErrTransitionBlocked = errors.New("CA transition blocked")
 var ErrCertificateDenied = errors.New("certificate revoked, expired or issued by an untrusted CA")
 
 func (a *Authority) validate(cert *x509.Certificate) (string, error) {
+	return validateAuthorityCertificate(a.state, cert)
+}
+
+func validateAuthorityCertificate(s authorityState, cert *x509.Certificate) (string, error) {
 	if cert == nil {
 		return "", ErrCertificateDenied
 	}
-	if record, ok := a.state.Certificates[Fingerprint(cert)]; ok && !record.RevokedAt.IsZero() {
+	if record, ok := s.Certificates[Fingerprint(cert)]; ok && !record.RevokedAt.IsZero() {
 		return "", ErrCertificateDenied
 	}
 	roots := x509.NewCertPool()
-	roots.AppendCertsFromPEM([]byte(trustBundle(a.state)))
+	roots.AppendCertsFromPEM([]byte(trustBundle(s)))
 	chains, err := cert.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})
 	if err != nil || len(chains) == 0 {
 		return "", ErrCertificateDenied
@@ -411,13 +425,26 @@ func (a *Authority) validate(cert *x509.Certificate) (string, error) {
 // Observe checks even established TLS connections against current trust, expiry
 // and revocations. Legacy certificates acquire persisted metadata on first use.
 func (a *Authority) Observe(cert *x509.Certificate, nodeID string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	defer observeAuthority("authorize", time.Now())
+	s := *a.published.Load()
+	if _, err := validateAuthorityCertificate(s, cert); err != nil {
+		return err
+	}
+	fp := Fingerprint(cert)
+	if record, ok := s.Certificates[fp]; ok {
+		if record.NodeID != nodeID {
+			return ErrCertificateDenied
+		}
+		return nil
+	}
+	// Legacy first-use metadata still requires a durable write. Recheck under
+	// the writer lock: revocation/rotation or another first use may have won.
+	unlock := a.lockWriter()
+	defer unlock()
 	issuer, err := a.validate(cert)
 	if err != nil {
 		return err
 	}
-	fp := Fingerprint(cert)
 	if record, ok := a.state.Certificates[fp]; ok {
 		if record.NodeID != nodeID {
 			return ErrCertificateDenied
@@ -430,7 +457,7 @@ func (a *Authority) Observe(cert *x509.Certificate, nodeID string) error {
 }
 
 func (a *Authority) Issue(csr []byte, nodeID string) (string, AuthorityStatus, error) {
-	a.mu.Lock()
+	unlock := a.lockWriter()
 	ca, key, err := parseCA(a.state.CAs[a.state.Active])
 	var signed []byte
 	if err == nil {
@@ -445,7 +472,7 @@ func (a *Authority) Issue(csr []byte, nodeID string) (string, AuthorityStatus, e
 			err = a.commit(next)
 		}
 	}
-	a.mu.Unlock()
+	unlock()
 	if err != nil {
 		return "", AuthorityStatus{}, err
 	}
@@ -453,8 +480,8 @@ func (a *Authority) Issue(csr []byte, nodeID string) (string, AuthorityStatus, e
 }
 
 func (a *Authority) Revoke(fingerprint string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	unlock := a.lockWriter()
+	defer unlock()
 	record, ok := a.state.Certificates[fingerprint]
 	if !ok {
 		return fmt.Errorf("unknown certificate fingerprint")
@@ -469,8 +496,8 @@ func (a *Authority) Revoke(fingerprint string) error {
 }
 
 func (a *Authority) Acknowledge(nodeID string, cert *x509.Certificate, generation uint64) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	unlock := a.lockWriter()
+	defer unlock()
 	if generation != a.state.Generation {
 		return fmt.Errorf("trust generation changed; refresh and retry")
 	}
@@ -491,8 +518,8 @@ func (a *Authority) Acknowledge(nodeID string, cert *x509.Certificate, generatio
 }
 
 func (a *Authority) MaintainServer() (bool, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	unlock := a.lockWriter()
+	defer unlock()
 	cert, err := ParseCertificate(a.state.Server.Cert)
 	if err != nil {
 		return false, err
@@ -538,13 +565,14 @@ func (a *Authority) MaintainServer() (bool, error) {
 // drain all admitted requests. This is advisory: Rotate repeats every check
 // under its write lock with the controller's freshly collected identity set.
 func (a *Authority) CheckRotation(operation string, nodeIDs []string) error {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.checkRotation(operation, nodeIDs)
+	return checkRotation(*a.published.Load(), a.policy, operation, nodeIDs)
 }
 
 func (a *Authority) checkRotation(operation string, nodeIDs []string) error {
-	s := a.state
+	return checkRotation(a.state, a.policy, operation, nodeIDs)
+}
+
+func checkRotation(s authorityState, policy Policy, operation string, nodeIDs []string) error {
 	if s.Generation == ^uint64(0) {
 		return fmt.Errorf("%w: trust generation exhausted", ErrTransitionBlocked)
 	}
@@ -557,7 +585,7 @@ func (a *Authority) checkRotation(operation string, nodeIDs []string) error {
 		if s.Phase != "prepared" {
 			return fmt.Errorf("%w: prepare CA rotation first", ErrTransitionBlocked)
 		}
-		return a.checkAcks(nodeIDs, false)
+		return checkAcks(s, policy, nodeIDs, false)
 	case "rollback":
 		if s.Phase != "prepared" && s.Phase != "overlap" {
 			return fmt.Errorf("%w: no reversible CA transition", ErrTransitionBlocked)
@@ -569,7 +597,7 @@ func (a *Authority) checkRotation(operation string, nodeIDs []string) error {
 		if time.Now().Before(s.OverlapUntil) {
 			return fmt.Errorf("%w: minimum CA overlap has not elapsed", ErrTransitionBlocked)
 		}
-		return a.checkAcks(nodeIDs, true)
+		return checkAcks(s, policy, nodeIDs, true)
 	default:
 		return fmt.Errorf("%w: unknown CA operation", ErrTransitionBlocked)
 	}
@@ -577,8 +605,8 @@ func (a *Authority) checkRotation(operation string, nodeIDs []string) error {
 }
 
 func (a *Authority) Rotate(operation string, nodeIDs []string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	unlock := a.lockWriter()
+	defer unlock()
 	if err := a.checkRotation(operation, nodeIDs); err != nil {
 		return err
 	}
@@ -629,11 +657,11 @@ func (a *Authority) Rotate(operation string, nodeIDs []string) error {
 	return a.commit(next)
 }
 
-func (a *Authority) checkAcks(nodeIDs []string, needActive bool) error {
+func checkAcks(s authorityState, policy Policy, nodeIDs []string, needActive bool) error {
 	for _, id := range nodeIDs {
-		ack, ok := a.state.Acks[id]
-		record, known := a.state.Certificates[ack.Fingerprint]
-		if !ok || !known || ack.Generation != a.state.Generation || record.NodeID != id || !record.RevokedAt.IsZero() || !time.Now().Add(min(2*a.policy.CheckInterval, a.policy.ClientRenewBefore)).Before(record.ExpiresAt) || (needActive && record.Issuer != a.state.Active) {
+		ack, ok := s.Acks[id]
+		record, known := s.Certificates[ack.Fingerprint]
+		if !ok || !known || ack.Generation != s.Generation || record.NodeID != id || !record.RevokedAt.IsZero() || !time.Now().Add(min(2*policy.CheckInterval, policy.ClientRenewBefore)).Before(record.ExpiresAt) || (needActive && record.Issuer != s.Active) {
 			return fmt.Errorf("%w: node %q has not acknowledged current trust/certificate", ErrTransitionBlocked, id)
 		}
 	}
@@ -641,9 +669,7 @@ func (a *Authority) checkAcks(nodeIDs []string, needActive bool) error {
 }
 
 func (a *Authority) Snapshot() ([]byte, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return json.Marshal(a.state)
+	return json.Marshal(a.published.Load())
 }
 func ValidateAuthoritySnapshot(data []byte) error {
 	var state authorityState
@@ -657,9 +683,9 @@ func (a *Authority) CheckInterval() time.Duration { return a.policy.CheckInterva
 // Renew allows one CSR per authenticated parent certificate and signing CA.
 // The durable response makes retries idempotent without issuing unlimited leaves.
 func (a *Authority) Renew(csr []byte, nodeID string, parent *x509.Certificate) (string, AuthorityStatus, error) {
-	a.mu.Lock()
+	unlock := a.lockWriter()
 	signed, err := a.renewLocked(csr, nodeID, parent)
-	a.mu.Unlock()
+	unlock()
 	if err != nil {
 		return "", AuthorityStatus{}, err
 	}

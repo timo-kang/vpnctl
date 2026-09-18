@@ -74,7 +74,7 @@ still leaves the published registry unchanged, and rollback retains its own
 execution budget. Successful reads during a mutation report the last committed
 state, not the current intermediate kernel configuration.
 
-Node removal, revocation, CA transitions and backup retain their exclusive
+Node removal, revocation, CA activation/retirement/rollback and backup retain their exclusive
 admission barrier. Requests admitted before those operations still drain before
 revocation/removal becomes authoritative. Read-only `pki.status` uses shared
 admission so a status poll does not introduce a global writer barrier behind a
@@ -134,7 +134,7 @@ their original strict checks; no samples are discarded.
 
 ```sh
 go test -race ./...
-go test -race ./internal/controller -run 'Test(FleetReads|SerializedRegistry|SlowFleet|RegistryIOPanic|ReadOnlyPKI)' -count=5 -timeout=90s
+go test -race ./internal/controller -run 'Test(FleetReads|SerializedRegistry|SlowFleet|RegistryIOPanic|AdditivePKI|CAActivation)' -count=5 -timeout=90s
 go test -race -tags=integration ./tests/integration -run 'Test(Trace|Telemetry|NetworkAccounting)' -count=5
 go vet ./...
 go vet -tags=integration ./tests/integration
@@ -173,10 +173,69 @@ before the fix all 32 authenticated fleet reads exceed one second; after the fix
 all reads finish while the save remains blocked. The rejected operations finish
 without requiring that admitted mutation to drain.
 
-CA commands now perform a read-only preflight. Actual transitions still acquire
+CA commands now perform a read-only preflight. Activation/retirement/rollback still acquire
 exclusive admission, recollect confirmed identities and repeat every check under
 the authority write lock. A successful preflight cannot authorize a later state:
 tests cover revocation after preflight, duplicate prepare, minimum overlap and a
 new confirmed node arriving while the administrator waits for admission. The fix
 does not relax request deadlines, trust/ack gates, revocation ordering or storage
 semantics. It does not identify every cause of the older unprofiled 287 failures.
+
+
+## PKI committed reads and additive prepare (#58)
+
+The previous registry fix did not isolate authority reads: every TLS config load,
+status/snapshot, and certificate authorization took the same authority mutex as
+issuance, trust acknowledgement, CA updates and their durable file writes. An
+injected blocked write reproduced a one-second deadline failure before this fix.
+This identifies a causal bottleneck; it does not establish the unique cause of
+all seven HTTPS timeouts in historical Actions run `35299442539`.
+
+Authority writers now serialize and mutate deep clones, publishing one immutable
+snapshot only after successful replacement. If replacement succeeds but a later
+write step reports an error, the existing exact-byte disk check still publishes
+the visible state while returning the error. Thus a committed revocation cannot
+be forgotten in memory. TLS configuration, status, snapshots, CA preflight and
+known-certificate authorization read the last published generation. Caller-owned
+TLS objects and status maps cannot mutate the stored snapshot. Legacy first-use
+metadata still takes the writer lock, revalidates current trust, and commits once
+before authorizing; it is intentionally outside the nonblocking known-reader path.
+
+CA prepare only adds a pending trusted root and retains the active signer. It now
+uses shared controller admission. Activation, retirement, rollback, revocation,
+removal and backup keep exclusive admission. Activation recollects confirmed node
+identities after draining requests and repeats acknowledgement checks. A request
+admitted concurrently with prepare may receive the previous generation and must
+refresh/retry its acknowledgement, as for any generation conflict.
+
+The controller request barrier remains essential: a raw Authority read that overlaps
+a write can linearize before that write. Protected controller requests drain before
+a destructive operation and check the newly published state on subsequent admission.
+No guarantee is made that destructive operations on arbitrarily stalled storage meet
+a one-second request objective. They deliberately prevent stale authorization.
+
+`vpnctl_pki_authority_seconds{stage}` separates `writer_wait`, `writer_hold`, `persist`,
+`tls_snapshot`, `authorize`, and `status`. Controller stage metrics additionally
+record `pki_transition/admission_wait` and `pki_transition/exclusive_hold` for the
+security barrier. These fixed labels contain no identity or credential material.
+The integration telemetry allowlist includes the histogram bucket/sum/count families.
+Histograms aggregate overlapping work; do not add their percentiles as a request trace.
+
+Regression coverage deliberately holds prepare, issuance, renewal, acknowledgement,
+server renewal and revocation writes while 32 readers inspect the previous snapshot.
+Actual TLS handshakes and authorization also run with 1/3/8/32 simultaneous clients
+while a write is held. Other checks cover legacy first-use contention, detached return
+values, rejection after revocation/retirement, pre-replacement ENOSPC, post-replacement
+EIO, and a new identity arriving after activation preflight. Request deadlines remain
+one second. Full race tests, repeated fault tests, vet and integration diagnostics pass.
+
+```sh
+go test -race ./...
+go test -race ./internal/pki -run 'Test(CommittedReads|TLSAndAuthorization|LegacyFirstUse|PublishedAuthority|AuthorityFailures|AuthorityPostRename)' -count=5
+go test -race -tags=integration ./tests/integration -run 'Test(Trace|Telemetry|NetworkAccounting)' -count=3
+VPNCTL_RACE=0 VPNCTL_TEST_CPUS=1 ./scripts/test-netns.sh -test.run '^TestNetns_PKILifecycleUplink$'
+VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 ./scripts/test-netns.sh -test.run '^TestNetns_PKILifecycleUplink$'
+```
+
+CPU-quota network measurements and CI evidence are recorded below and on #58.
+Admin overload admission and result ambiguity remain tracked independently in #60.

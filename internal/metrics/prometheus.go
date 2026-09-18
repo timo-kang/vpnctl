@@ -65,3 +65,10 @@ var ControllerStageSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Help:    "Controller handler, admission, registry wait, authorization and transaction duration",
 	Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5, 10, 30},
 }, []string{"operation", "stage"})
+
+// Committed PKI reads are separate from signing and durable persistence.
+var PKIAuthoritySeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "vpnctl_pki_authority_seconds",
+	Help:    "PKI writer wait/hold, persistence, TLS snapshot, authorization and status duration",
+	Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2, 5, 10, 30},
+}, []string{"stage"})

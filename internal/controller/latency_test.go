@@ -289,7 +289,7 @@ func TestRegistryIOPanicRestoresCallerLock(t *testing.T) {
 	}
 }
 
-func TestReadOnlyPKIStatusDoesNotWaitForAdmittedReaders(t *testing.T) {
+func TestAdditivePKIPrepareAndStatusDoNotDrainReaders(t *testing.T) {
 	s, err := NewServer(config.ControllerConfig{DataDir: t.TempDir(), VPNCIDR: "10.7.0.0/24", Listen: "127.0.0.1:0", PKI: &config.PKIConfig{}})
 	if err != nil {
 		t.Fatal(err)
@@ -297,73 +297,66 @@ func TestReadOnlyPKIStatusDoesNotWaitForAdmittedReaders(t *testing.T) {
 	if _, err := s.InitPKI(); err != nil {
 		t.Fatal(err)
 	}
-	s.stateMu.RLock()
-	done := make(chan error, 1)
-	go func() { _, err := s.adminPKI(api.AdminRequest{Operation: "pki.status"}); done <- err }()
-	select {
-	case err := <-done:
-		s.stateMu.RUnlock()
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		s.stateMu.RUnlock()
-		<-done
-		t.Fatal("read-only status took global write admission")
-	}
-}
-
-func TestActualCATransitionStillDrainsAndRechecksNodes(t *testing.T) {
-	for _, op := range []string{"prepare", "activate"} {
-		t.Run(op, func(t *testing.T) {
-			s, err := NewServer(config.ControllerConfig{DataDir: t.TempDir(), VPNCIDR: "10.7.0.0/24", Listen: "127.0.0.1:0", PKI: &config.PKIConfig{}})
+	for _, op := range []string{"pki.status", "ca.prepare"} {
+		s.stateMu.RLock()
+		done := make(chan error, 1)
+		go func() { _, err := s.adminPKI(api.AdminRequest{Operation: op}); done <- err }()
+		select {
+		case err := <-done:
+			s.stateMu.RUnlock()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.InitPKI(); err != nil {
-				t.Fatal(err)
-			}
-			if op == "activate" {
-				if err := s.authority.Rotate("prepare", nil); err != nil {
-					t.Fatal(err)
-				}
-			}
-			s.stateMu.RLock()
-			var once sync.Once
-			release := func() { once.Do(s.stateMu.RUnlock) }
-			defer release()
-			done := make(chan error, 1)
-			go func() { _, err := s.adminPKI(api.AdminRequest{Operation: "ca." + op}); done <- err }()
-			waitPKI(t, time.Second, func() bool {
-				if s.stateMu.TryRLock() {
-					s.stateMu.RUnlock()
-					return false
-				}
-				return true
-			})
-			select {
-			case err := <-done:
-				t.Fatal("actual transition did not drain admitted request", err)
-			default:
-			}
-			if op == "activate" {
-				// A request admitted before the admin barrier confirms a new
-				// identity after preflight. Final validation must include it.
-				if _, err := s.registerNode(nodeRegistration{Name: "new-node", PubKey: "pub-new-node"}, false); err != nil {
-					t.Fatal(err)
-				}
-			}
-			release()
-			err = <-done
-			if op == "prepare" && err != nil {
-				t.Fatal(err)
-			}
-			if op == "activate" && !errors.Is(err, pki.ErrTransitionBlocked) {
-				t.Fatal("new unacknowledged node bypassed final gate", err)
-			}
-			if s.authority.Status().Phase != "prepared" {
-				t.Fatal("unexpected CA state")
-			}
-		})
+		case <-time.After(time.Second):
+			s.stateMu.RUnlock()
+			<-done
+			t.Fatalf("%s took global write admission", op)
+		}
+	}
+	if s.authority.Status().Phase != "prepared" {
+		t.Fatal("prepare did not commit")
+	}
+}
+
+func TestCAActivationStillDrainsAndRechecksNodes(t *testing.T) {
+	s, err := NewServer(config.ControllerConfig{DataDir: t.TempDir(), VPNCIDR: "10.7.0.0/24", Listen: "127.0.0.1:0", PKI: &config.PKIConfig{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InitPKI(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.authority.Rotate("prepare", nil); err != nil {
+		t.Fatal(err)
+	}
+	s.stateMu.RLock()
+	var once sync.Once
+	release := func() { once.Do(s.stateMu.RUnlock) }
+	defer release()
+	done := make(chan error, 1)
+	go func() { _, err := s.adminPKI(api.AdminRequest{Operation: "ca.activate"}); done <- err }()
+	waitPKI(t, time.Second, func() bool {
+		if s.stateMu.TryRLock() {
+			s.stateMu.RUnlock()
+			return false
+		}
+		return true
+	})
+	select {
+	case err := <-done:
+		t.Fatal("actual transition did not drain admitted request", err)
+	default:
+	}
+	// An already admitted request confirms an identity after preflight.
+	// Final validation must include it before publishing a new signing CA.
+	if _, err := s.registerNode(nodeRegistration{Name: "new-node", PubKey: "pub-new-node"}, false); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := <-done; !errors.Is(err, pki.ErrTransitionBlocked) {
+		t.Fatal("new unacknowledged node bypassed final gate", err)
+	}
+	if s.authority.Status().Phase != "prepared" {
+		t.Fatal("unexpected CA state")
 	}
 }
