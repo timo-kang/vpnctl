@@ -46,7 +46,7 @@ func TestNetns_MonitorQuality(t *testing.T) {
 		t.Fatal(err)
 	}
 	startEcho := func() *networkProcess {
-		return startNetworkProcess(t, ns[0], filepath.Join(dir, "echo.log"), []string{"VPNCTL_WORKER=echo"}, worker, "-test.run=^TestNetworkWorker$")
+		return startNetworkProcess(t, ns[0], filepath.Join(dir, "echo.log"), nil, integrationBinary(t), "direct", "serve", "--listen", "10.77.0.1:9191")
 	}
 	echo := startEcho()
 	process := startNetworkProcess(t, ns[1], filepath.Join(dir, "monitor.log"), nil, integrationBinary(t), "monitor", "--interface", "wg0", "--watch", "--data", filepath.Join(dir, "monitor.db"), "--probe-port", "9191", "--metrics-port", "19100", "--interval", "200ms", "--quality-window", "4s", "--quality-stale-after", "3s")
@@ -95,6 +95,15 @@ func TestNetns_MonitorQuality(t *testing.T) {
 		})
 	}
 	check("healthy", "good")
+	// The shipped CLI must reject an occupied metrics port before entering its loop.
+	bindCtx, stopBind := context.WithTimeout(context.Background(), 5*time.Second)
+	bindCmd := netCommand(bindCtx, ns[1], integrationBinary(t), "monitor", "--interface", "wg0", "--watch", "--data", filepath.Join(dir, "conflict.db"), "--metrics-port", "19100")
+	output, bindErr := bindCmd.CombinedOutput()
+	stopBind()
+	if bindErr == nil || !strings.Contains(string(output), "metrics bind") {
+		t.Fatalf("metrics conflict: %v %s", bindErr, output)
+	}
+
 	echo.stop()
 	check("responder-stopped", "offline")
 	echo = startEcho()

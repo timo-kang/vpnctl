@@ -37,7 +37,7 @@ quality/fleet history/uplink/event/alert를 요구사항·코드·기존 회귀 
    취소된 transaction이 counter를 바꾸지 않는 테스트를 추가했다.
 10. **P2: 장기 retention과 백업 검사 공백.** monitor 기본 7일 설정에서 정리가
     7시간 간격이었으며 무제한 DELETE와 동시 SQLite writer가 충돌할 수 있었다.
-    1분 주기, 1,000행 batch, 10초 예산, 단일 connection으로 바꿨다. 10,001개
+    1분 주기, 1,000행 batch, 10초 예산, 단일 connection과 WAL/busy timeout으로 바꿨다. 10,001개
     만료 행 정리 중 400개 probe 저장·취소를 검증한다. event cleanup도 batch별
     WAL 한도를 검사한다. backup은 모든 event 필드의 실제 ingestion 규칙을 검사한다.
     v1 migration fixture가 v3 event table을 남기는 문제도 수정했다.
@@ -65,4 +65,11 @@ quality/fleet history/uplink/event/alert를 요구사항·코드·기존 회귀 
 - `VPNCTL_HISTORY_SCALE=1 ... TestHistoryScale`: 32노드, uplink 322,560 snapshots,
   peer 3,870,720 rows, DB 641,658,880 bytes; uplink query 약 53ms, 24h peer query 약
   460ms, 만료 삭제 약 21초. 수치는 해당 실행의 측정값이다. 이벤트 soak 증거가 아니다.
-- 실제 kernel WireGuard/PKI/relay fault 전체 suite의 결과는 PR validation에 기록한다.
+- 실제 kernel WireGuard/PKI/relay fault 전체 1/3/8/32 suite 통과. 로컬 artifact:
+  `/tmp/vpnctl-review-netns`. 마지막 alert jitter 수정 전 빌드이며 해당 수정은 위 race
+  재검증으로 별도 확인했다.
+- 후속 #18 구현 후 전체 race/vet/build 재검증 및 실제 direct serve CLI로 두 노드
+  정상 표본·중단/복구·interface 제거·metrics bind 충돌 kernel smoke 통과
+  (`/tmp/vpnctl-review-monitor-smoke`). 지원 계약은 `docs/validation/backend-support.md`.
+- 이슈 #57은 재현 결함 수정, #17은 남은 M2 기능, 별도 M1 이슈는 과거 CA rotation
+  timeout 원인 규명을 추적한다. 최신 CI 결과는 PR에서 확인한다.

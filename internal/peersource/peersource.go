@@ -20,7 +20,7 @@ type Peer struct {
 	Endpoint string
 	// Name is a short human-readable label (first 8 chars of PublicKey by default).
 	Name string
-	// ProbePort is the TCP port used for latency/health probing.
+	// ProbePort is the UDP echo port used for latency/health probing.
 	ProbePort int
 	// LastHandshake is the time of the most recent WireGuard handshake.
 	LastHandshake time.Time

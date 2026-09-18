@@ -1,19 +1,28 @@
 # vpnctl
 
-Network intelligence for WireGuard. Monitor, diagnose, and analyze any WireGuard network.
+Monitor and diagnose Linux WireGuard networks, with optional VPN and certificate management.
 
-Works standalone or alongside Tailscale, Nebula, or plain WireGuard.
+Supports managed and existing Linux kernel WireGuard interfaces. Tailscale and Nebula peer adapters are not implemented; see the [backend support matrix and two-node quick start](docs/validation/backend-support.md).
 
 ## What it does
 
-- **Monitor mode** — real-time TUI dashboard or text output showing peer RTT, loss, and handshake status for any WireGuard interface
+- **Monitor mode** — real-time TUI dashboard or text output showing peer RTT, loss, and handshake status for a supported WireGuard interface
 - **Fleet status** — fleet-wide view from the controller, or local view from monitor data
-- **Diagnostics** — `ping`, `perf`, `doctor`, `discover` work with any WireGuard interface via `--interface`
+- **Diagnostics** — `ping`, `perf`, `doctor`, `discover` work with a supported WireGuard interface via `--interface`
 - **VPN management** — built-in WireGuard mesh with hub-and-spoke relay, optional P2P direct paths, NAT traversal, and tunnel health watchdog
 
 ## Quick start
 
-### Monitor any WireGuard interface
+### Monitor an existing Linux WireGuard interface
+
+First run a responder on each peer in a separate terminal (use that peer's VPN IP):
+
+```bash
+vpnctl direct serve --listen 10.7.0.2:51900
+```
+
+The existing tunnel must already route to the peer. Monitoring requires permission
+to read WireGuard state (`wg show`); add `sudo` if needed.
 
 ```bash
 # Real-time TUI dashboard
@@ -411,7 +420,9 @@ Monitor stores probe history in SQLite at `~/.vpnctl/monitor.db` (configurable v
 3. Records RTT and success/failure in local SQLite
 4. Displays results in TUI or text output
 
-Requires vpnctl echo responder on target peers (`vpnctl monitor`, `vpnctl node serve`, or `vpnctl direct serve`).
+Requires a UDP echo responder on target peers: `vpnctl node serve` or
+`vpnctl direct serve --listen <peer-vpn-ip>:51900`. `vpnctl monitor` does not start
+a responder. See the [responder contract](docs/validation/backend-support.md).
 
 ### VPN mesh
 

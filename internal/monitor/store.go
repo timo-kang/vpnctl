@@ -59,7 +59,7 @@ func OpenStore(path string) (*Store, error) {
 	}
 
 	db.SetMaxOpenConns(1) // serialize in-process writes; cleanup yields between batches
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec("PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL;" + schema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
