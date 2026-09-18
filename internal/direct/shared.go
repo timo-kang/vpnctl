@@ -221,13 +221,29 @@ func (s *Shared) readLoop() {
 	}
 }
 
+// ProbeError retains whether a datagram was sent. DNS, local socket contention
+// and resource failures must not be turned into remote packet-loss samples.
+type ProbeError struct {
+	Err  error
+	Sent bool
+}
+
+func (e *ProbeError) Error() string { return e.Err.Error() }
+func (e *ProbeError) Unwrap() error { return e.Err }
+
 func (s *Shared) ProbePeer(parent context.Context, peerAddr string, timeout time.Duration) (rtt time.Duration, err error) {
 	if s == nil || s.conn == nil {
 		return 0, fmt.Errorf("shared socket not initialized")
 	}
 	ctx, cancel := s.requestContext(parent, timeout)
 	defer cancel()
-	defer func() { err = s.requestError(ctx, err) }()
+	sent := false
+	defer func() {
+		err = s.requestError(ctx, err)
+		if err != nil {
+			err = &ProbeError{Err: err, Sent: sent}
+		}
+	}()
 	remote, err := resolveUDPAddr(ctx, peerAddr)
 	if err != nil {
 		return 0, err
@@ -248,6 +264,7 @@ func (s *Shared) ProbePeer(parent context.Context, peerAddr string, timeout time
 	if _, err := s.write(ctx, []byte(probePrefix+nonce), remote); err != nil {
 		return 0, err
 	}
+	sent = true
 	select {
 	case <-pending.ack:
 		return time.Since(start), nil

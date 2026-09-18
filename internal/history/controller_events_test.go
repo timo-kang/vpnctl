@@ -9,7 +9,7 @@ import (
 )
 
 func TestControllerEventsMigrateBackupRestartAndClockSkew(t *testing.T) {
-	s, now := newStore(t)
+	s, now := legacyStore(t, 3)
 	ctx := context.Background()
 	db, err := connect(s.path, false)
 	if err != nil {
@@ -68,7 +68,7 @@ func TestControllerEventsMigrateBackupRestartAndClockSkew(t *testing.T) {
 	}
 	defer db.Close()
 	var version int
-	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
+	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
 		t.Fatal(version, err)
 	}
 }

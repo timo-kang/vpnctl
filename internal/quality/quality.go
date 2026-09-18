@@ -140,7 +140,7 @@ type Window struct {
 }
 
 func (w *Window) Observe(now time.Time, p Outcome, cfg QualityConfig) PeerQuality {
-	if p.Reason == "invalid_probe_target" {
+	if p.Unknown || p.Reason == "invalid_probe_target" {
 		w.samples, w.level, w.recovery = nil, QualityUnknown, 0
 		q := PeerQuality{ObservedAt: ptr(now), Window: cfg.Window.Seconds(), LastSuccessAt: copyPtr(w.lastSuccess), ErrorReason: p.Reason}
 		q.SetLevel(QualityUnknown)
@@ -222,6 +222,7 @@ type Outcome struct {
 	RTTus   int64
 	Success bool
 	Reason  string
+	Unknown bool
 }
 
 func NewWindow() *Window { return &Window{level: QualityUnknown} }

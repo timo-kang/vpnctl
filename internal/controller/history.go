@@ -83,7 +83,7 @@ func (s *Server) fleetSnapshot() api.FleetStatusResponse {
 	resp := api.FleetStatusResponse{SchemaVersion: 2, Nodes: []api.FleetNodeStatus{}}
 	now := time.Now()
 	for _, node := range nodes {
-		m := history.Measurement{Stream: history.Stream{NodeID: node.ID}, PeerQuality: quality.ReplayQuality(nil)}
+		m := history.Measurement{Stream: history.Stream{NodeID: node.ID}, PeerQuality: quality.ReplayQuality(nil), Validity: "unknown", Reason: "no_samples"}
 		measurements := latest[node.ID]
 		if measurements == nil {
 			measurements = []history.Measurement{}

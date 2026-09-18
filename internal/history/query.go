@@ -72,14 +72,15 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 		for i := range buckets {
 			buckets[i] = Bucket{Stream: st.Stream, Time: start.Add(time.Duration(i) * width).UTC()}
 		}
-		rows, e := tx.QueryContext(ctx, "SELECT ts,rtt FROM probes WHERE stream=? AND ts>? AND ts<=?", st.id, start.UnixMicro(), end.UnixMicro())
+		rows, e := tx.QueryContext(ctx, "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=?", st.id, start.UnixMicro(), end.UnixMicro())
 		if e != nil {
 			return nil, e
 		}
 		for rows.Next() {
 			var ts int64
 			var rtt sql.NullInt64
-			if e = rows.Scan(&ts, &rtt); e != nil {
+			var unknown bool
+			if e = rows.Scan(&ts, &rtt, &unknown); e != nil {
 				rows.Close()
 				return nil, e
 			}
@@ -90,6 +91,10 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 			}
 			i := int((ts - start.UnixMicro() - 1) / width.Microseconds())
 			b := &buckets[i]
+			if unknown {
+				b.UnknownCount++
+				continue
+			}
 			b.Count++
 			if rtt.Valid {
 				b.Successes++

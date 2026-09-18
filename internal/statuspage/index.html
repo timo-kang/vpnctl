@@ -48,7 +48,7 @@
         <th>Quality</th>
         <th>RTT</th>
         <th>Loss</th>
-        <th>Reported peer / path / relay / uplink</th>
+        <th>Reported peer / path / relay / uplink / source</th>
         <th>NAT</th>
         <th>Last Seen</th>
       </tr>
@@ -62,7 +62,7 @@
         <td><span class="quality {{.Quality}}">{{.Quality}}</span>{{if .Stale}} (stale){{end}}<br><small>{{.Reason}}</small></td>
         <td class="mono">{{.RTTMs}}</td>
         <td class="mono">{{.LossPct}}</td>
-        <td>{{.Peer}} / {{.Path}} / {{.Relay}} / {{.Uplink}}</td>
+        <td>{{.Peer}} / {{.Path}} / {{.Relay}} / {{.Uplink}} / {{.Source}}</td>
         <td>{{.NATType}}</td>
         <td>{{.LastSeen}}</td>
       </tr>

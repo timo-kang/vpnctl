@@ -130,7 +130,7 @@ func Check(ctx context.Context, path string) error {
 	if err = db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app); err != nil {
 		return err
 	}
-	if (version != 1 && version != 2 && version != 3 && version != 4) || app != applicationID {
+	if (version != 1 && version != 2 && version != 3 && version != 4 && version != 5) || app != applicationID {
 		return fmt.Errorf("unsupported history backup schema %d", version)
 	}
 	if err = db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil {
@@ -158,6 +158,56 @@ func Check(ctx context.Context, path string) error {
 	}
 	if invalid != 0 {
 		return fmt.Errorf("invalid history measurements")
+	}
+	if version >= 5 {
+		if err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM probes WHERE unknown NOT IN (0,1) OR (unknown=1 AND (rtt IS NOT NULL OR length(reason)=0)) OR (rtt IS NOT NULL AND reason!='') OR length(reason)>64)`).Scan(&invalid); err != nil {
+			return err
+		}
+		if invalid != 0 {
+			return fmt.Errorf("invalid probe validity")
+		}
+		if err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM streams WHERE source NOT IN ('legacy-probe','cli-ping','agent-direct','monitor-overlay'))`).Scan(&invalid); err != nil {
+			return err
+		}
+		if invalid != 0 {
+			return fmt.Errorf("invalid probe source")
+		}
+		streams, e := readStreams(ctx, db, "")
+		if e != nil {
+			return e
+		}
+		counts := map[string]int{}
+		for _, st := range streams {
+			counts[st.NodeID]++
+			if counts[st.NodeID] > MaxNodeStreams {
+				return ErrCapacity
+			}
+			o := Observation{ID: "check", Timestamp: time.Now().UTC(), PeerID: st.PeerID, Path: st.Path, RelayID: st.RelayID, Uplink: st.Uplink, Source: st.Source, Success: pointer(false)}
+			if err := Validate(st.NodeID, o, o.Timestamp); err != nil {
+				return err
+			}
+		}
+		reasons, e := db.QueryContext(ctx, "SELECT DISTINCT reason FROM probes WHERE reason!=''")
+		if e != nil {
+			return e
+		}
+		for reasons.Next() {
+			var reason string
+			if e = reasons.Scan(&reason); e != nil {
+				reasons.Close()
+				return e
+			}
+			if !validLabel(reason, false) || len(reason) > 64 {
+				reasons.Close()
+				return fmt.Errorf("invalid stored probe reason")
+			}
+		}
+		e = reasons.Err()
+		reasons.Close()
+		if e != nil {
+			return e
+		}
+
 	}
 	if version >= 2 {
 		var stored, actual, bad int

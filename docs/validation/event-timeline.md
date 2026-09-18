@@ -56,7 +56,7 @@ HTTP 400/404/409/413 또는 로컬 history invalid/conflict는 즉시 폐기한�
 `stopped_dropped`, `rejected_dropped`, `exhausted_dropped`, `state_capacity_dropped`다.
 node/target/error를 label로 쓰지 않는다. controller는 기존 Prometheus endpoint에서 이 값을 노출한다. 독립 `node serve`는 Prometheus HTTP endpoint를 제공하지 않으므로 노드 손실은 `diagnostic timeline incomplete` 로그(role, producer, 누적 dropped)를 수집한다. 별도 monitor 프로세스의 metric이 node serve counter를 포함한다고 가정하면 안 된다. 작업자는 손실 로그를 약 10초마다(진행 중 재시도 후) 및 종료 시 남긴다. 완전한 손실 집계를 위해 외부 로그/지표 보존이 필요하다.
 
-영속 schema v4는 빈 node 키의 컨트롤러 소유권을 정의한다. v1/v2/v3에서 자동 전환하고 backup/check/restore에서 v4를 검증한다. 구버전 바이너리는 v4를 거부한다. 배포 전 백업을 보존하고 롤백 시 호환되는 DB 복사본을 사용해야 한다. `PRAGMA user_version`을 수동으로 낮추어 덮어쓰면 안 된다.
+영속 schema v4부터 빈 node 키의 컨트롤러 소유권을 정의한다. 현재 v5는 공통 probe source/unknown 확장을 포함하며 v1~v4 자동 전환과 backup/check/restore를 지원한다([fleet 계약](fleet-history.md)). 구버전 바이너리는 지원 범위 밖 schema를 거부한다. 배포 전 백업을 보존하고 롤백 시 호환되는 DB 복사본을 사용해야 한다. `PRAGMA user_version`을 수동으로 낮추어 덮어쓰면 안 된다.
 
 ## 보존과 용량
 

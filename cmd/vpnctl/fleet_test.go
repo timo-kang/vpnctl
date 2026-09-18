@@ -28,7 +28,7 @@ import (
 func fleetPtr[T any](v T) *T { return &v }
 func TestFleetCLIUsesAPIValuesAndNulls(t *testing.T) {
 	now := time.Now().UTC()
-	m := history.Measurement{Stream: history.Stream{NodeID: "node-a", PeerID: "node-b", Path: "relay", RelayID: "controller", Uplink: "wlan0"}, PeerQuality: quality.PeerQuality{Quality: "good", RTTMs: fleetPtr(10.0), LossPct: fleetPtr(0.0), SampleCount: 3, ObservedAt: &now}}
+	m := history.Measurement{Stream: history.Stream{Source: "cli-ping", NodeID: "node-a", PeerID: "node-b", Path: "relay", RelayID: "controller", Uplink: "wlan0"}, PeerQuality: quality.PeerQuality{Quality: "good", RTTMs: fleetPtr(10.0), LossPct: fleetPtr(0.0), SampleCount: 3, ObservedAt: &now}}
 	status := api.FleetStatusResponse{SchemaVersion: 2, Nodes: []api.FleetNodeStatus{{Measurement: m, Name: "node-a", Status: "online"}, {Name: "node-b", Measurement: history.Measurement{PeerQuality: quality.ReplayQuality(nil)}}}}
 	hist := api.FleetHistoryResponse{SchemaVersion: 2, Nodes: []api.FleetNodeHistory{{NodeID: "node-a", Name: "node-a", Buckets: []history.Bucket{{Stream: m.Stream, Time: now, Count: 3, AvgRTTMs: fleetPtr(10.0), P95RTTMs: fleetPtr(20.0), AvailabilityPct: fleetPtr(100.0), LossPct: fleetPtr(0.0)}}}}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -51,9 +51,9 @@ func TestFleetCLIUsesAPIValuesAndNulls(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{[]string{"fleet", "status", "--config", cfg}, []string{"good", "10.00", "0.00", "wlan0", "unknown", "-"}},
+		{[]string{"fleet", "status", "--config", cfg}, []string{"SOURCE", "cli-ping", "good", "10.00", "0.00", "wlan0", "unknown", "-"}},
 		{[]string{"fleet", "status", "--config", cfg, "--json"}, []string{`"schema_version":2`, `"rtt_ms":10`, `"loss_pct":0`, `"rtt_ms":null`}},
-		{[]string{"fleet", "history", "--config", cfg, "--window", "24h", "--node", "node-a", "--bucket", "15m"}, []string{"10.00", "20.00", "100.00", "wlan0"}},
+		{[]string{"fleet", "history", "--config", cfg, "--window", "24h", "--node", "node-a", "--bucket", "15m"}, []string{"SOURCE", "UNKNOWN", "cli-ping", "10.00", "20.00", "100.00", "wlan0"}},
 	} {
 		out, e := cliProcess(t, test.args...).CombinedOutput()
 		if e != nil {

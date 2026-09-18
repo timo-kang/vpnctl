@@ -25,9 +25,9 @@ func printFleetStatus(w io.Writer, resp api.FleetStatusResponse, asJSON bool) er
 		return json.NewEncoder(w).Encode(resp)
 	}
 	output := bufio.NewWriter(w)
-	fmt.Fprintln(output, "NAME  VPN_IP  CONTACT  QUALITY  STALE  PEER  REPORTED_PATH  RELAY  UPLINK  RTT_MS  LOSS%  REASON  LAST_SEEN")
+	fmt.Fprintln(output, "NAME  VPN_IP  CONTACT  QUALITY  STALE  PEER  REPORTED_PATH  RELAY  UPLINK  SOURCE  RTT_MS  LOSS%  REASON  LAST_SEEN")
 	for _, n := range resp.Nodes {
-		fmt.Fprintf(output, "%s  %s  %s  %s  %t  %s  %s  %s  %s  %s  %s  %s  %s\n", n.Name, n.VPNIP, n.Status, n.Quality, n.Stale, n.PeerID, n.Path, n.RelayID, n.Uplink, history.FormatNumber(n.RTTMs), history.FormatNumber(n.LossPct), n.ErrorReason, n.LastSeen)
+		fmt.Fprintf(output, "%s  %s  %s  %s  %t  %s  %s  %s  %s  %s  %s  %s  %s  %s\n", n.Name, n.VPNIP, n.Status, n.Quality, n.Stale, n.PeerID, n.Path, n.RelayID, n.Uplink, n.Source, history.FormatNumber(n.RTTMs), history.FormatNumber(n.LossPct), n.ErrorReason, n.LastSeen)
 	}
 	return output.Flush()
 }
@@ -39,9 +39,9 @@ func printFleetHistory(w io.Writer, resp api.FleetHistoryResponse, asJSON bool) 
 	fmt.Fprintf(output, "Window (%s, %s], buckets %.0fs; availability = successful probes / attempts\n", resp.Start.Format(time.RFC3339), resp.End.Format(time.RFC3339), resp.BucketSeconds)
 	for _, n := range resp.Nodes {
 		fmt.Fprintf(output, "Node: %s (%s)\n", n.Name, n.NodeID)
-		fmt.Fprintln(output, "TIME  PEER  REPORTED_PATH  RELAY  UPLINK  SAMPLES  AVAILABLE%  AVG_RTT_MS  P95_RTT_MS  LOSS%")
+		fmt.Fprintln(output, "TIME  PEER  REPORTED_PATH  RELAY  UPLINK  SOURCE  SAMPLES  UNKNOWN  AVAILABLE%  AVG_RTT_MS  P95_RTT_MS  LOSS%")
 		for _, b := range n.Buckets {
-			fmt.Fprintf(output, "%s  %s  %s  %s  %s  %d  %s  %s  %s  %s\n", b.Time.Format(time.RFC3339), b.PeerID, b.Path, b.RelayID, b.Uplink, b.Count, history.FormatNumber(b.AvailabilityPct), history.FormatNumber(b.AvgRTTMs), history.FormatNumber(b.P95RTTMs), history.FormatNumber(b.LossPct))
+			fmt.Fprintf(output, "%s  %s  %s  %s  %s  %s  %d  %d  %s  %s  %s  %s\n", b.Time.Format(time.RFC3339), b.PeerID, b.Path, b.RelayID, b.Uplink, b.Source, b.Count, b.UnknownCount, history.FormatNumber(b.AvailabilityPct), history.FormatNumber(b.AvgRTTMs), history.FormatNumber(b.P95RTTMs), history.FormatNumber(b.LossPct))
 		}
 	}
 	return output.Flush()

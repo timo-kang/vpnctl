@@ -1439,7 +1439,7 @@ func (s *Server) statusPageData() statuspage.Data {
 		data.Nodes = append(data.Nodes, statuspage.NodeStatus{
 			Name: n.Name, VPNIP: n.VPNIP, NATType: n.NATType, LastSeen: n.LastSeen,
 			Online: online, Status: n.Status, Quality: n.Quality, RTTMs: history.FormatNumber(n.RTTMs), LossPct: history.FormatNumber(n.LossPct),
-			Peer: n.PeerID, Path: n.Path, Relay: n.RelayID, Uplink: n.Uplink, Stale: n.Stale, Reason: n.ErrorReason,
+			Peer: n.PeerID, Path: n.Path, Relay: n.RelayID, Uplink: n.Uplink, Source: n.Source, Stale: n.Stale, Reason: n.ErrorReason,
 		})
 		if online {
 			data.OnlineCount++
