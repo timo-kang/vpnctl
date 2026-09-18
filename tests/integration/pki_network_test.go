@@ -82,6 +82,23 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		t.Fatal(err)
 	}
 	t.Logf("artifacts: %s", results)
+	// Save sanitized logs on failure; never export generated credentials/state.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		files, _ := filepath.Glob(filepath.Join(dir, "*.log"))
+		for _, path := range files {
+			data, _ := os.ReadFile(path)
+			lines := strings.Split(string(data), "\n")
+			for i, line := range lines {
+				if strings.Contains(line, "bootstrap token:") {
+					lines[i] = "bootstrap token: [redacted]"
+				}
+			}
+			_ = os.WriteFile(filepath.Join(results, filepath.Base(path)), []byte(strings.Join(lines, "\n")), 0600)
+		}
+	})
 	ctrlPrivate, ctrlPublic := wgKeyPair(t)
 	ctrlDir := filepath.Join(dir, "controller")
 	ctrlPath := filepath.Join(dir, "controller.yaml")
@@ -241,23 +258,6 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	telemetry := startNetworkProcess(t, namespaces[0], filepath.Join(dir, "telemetry.log"), []string{
 		"VPNCTL_WORKER=telemetry", "VPNCTL_PHASE=" + phaseFile, "VPNCTL_PKI=" + configs[0].Node.PKIDir, "VPNCTL_TELEMETRY=" + filepath.Join(results, "telemetry.jsonl"),
 	}, testBin, "-test.run=^TestNetworkWorker$")
-	// Save sanitized logs on failure; never export generated credentials/state.
-	t.Cleanup(func() {
-		if !t.Failed() {
-			return
-		}
-		files, _ := filepath.Glob(filepath.Join(dir, "*.log"))
-		for _, path := range files {
-			data, _ := os.ReadFile(path)
-			lines := strings.Split(string(data), "\n")
-			for i, line := range lines {
-				if strings.Contains(line, "bootstrap token:") {
-					lines[i] = "bootstrap token: [redacted]"
-				}
-			}
-			_ = os.WriteFile(filepath.Join(results, filepath.Base(path)), []byte(strings.Join(lines, "\n")), 0600)
-		}
-	})
 	checkFleetHistory := exerciseFleetHistory(t, bin, namespaces, paths, results)
 	time.Sleep(time.Second)
 	before := make([]kernelSnapshot, size)
