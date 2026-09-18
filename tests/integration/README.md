@@ -60,3 +60,10 @@ CI에 특정 대시보드·원격 서비스 업로드를 결합하지 않는다.
 공통 helper를 범용 SDK나 topology DSL로 확대하는 작업은 선행하지 않는다.
 
 상세 topology와 범위는 [network-sandbox.md](../../docs/validation/network-sandbox.md)를 참고한다.
+
+`TestNetns_UplinkDiagnosis` adds the product's staged uplink CLI to the same
+external-binary contract: two underlays, a real kernel WG relay, a target-only
+server, mark-based outer route selection and three rounds of staged outages and
+recovery. The PKI mesh matrix also runs automatic uplink collection on each node
+and saves `node-*-automatic-uplink.json` artifacts. No modem hardware or host
+network mutation is required; missing optional collectors remain unknown.

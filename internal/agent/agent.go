@@ -21,6 +21,9 @@ import (
 
 // Run starts the long-running node agent loop.
 func Run(ctx context.Context, cfg config.NodeConfig) error {
+	var observations UplinkSupervisor
+	observations.Configure(ctx, cfg)
+	defer observations.Stop()
 	client := newClient(cfg)
 	defer client.CloseIdleConnections()
 	if cfg.PKIDir != "" {

@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -83,4 +84,57 @@ func runControllerHistory(args []string) error {
 		return history.Backup(ctx, path, *out)
 	}
 	return history.Restore(ctx, *in, path, time.Now())
+}
+
+func runFleetUplinks(args []string) error {
+	fs := flag.NewFlagSet("fleet uplinks", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "node client YAML")
+	node := fs.String("node", "", "node identity (required)")
+	window := fs.String("window", "1h", "history window, at most 7d")
+	limit := fs.Int("limit", 100, "recent diagnostic snapshots, 1..1000")
+	asJSON := fs.Bool("json", false, "full staged observations and history")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *cfgPath == "" || *node == "" {
+		return fmt.Errorf("--config and --node required")
+	}
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Node == nil {
+		return fmt.Errorf("node config required")
+	}
+	client := newAPIClient(cfg.Node)
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := client.FleetUplinks(ctx, *node, *window, *limit)
+	if err != nil {
+		return err
+	}
+	return printFleetUplinks(os.Stdout, result, *asJSON)
+}
+func printFleetUplinks(w io.Writer, result history.UplinkHistory, asJSON bool) error {
+	if asJSON {
+		return json.NewEncoder(w).Encode(result)
+	}
+	out := bufio.NewWriter(w)
+	fmt.Fprintln(out, "TARGET  PROTOCOL  SUCCESS  FAILURE  UNKNOWN  AVAILABLE%  AVG_RTT_MS")
+	for _, v := range result.Summaries {
+		fmt.Fprintf(out, "%s  %s  %d  %d  %d  %s  %s\n", v.TargetID, v.Protocol, v.Successes, v.Failures, v.Unknown, history.FormatNumber(v.AvailabilityPct), history.FormatNumber(v.AvgRTTMs))
+	}
+	if len(result.Snapshots) > 0 {
+		s := result.Snapshots[0]
+		fmt.Fprintf(out, "Latest: %s stale=%t underlay=%s reason=%s dropped=%d\n", s.At.Format(time.RFC3339), s.Stale, s.Underlay.State, s.Underlay.Reason, s.Dropped)
+		for _, l := range s.Links {
+			fmt.Fprintf(out, "Link %s (%s/%s): %s/%s modem=%s/%s controller=%s/%s\n", l.ID, l.Interface, l.Kind, l.State, l.Reason, l.Modem.State, l.Modem.Reason, l.Controller.State, l.Controller.Reason)
+		}
+		for _, t := range s.Targets {
+			fmt.Fprintf(out, "Target %s: service=%s/%s failure_stage=%s route=%s/%s source=%s gateway=%s expected_relay=%s relay_probe=%s/%s\n", t.ID, t.Service.State, t.Service.Reason, t.FailureStage, t.Route.State, t.Route.Interface, t.Route.Source, t.Route.Gateway, t.ExpectedRelayID, t.Relay.State, t.Relay.Reason)
+			fmt.Fprintf(out, "  Transport: %s/%s source=%s gateway=%s peer_fingerprint=%s\n", t.TransportRoute.State, t.TransportRoute.Interface, t.TransportRoute.Source, t.TransportRoute.Gateway, t.RelayPeerFingerprint)
+		}
+	}
+	return out.Flush()
 }

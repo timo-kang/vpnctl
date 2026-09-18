@@ -119,3 +119,12 @@ WG MTU와 앱 UDP 크기/재전송도 배포 계약에 포함한다. 현재 큰 
 controller의 `data_dir/history.db`를 로컬 영속 volume에 포함한다. 용량·수집·nullable API 전환·
 정지 후 backup/restore 명령은 [fleet 관측 계약](../validation/fleet-history.md)을 따른다.
 PKI 백업과 history 백업은 별도 산출물이며 같은 registry identity로 함께 복원한다.
+
+## Optional staged uplink observation
+
+Deployment repositories can include the opt-in `node.uplink_observation` section
+and provision the target's public CA bundle independently. See
+[the reusable configuration and operational contract](../validation/uplink-observation.md)
+for Ethernet/Wi-Fi/LTE collectors, selected outer WG routes, endpoint probes,
+retention, queue loss bounds and `node diagnose`/`fleet uplinks` commands.
+The observer performs no modem activation, route change or relay switching.

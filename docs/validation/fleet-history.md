@@ -102,9 +102,9 @@ history는 controller가 잡은 `(start,end]` snapshot을 조회한다. 기본 w
 
 ## 용량, retention, 배포와 복구
 
-영속 schema v1, application ID `0x76706368`, SQLite 4096-byte page, FULL 동기화의 WAL을
+영속 schema v2 (기존 peer tables는 v1 계약 유지), application ID `0x76706368`, SQLite 4096-byte page, FULL 동기화의 WAL을
 사용한다. modernc SQLite v1.46.2 (SQLite 3.51.3)와 해당 릴리스의 libc v1.70.0을 사용한다.
-긴 read snapshot 동안에도 새 표본을 commit할 수 있다. 빈 v0 DB만 원자적으로 v1로 초기화한다. 알 수 없는 미래 버전이나 다른 제품의
+긴 read snapshot 동안에도 새 표본을 commit할 수 있다. 빈 v0 DB는 v1 초기화 후 v2로, 기존 v1 DB는 v2로 원자적 단계 이관한다. 알 수 없는 미래 버전이나 다른 제품의
 DB를 덮어쓰지 않는다. DB는 0600이며 파일이 아닌 경로와 symlink는 거절한다.
 
 | 한도 | 정책 |
@@ -166,7 +166,15 @@ VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 ./scripts/test-netns.sh
 ```
 
 387만 표본 성능 시험은 32개 stream, 5초 주기, 7일로 생성한다. 저장 한도 1 GiB,
-24시간/7일 query 각각 8초, 전체 만료 cleanup 30초를 검사한다. routine race 시험은 같은
+24시간/7일 query 각각 8초, target snapshot 322,560개를 포함한 전체 만료 cleanup 60초를 검사한다. routine race 시험은 같은
 쿼리에 더 작은 표본을 사용하고 CI는 별도로 전체 규모 시험을 실행한다. kernel suite는
 3/8/32 노드에서 차단 probe 3개 + 허용 probe 3개 → mTLS ingest → API/CLI/HTML 값 일치 → graceful/crash restart
 후 동일 이력을 확인한다. 1 노드 구성은 측정 peer가 없으므로 기존 uplink 검증을 유지한다.
+
+## Staged uplink extension
+
+Schema 2 of the SQLite database additionally stores separate robot → target
+snapshots and target/protocol summaries. The fleet peer API remains schema 2.
+See [uplink observation](uplink-observation.md) for the new opt-in automatic
+producer, endpoint schema 1 API, shared capacity budgets and migration/rollback
+procedure. Startup maintenance for the combined datasets has a 60-second budget.

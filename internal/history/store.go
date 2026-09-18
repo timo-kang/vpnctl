@@ -18,6 +18,7 @@ import (
 
 	_ "modernc.org/sqlite"
 	"vpnctl/internal/quality"
+	"vpnctl/internal/uplink"
 )
 
 const applicationID = 0x76706368
@@ -49,6 +50,7 @@ type Store struct {
 	query       chan struct{}
 	mu          sync.RWMutex
 	latest      map[int64]Measurement
+	uplinks     map[string]uplink.Snapshot
 	lastCleanup time.Time // writer-owned
 }
 
@@ -112,7 +114,7 @@ func Open(path string, now time.Time) (*Store, error) {
 		return nil, err
 	}
 	defer db.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var pageSize int
 	if err = db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
@@ -147,8 +149,21 @@ func Open(path string, now time.Time) (*Store, error) {
 		if e = tx.Commit(); e != nil {
 			return nil, e
 		}
-	} else if version != 1 || app != applicationID {
+	} else if (version != 1 && version != 2) || app != applicationID {
 		return nil, fmt.Errorf("unsupported history schema: version=%d application=%d", version, app)
+	}
+	if version < 2 {
+		tx, e := db.BeginTx(ctx, nil)
+		if e != nil {
+			return nil, e
+		}
+		if _, e = tx.ExecContext(ctx, uplinkSchema); e != nil {
+			tx.Rollback()
+			return nil, e
+		}
+		if e = tx.Commit(); e != nil {
+			return nil, e
+		}
 	}
 	var journal string
 	if err = db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journal); err != nil {
@@ -157,7 +172,7 @@ func Open(path string, now time.Time) (*Store, error) {
 	if journal != "wal" {
 		return nil, fmt.Errorf("WAL unavailable: %s", journal)
 	}
-	s := &Store{path: path, writer: make(chan struct{}, 1), query: make(chan struct{}, 1), latest: make(map[int64]Measurement)}
+	s := &Store{path: path, writer: make(chan struct{}, 1), query: make(chan struct{}, 1), latest: make(map[int64]Measurement), uplinks: make(map[string]uplink.Snapshot)}
 	// A fresh process replays retained observations; never restores a stale 'good'
 	// flag. Empty/old history remains explicitly unknown at read time.
 	if err = s.maintainDB(ctx, db, now); err != nil {
@@ -176,6 +191,9 @@ func Open(path string, now time.Time) (*Store, error) {
 			return nil, e
 		}
 		s.latest[st.id] = m
+	}
+	if err = s.loadUplinks(ctx, db); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -463,6 +481,9 @@ func (s *Store) maintainDB(ctx context.Context, db *sql.DB, now time.Time) error
 		}
 		s.mu.Unlock()
 		if n < 10000 {
+			if err = s.maintainUplinks(ctx, db, now); err != nil {
+				return err
+			}
 			s.lastCleanup = now
 			return nil
 		}

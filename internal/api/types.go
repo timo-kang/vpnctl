@@ -8,6 +8,7 @@ import (
 
 	"vpnctl/internal/history"
 	"vpnctl/internal/model"
+	"vpnctl/internal/uplink"
 )
 
 // RegisterRequest is sent by a node when joining the controller.
@@ -82,7 +83,13 @@ type WGConfigResponse struct {
 }
 
 // FleetNodeStatus describes the current status of a single fleet node.
+type UplinkRequest struct {
+	NodeID   string          `json:"node_id"`
+	Snapshot uplink.Snapshot `json:"snapshot"`
+}
+
 type FleetNodeStatus struct {
+	UplinkObservation *uplink.Snapshot `json:"uplink_observation,omitempty"`
 	history.Measurement
 	Status       string                `json:"status"`
 	Name         string                `json:"name"`

@@ -16,6 +16,7 @@ import (
 	"vpnctl/internal/history"
 	"vpnctl/internal/quality"
 	"vpnctl/internal/store"
+	"vpnctl/internal/uplink"
 )
 
 func (s *Server) handleObservations(w http.ResponseWriter, r *http.Request, req api.MetricsRequest) {
@@ -75,6 +76,10 @@ func (s *Server) fleetNodes() []store.NodeInfo {
 func (s *Server) fleetSnapshot() api.FleetStatusResponse {
 	nodes := s.fleetNodes()
 	latest := s.history.Latest(time.Time{})
+	uplinks := map[string]uplink.Snapshot{}
+	if store, ok := s.history.(uplinkStorage); ok {
+		uplinks = store.LatestUplinks(time.Time{})
+	}
 	resp := api.FleetStatusResponse{SchemaVersion: 2, Nodes: []api.FleetNodeStatus{}}
 	now := time.Now()
 	for _, node := range nodes {
@@ -90,7 +95,11 @@ func (s *Server) fleetSnapshot() api.FleetStatusResponse {
 		if !node.LastSeenAt.IsZero() {
 			seen = node.LastSeenAt.Format(time.RFC3339)
 		}
-		resp.Nodes = append(resp.Nodes, api.FleetNodeStatus{Measurement: m, Name: node.Name, VPNIP: node.VPNIP, NATType: node.NATType, LastSeen: seen, Status: fleetNodeState(node, now), Measurements: measurements})
+		var observation *uplink.Snapshot
+		if value, ok := uplinks[node.ID]; ok {
+			observation = &value
+		}
+		resp.Nodes = append(resp.Nodes, api.FleetNodeStatus{UplinkObservation: observation, Measurement: m, Name: node.Name, VPNIP: node.VPNIP, NATType: node.NATType, LastSeen: seen, Status: fleetNodeState(node, now), Measurements: measurements})
 	}
 	return resp
 }

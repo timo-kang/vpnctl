@@ -20,7 +20,9 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
+	"vpnctl/internal/history"
 	"vpnctl/internal/pki"
+	uplinkobs "vpnctl/internal/uplink"
 )
 
 type kernelSnapshot struct {
@@ -181,7 +183,8 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		private, public := wgKeyPair(t)
 		policyEnabled := n%2 == 0
 		cfg := config.Config{Node: &config.NodeConfig{
-			Name: id, Controller: "https://192.0.2.1:8443", WGInterface: "wg0", WGConfigPath: filepath.Join(dir, id+"-wg.conf"),
+			UplinkObservation: &uplinkobs.Config{IntervalSec: 30, TimeoutMS: 300, Links: []uplinkobs.LinkConfig{{ID: "lan", Interface: "eth0", Kind: "ethernet"}}, Targets: []uplinkobs.TargetConfig{{ID: "app-server", Endpoint: uplinkobs.Endpoint{Host: relayTargetIP, Port: 9191, Protocol: "tcp"}, Interface: "wg0", RelayID: "controller", RelayProbe: &uplinkobs.Endpoint{Host: "10.77.0.1", Port: 51900, Protocol: "udp-echo"}}}},
+			Name:              id, Controller: "https://192.0.2.1:8443", WGInterface: "wg0", WGConfigPath: filepath.Join(dir, id+"-wg.conf"),
 			WGPrivateKey: private, WGPublicKey: public, WGListenPort: 51820, MTU: 1280, DirectMode: "off", PolicyRoutingEnabled: &policyEnabled,
 			KeepaliveIntervalSec: 1, CandidatesIntervalSec: 60, DirectIntervalSec: 60, HealthCheckIntervalSec: 3600,
 			PKIDir: filepath.Join(dir, id+"-pki"),
@@ -219,6 +222,18 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		}
 		agents[n] = startAgent(n)
 		eventually(t, 5*time.Second, "node API over WG", func() error { return fleet(n) })
+		eventually(t, 10*time.Second, "automatic target observations", func() error {
+			data := netOutput(t, namespaces[n+1], bin, "fleet", "uplinks", "--config", paths[n], "--node", id, "--json")
+			var h history.UplinkHistory
+			if e := json.Unmarshal([]byte(data), &h); e != nil {
+				return e
+			}
+			if len(h.Summaries) != 1 || h.Summaries[0].Successes < 1 {
+				return fmt.Errorf("no automatic successful observation: %s", data)
+			}
+			mustWrite(t, filepath.Join(results, id+"-automatic-uplink.json"), data)
+			return nil
+		})
 		probes[n] = startNetworkProcess(t, namespaces[n+1], filepath.Join(dir, id+"-probe.log"), []string{
 			"VPNCTL_UPLINK_ADDR=" + relayTargetIP, "VPNCTL_WORKER=probe", "VPNCTL_NODE=" + id, "VPNCTL_PHASE=" + phaseFile, "VPNCTL_PKI=" + cfg.Node.PKIDir, "VPNCTL_EVENTS=" + filepath.Join(results, id+".jsonl"),
 		}, testBin, "-test.run=^TestNetworkWorker$")
