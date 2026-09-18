@@ -8,9 +8,12 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/uplink"
@@ -18,22 +21,22 @@ import (
 
 const (
 	MaxEvents     = 1_000_000
-	MaxNodeEvents = 50_400 // one event every five seconds for seven days
+	MaxNodeEvents = 50_400 // bounded diagnostic history; high transition rates may hit this before seven days
 	MaxEventText  = 256
 )
 
 const eventSchema = `
-CREATE TABLE IF NOT EXISTS events(
+CREATE TABLE events(
  node TEXT NOT NULL, id TEXT NOT NULL, ts INTEGER NOT NULL,
  kind TEXT NOT NULL, source TEXT NOT NULL, target TEXT NOT NULL DEFAULT '',
  previous TEXT NOT NULL DEFAULT '', current TEXT NOT NULL DEFAULT '',
  severity TEXT NOT NULL, validity TEXT NOT NULL, message TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(node,id)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS event_time ON events(ts,id);
-CREATE INDEX IF NOT EXISTS event_node_time ON events(node,ts,id);
-CREATE TABLE IF NOT EXISTS event_metadata(id INTEGER PRIMARY KEY CHECK(id=1), row_count INTEGER NOT NULL);
-INSERT OR IGNORE INTO event_metadata VALUES(1,0);
+CREATE INDEX event_time ON events(ts,id);
+CREATE INDEX event_node_time ON events(node,ts,id);
+CREATE TABLE event_metadata(id INTEGER PRIMARY KEY CHECK(id=1), row_count INTEGER NOT NULL);
+INSERT INTO event_metadata VALUES(1,0);
 PRAGMA user_version=3;
 `
 
@@ -68,6 +71,8 @@ type Alert struct {
 	NodeID    string    `json:"node_id"`
 	Severity  string    `json:"severity"`
 	Active    bool      `json:"active"`
+	Known     bool      `json:"known"`
+	Targets   []string  `json:"targets,omitempty"`
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 	Reason    string    `json:"reason"`
@@ -91,11 +96,23 @@ var eventKinds = map[string]bool{
 }
 
 func validEventText(v string, required bool) bool {
-	return validLabel(v, required) && len(v) <= MaxEventText
+	return boundedEventText(v, required, MaxEventText)
+}
+
+func boundedEventText(v string, required bool, max int) bool {
+	if !utf8.ValidString(v) || len(v) > max || required && strings.TrimSpace(v) == "" {
+		return false
+	}
+	for _, r := range v {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateEvent(node string, event Event, now time.Time) error {
-	if !validLabel(node, true) || !validLabel(event.ID, true) || !validLabel(event.Source, true) || !validLabel(event.Target, false) || !validLabel(event.Previous, false) || !validLabel(event.Current, false) || !validEventText(event.Message, false) {
+	if !validLabel(node, true) || !validLabel(event.ID, true) || !validLabel(event.Source, true) || !validLabel(event.Target, false) || !boundedEventText(event.Previous, false, 2048) || !boundedEventText(event.Current, false, 2048) || !validEventText(event.Message, false) {
 		return fmt.Errorf("%w: invalid event identity or text", ErrInvalid)
 	}
 	if !eventKinds[event.Kind] || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || (event.Validity != "observed" && event.Validity != "inferred" && event.Validity != "unknown") {
@@ -154,6 +171,7 @@ func (s *Store) IngestEvent(ctx context.Context, node string, event Event, now t
 		if err = tx.Commit(); err != nil {
 			return err
 		}
+		metrics.EventTotal.WithLabelValues(event.Kind, event.Severity, "accepted").Inc()
 	}
 	return nil
 }
@@ -189,9 +207,6 @@ func insertEventTx(ctx context.Context, tx *sql.Tx, node string, event Event) (b
 		return false, err
 	}
 	_, err = tx.ExecContext(ctx, "UPDATE event_metadata SET row_count=row_count+1 WHERE id=1")
-	if err == nil {
-		metrics.EventTotal.WithLabelValues(event.Kind, event.Severity, "accepted").Inc()
-	}
 	return true, err
 }
 
@@ -236,103 +251,11 @@ func (s *Store) QueryEvents(ctx context.Context, node string, end time.Time, win
 	return out, nil
 }
 
-func alertForEvent(e Event, node string) (code string, trigger bool, resolved bool) {
-	switch {
-	case e.Kind == "uplink_change":
-		return "no_uplink", e.Current == "down" || e.Current == "unknown", e.Current == "up"
-	case e.Kind == "relay_failover":
-		return "relay_failure", e.Current == "down" || e.Current == "unknown", e.Current == "up"
-	case e.Kind == "probe_error":
-		return "persistent_loss", strings.HasPrefix(e.Current, "down"), strings.HasPrefix(e.Current, "up")
-	case e.Kind == "collector_error":
-		return "stale_collector", e.Current == "stale" || e.Current == "down", e.Current == "up"
-	default:
-		return "", false, false
-	}
-}
-
-func (s *Store) Alerts(ctx context.Context, node string, now time.Time) ([]Alert, error) {
-	events, err := s.latestAlertEvents(ctx, node, now)
-	if err != nil {
-		return nil, err
-	}
-	states := map[string]Alert{}
-	for _, e := range events { // one newest transition per alert code defines current state
-		code, trigger, resolved := alertForEvent(e, node)
-		if code == "" {
-			continue
-		}
-		if _, seen := states[code]; seen {
-			continue
-		}
-		a := Alert{Code: code, NodeID: node, Severity: e.Severity, Active: trigger, FirstSeen: e.Timestamp, LastSeen: e.Timestamp, Reason: e.Message}
-		if resolved {
-			a.Active = false
-		}
-		states[code] = a
-	}
-	order := []string{"no_uplink", "relay_failure", "persistent_loss", "stale_collector"}
-	defaultSeverity := map[string]string{"no_uplink": "critical", "relay_failure": "warning", "persistent_loss": "critical", "stale_collector": "warning"}
-	out := make([]Alert, 0, len(order))
-	for _, code := range order {
-		a, ok := states[code]
-		severity := defaultSeverity[code]
-		active := 0.0
-		if !ok {
-			a = Alert{Code: code, NodeID: node, Severity: severity}
-		}
-		out = append(out, a)
-		if a.Active {
-			active = 1
-		}
-		metrics.AlertActive.WithLabelValues(code, severity).Set(active)
-	}
-	return out, nil
-}
-
-func (s *Store) latestAlertEvents(ctx context.Context, node string, now time.Time) ([]Event, error) {
-	if !validLabel(node, true) {
-		return nil, ErrInvalid
-	}
-	now = now.UTC().Truncate(time.Microsecond)
-	ctx, cancel := context.WithTimeout(ctx, QueryTimeout)
-	defer cancel()
-	if err := acquire(ctx, s.query); err != nil {
-		return nil, err
-	}
-	defer func() { <-s.query }()
-	db, err := connect(s.path, true)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT id,ts,kind,source,target,previous,current,severity,validity,message
-		FROM events WHERE node=? AND ts>? AND ts<=? AND kind IN ('uplink_change','relay_failover','probe_error','collector_error')
-		ORDER BY kind,ts DESC,id DESC`, node, now.Add(-Retention).UnixMicro(), now.UnixMicro())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	seen := map[string]bool{}
-	var out []Event
-	for rows.Next() {
-		var e Event
-		var ts int64
-		if err = rows.Scan(&e.ID, &ts, &e.Kind, &e.Source, &e.Target, &e.Previous, &e.Current, &e.Severity, &e.Validity, &e.Message); err != nil {
-			return nil, err
-		}
-		if seen[e.Kind] {
-			continue
-		}
-		seen[e.Kind] = true
-		e.NodeID, e.Timestamp = node, time.UnixMicro(ts).UTC()
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
 func (s *Store) maintainEvents(ctx context.Context, db *sql.DB, now time.Time) error {
 	for {
+		if err := s.limitWAL(ctx, db); err != nil {
+			return err
+		}
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -386,7 +309,7 @@ func deriveUplinkEvents(node string, previous *uplink.Snapshot, current uplink.S
 				}
 			}
 			if old != link.Controller.State {
-				kind, severity := "uplink_change", "info"
+				kind, severity := "collector_error", "info"
 				if link.Controller.State != "up" {
 					kind, severity = "collector_error", "warning"
 				}
@@ -408,19 +331,19 @@ func deriveUplinkEvents(node string, previous *uplink.Snapshot, current uplink.S
 		if !found {
 			old.FailureStage = ""
 		}
-		oldRoute := old.TransportRoute.Interface + ":" + old.TransportRoute.Gateway
-		newRoute := target.TransportRoute.Interface + ":" + target.TransportRoute.Gateway
+		oldRoute := routeIdentity(old)
+		newRoute := routeIdentity(target)
 		if !found || oldRoute != newRoute {
 			events = append(events, makeEvent("route_change", target.ID, oldRoute, newRoute, "info", target.TransportRoute.Reason))
 		}
-		if !found || old.RelayPeerFingerprint != target.RelayPeerFingerprint || old.Relay.State != target.Relay.State {
+		if !found || relayIdentity(old) != relayIdentity(target) {
 			severity := "info"
 			if target.Relay.State != "up" {
 				severity = "warning"
 			}
-			events = append(events, makeEvent("relay_failover", target.ID, old.Relay.State, target.Relay.State, severity, target.Relay.Reason))
+			events = append(events, makeEvent("relay_failover", target.ID, relayIdentity(old), relayIdentity(target), severity, target.Relay.Reason))
 		}
-		if !found || old.Service.State != target.Service.State || old.FailureStage != target.FailureStage {
+		if !found || old.Service.State != target.Service.State || old.FailureStage != target.FailureStage || old.Protocol != target.Protocol {
 			severity := "info"
 			if target.Service.State == "down" {
 				severity = "critical"
@@ -428,5 +351,38 @@ func deriveUplinkEvents(node string, previous *uplink.Snapshot, current uplink.S
 			events = append(events, makeEvent("probe_error", target.ID, old.Service.State+":"+old.FailureStage, target.Service.State+":"+target.FailureStage, severity, target.Service.Reason))
 		}
 	}
+	if previous != nil {
+		for _, old := range previous.Targets {
+			found := false
+			for _, target := range current.Targets {
+				if old.ID == target.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				events = append(events, makeEvent("route_change", old.ID, routeIdentity(old), "removed", "info", "target_removed"), makeEvent("relay_failover", old.ID, relayIdentity(old), "removed", "info", "target_removed"), makeEvent("probe_error", old.ID, old.Service.State, "removed", "info", "target_removed"))
+			}
+		}
+	}
 	return events
+}
+
+func routeIdentity(t uplink.Target) string {
+	overlay, transport := t.Route, t.TransportRoute
+	overlay.RTTMs, transport.RTTMs = nil, nil
+	raw, _ := json.Marshal(struct {
+		Overlay   uplink.Route `json:"overlay"`
+		Transport uplink.Route `json:"transport"`
+	}{overlay, transport})
+	return string(raw)
+}
+func relayIdentity(t uplink.Target) string {
+	raw, _ := json.Marshal(struct {
+		State    string `json:"state"`
+		Reason   string `json:"reason,omitempty"`
+		Expected string `json:"expected_id,omitempty"`
+		Peer     string `json:"peer_fingerprint,omitempty"`
+	}{t.Relay.State, t.Relay.Reason, t.ExpectedRelayID, t.RelayPeerFingerprint})
+	return string(raw)
 }

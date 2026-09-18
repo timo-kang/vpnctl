@@ -236,6 +236,30 @@ func Check(ctx context.Context, path string) error {
 		if bad != 0 {
 			return fmt.Errorf("event history node capacity exceeded")
 		}
+		rows, e := db.QueryContext(ctx, `SELECT node,id,ts,kind,source,target,previous,current,severity,validity,message FROM events`)
+		if e != nil {
+			return e
+		}
+		for rows.Next() {
+			var event Event
+			var ts int64
+			if e = rows.Scan(&event.NodeID, &event.ID, &ts, &event.Kind, &event.Source, &event.Target, &event.Previous, &event.Current, &event.Severity, &event.Validity, &event.Message); e != nil {
+				rows.Close()
+				return e
+			}
+			event.Timestamp = time.UnixMicro(ts).UTC()
+			// Historical age is checked by retention on restore, not against wall time.
+			if ts <= 0 || validateEvent(event.NodeID, event, event.Timestamp) != nil {
+				rows.Close()
+				return fmt.Errorf("invalid stored event")
+			}
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return e
+		}
+
 	}
 
 	return nil

@@ -19,11 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"net/http"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-
 	"vpnctl/internal/addrutil"
 	"vpnctl/internal/agent"
 	"vpnctl/internal/api"
@@ -2127,6 +2122,9 @@ func handleMonitor(args []string) {
 		fatal(errors.New("monitor quality durations and sample counts must be positive"))
 	}
 
+	if *probePort < 1 || *probePort > 65535 || *metricsPort < 0 || *metricsPort > 65535 {
+		fatal(errors.New("probe port must be in 1..65535 and metrics port in 0..65535"))
+	}
 	if *iface == "" {
 		fmt.Fprintln(os.Stderr, "error: --interface is required")
 		os.Exit(2)
@@ -2139,7 +2137,19 @@ func handleMonitor(args []string) {
 		fatal(err)
 	}
 
+	ctx, cancel := signalContext()
+	defer cancel()
 	src := peersource.NewWgSource(*iface, *probePort)
+	checkCtx, stopCheck := context.WithTimeout(ctx, 10*time.Second)
+	peers, err := src.CheckContext(checkCtx)
+	stopCheck()
+	if err != nil {
+		fatal(err)
+	}
+	if peers == 0 {
+		fmt.Fprintln(os.Stderr, "monitor: no discoverable IPv4 peers; configure host AllowedIPs and usable endpoints")
+	}
+	fmt.Fprintf(os.Stderr, "monitor: each peer requires a UDP echo responder on port %d (vpnctl direct serve --listen <peer-vpn-ip>:%d); monitor does not start one. The first probe cycle checks reachability.\n", *probePort, *probePort)
 
 	store, err := monitor.OpenStore(*dataPath)
 	if err != nil {
@@ -2176,27 +2186,14 @@ func handleMonitor(args []string) {
 		fatal(err)
 	}
 
-	if removed, err := store.Cleanup(*retention); err == nil && removed > 0 {
-		fmt.Fprintf(os.Stderr, "cleaned up %d old probe records\n", removed)
-	}
-
 	if *metricsPort > 0 {
-		go func() {
-			mux := http.NewServeMux()
-			registry := prometheus.NewRegistry()
-			registry.MustRegister(mon.Collector())
-			mux.Handle("/metrics", promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, registry}, promhttp.HandlerOpts{}))
-			mux.HandleFunc("/network/quality", mon.QualityHandler)
-			addr := fmt.Sprintf(":%d", *metricsPort)
-			slog.Info("metrics server listening", "addr", addr)
-			if err := http.ListenAndServe(addr, mux); err != nil {
-				slog.Error("metrics server failed", "err", err)
-			}
-		}()
+		stopHTTP, err := startMonitorHTTP(mon, *metricsPort, cancel)
+		if err != nil {
+			fatal(err)
+		}
+		defer stopHTTP()
+		slog.Info("metrics server listening", "port", *metricsPort)
 	}
-
-	ctx, cancel := signalContext()
-	defer cancel()
 
 	if *watch {
 		ww := monitor.NewWatchWriter(os.Stdout)

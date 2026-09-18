@@ -19,6 +19,7 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	var req api.EventRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid event request")
@@ -158,7 +159,7 @@ func (s *Server) handleFleetAlerts(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, history.ErrInvalid) {
 			code = http.StatusBadRequest
 		}
-		writeJSON(w, code, out)
+		writeJSONError(w, code, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, out)

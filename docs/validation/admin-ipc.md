@@ -34,7 +34,7 @@
 | 테스트 | 조건 | 확인 내용 |
 |---|---|---|
 | `TestAdminRemovalOverUnixAndTLSRevokesIdentityAcrossRestart` | 실제 Unix socket + TLS + bootstrap + mTLS | 삭제 직후 fleet/candidates/direct 상태 및 controller WG 구성에서 제거, 기존 인증서 30회 등록/조회 거부, lease 재사용, 재시작 후에도 거부 |
-| `TestAdminVariableMeshConcurrentMutationsAndRestart` | 2 / 16 / 64 / 253개 기존 노드, 모든 노드 사이 양방향 readiness | 신규 N개 등록과 N개 삭제·토큰 생성/폐기 동시 실행, 삭제 ID별 3회 부활 시도 거부, 재시작 후 N개 신규 노드·N개 삭제 기록·N개 폐기 이력 유지 |
+| `TestAdminVariableMeshConcurrentMutationsAndRestart` | 2 / 16 / 64 / 253개 기존 노드, 모든 노드 사이 양방향 readiness | 신규 N개 등록으로 2N population 구성 후 최대 8개 동시 작업으로 N개 삭제·토큰 생성/폐기 실행, 삭제 ID별 3회 부활 시도 거부, 재시작 후 N개 신규 노드·N개 삭제 기록·N개 폐기 이력 유지 |
 | 동일 메쉬 테스트의 최대 규모 | 기존 253개, 교체 중 최대 506개 identity, 기존 readiness 63,756개 방향성 간선 | 삭제 대상의 outgoing/incoming readiness 모두 제거, 신규 등록 유실 및 주소 충돌 없음 |
 | `TestBootstrapSingleUseReplayAndRevocationThroughIPC` | 실제 TLS bootstrap 32개 동시 요청 | 동일 단일 사용 토큰 승인 정확히 1회, IPC revoke 후 50회 재사용 거부 |
 | `TestSingleUseConcurrentAdmissionAndRestart` | 서로 다른 TokenStore 인스턴스 64개 | 공유 flock 하에서 단일 사용 승인 1회, 재시작 후 사용 주체·횟수 유지 |
@@ -81,3 +81,5 @@ go test -race -shuffle=20260915 -count=3 \
   WireGuard 적용과 rollback이 함께 실패했을 때의 자동 수렴은 이 결과로 보장하지 않는다.
 - legacy token 배열은 mutation 때 version 1 형식으로 이전한다. 운영 업그레이드 전
   전체 data directory를 백업하고, 구버전으로 단순 실행 파일 교체를 하지 않는다.
+
+253개 동시 HTTP 관리 요청의 throughput/SLO를 이 무결성 테스트로 보장하지 않는다. API timeout은 30초이며, 영속 mutation 대기열의 overload admission과 명시적 backpressure는 별도 운영 검증 대상이다.

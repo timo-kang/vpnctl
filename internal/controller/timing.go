@@ -15,7 +15,7 @@ func observeHTTP(next http.Handler) http.Handler {
 		// Fixed route allowlist avoids unbounded labels from arbitrary request paths.
 		operation := "other"
 		switch r.URL.Path {
-		case "/register", "/candidates", "/metrics", "/nat-probe", "/direct-result", "/wg-config", "/bootstrap", "/pki/trust", "/pki/renew", "/pki/ack", "/fleet/status", "/fleet/history":
+		case "/register", "/candidates", "/metrics", "/nat-probe", "/direct-result", "/wg-config", "/bootstrap", "/pki/trust", "/pki/renew", "/pki/ack", "/fleet/status", "/fleet/history", "/uplink-observations", "/fleet/uplinks", "/events", "/fleet/events", "/fleet/alerts":
 			operation = r.URL.Path
 		case "/prom/metrics":
 			next.ServeHTTP(w, r)

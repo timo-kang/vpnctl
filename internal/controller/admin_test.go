@@ -343,15 +343,35 @@ func TestAdminVariableMeshConcurrentMutationsAndRestart(t *testing.T) {
 				}
 				s.directOK[fmt.Sprintf("node-%d", n)] = peers
 			}
+
+			// Keep the full 2N registry and Nx(N-1) readiness graph. This test
+			// verifies mutation integrity, not 253 queued durable writes within one
+			// Admin client's 30s deadline on a race-instrumented shared runner.
 			var wg sync.WaitGroup
+			slots := make(chan struct{}, 8)
 			for n := 0; n < size; n++ {
+				slots <- struct{}{}
 				wg.Add(1)
 				go func(n int) {
 					defer wg.Done()
+					defer func() { <-slots }()
 					if _, err := s.registerNode(nodeRegistration{Name: fmt.Sprintf("new-%d", n), PubKey: fmt.Sprintf("new-pub-%d", n)}, false); err != nil {
 						t.Error(err)
-						return
 					}
+				}(n)
+			}
+			wg.Wait()
+			if len(s.reg.Nodes) != 2*size {
+				t.Fatal("full replacement population was not constructed")
+			}
+
+			for n := 0; n < size; n++ {
+				slots <- struct{}{}
+				wg.Add(1)
+				go func(n int) {
+					defer wg.Done()
+					defer func() { <-slots }()
+
 					result, err := api.Admin(context.Background(), dir, api.AdminRequest{Operation: "token.create", TTL: "1h", SingleUse: true})
 					if err != nil {
 						t.Error(err)

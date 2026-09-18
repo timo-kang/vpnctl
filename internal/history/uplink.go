@@ -9,9 +9,11 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
+	"vpnctl/internal/metrics"
 
 	"vpnctl/internal/uplink"
 )
@@ -100,13 +102,6 @@ func (s *Store) IngestUplink(ctx context.Context, node string, snapshot uplink.S
 	if err != nil {
 		return err
 	}
-	var previousSnapshot *uplink.Snapshot
-	s.mu.RLock()
-	if value, ok := s.uplinks[node]; ok {
-		copy := value
-		previousSnapshot = &copy
-	}
-	s.mu.RUnlock()
 	if err = acquire(ctx, s.writer); err != nil {
 		return err
 	}
@@ -124,6 +119,13 @@ func (s *Store) IngestUplink(ctx context.Context, node string, snapshot uplink.S
 	if err = s.limitWAL(ctx, db); err != nil {
 		return err
 	}
+	var previousSnapshot *uplink.Snapshot
+	s.mu.RLock()
+	if value, ok := s.uplinks[node]; ok {
+		copy := value
+		previousSnapshot = &copy
+	}
+	s.mu.RUnlock()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -188,27 +190,43 @@ func (s *Store) IngestUplink(ctx context.Context, node string, snapshot uplink.S
 		return err
 	}
 	isLatest := previousSnapshot == nil || snapshot.At.After(previousSnapshot.At) || snapshot.At.Equal(previousSnapshot.At) && snapshot.ID > previousSnapshot.ID
+	var accepted, dropped []Event
 	if isLatest {
 		for _, event := range deriveUplinkEvents(node, previousSnapshot, snapshot) {
-			event.ID = eventID(event)
-			if _, err = insertEventTx(ctx, tx, node, event); err != nil {
+			sum := sha256.Sum256([]byte(snapshot.ID + ":" + eventID(event)))
+			event.ID = fmt.Sprintf("%x", sum)
+			if err = validateEvent(node, event, now); err != nil {
 				return err
+			}
+			inserted, e := insertEventTx(ctx, tx, node, event)
+			if errors.Is(e, ErrCapacity) {
+				dropped = append(dropped, event)
+				continue
+			}
+			if e != nil {
+				return e
+			}
+			if inserted {
+				accepted = append(accepted, event)
 			}
 		}
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	latestSnapshot, ok := s.uplinks[node]
-	if !ok || snapshot.At.After(latestSnapshot.At) || snapshot.At.Equal(latestSnapshot.At) && snapshot.ID > latestSnapshot.ID {
-		detached, e := unpackSnapshot(payload)
-		if e != nil {
-			return e
-		}
-		s.uplinks[node] = detached
+	for _, e := range accepted {
+		metrics.EventTotal.WithLabelValues(e.Kind, e.Severity, "accepted").Inc()
 	}
+	for _, e := range dropped {
+		metrics.EventTotal.WithLabelValues(e.Kind, e.Severity, "capacity_dropped").Inc()
+	}
+	detached, e := unpackSnapshot(payload)
+	if e != nil {
+		return e
+	}
+	s.mu.Lock()
+	s.rememberUplink(node, detached)
+	s.mu.Unlock()
 	return nil
 }
 func (s *Store) LatestUplinks(now time.Time) map[string]uplink.Snapshot {
@@ -231,27 +249,52 @@ func (s *Store) LatestUplinks(now time.Time) map[string]uplink.Snapshot {
 	return out
 }
 func (s *Store) loadUplinks(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, "SELECT node,payload FROM uplink_latest LIMIT 129")
+	rows, err := db.QueryContext(ctx, "SELECT node FROM uplink_latest LIMIT 129")
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	var nodes []string
 	for rows.Next() {
 		var node string
-		var payload []byte
-		if err = rows.Scan(&node, &payload); err != nil {
+		if err = rows.Scan(&node); err != nil {
+			rows.Close()
 			return err
 		}
-		snapshot, e := unpackSnapshot(payload)
-		if e != nil {
-			return e
-		}
-		s.uplinks[node] = snapshot
+		nodes = append(nodes, node)
 	}
-	if len(s.uplinks) > 128 {
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if len(nodes) > 128 {
 		return ErrCapacity
 	}
-	return rows.Err()
+	for _, node := range nodes {
+		rows, err = db.QueryContext(ctx, "SELECT payload FROM uplink_snapshots WHERE node=? ORDER BY ts DESC,id DESC LIMIT 3", node)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var payload []byte
+			if err = rows.Scan(&payload); err != nil {
+				rows.Close()
+				return err
+			}
+			snapshot, e := unpackSnapshot(payload)
+			if e != nil {
+				rows.Close()
+				return e
+			}
+			s.rememberUplink(node, snapshot)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (s *Store) maintainUplinks(ctx context.Context, db *sql.DB, now time.Time) error {
 	for {
@@ -292,6 +335,7 @@ func (s *Store) maintainUplinks(ctx context.Context, db *sql.DB, now time.Time) 
 			for node, v := range s.uplinks {
 				if !v.At.After(now.Add(-Retention)) {
 					delete(s.uplinks, node)
+					delete(s.uplinkRecent, node)
 				}
 			}
 			s.mu.Unlock()

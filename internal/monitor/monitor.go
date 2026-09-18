@@ -101,22 +101,12 @@ func (m *Monitor) Subscribe() <-chan Snapshot {
 // Run blocks until ctx is cancelled. It calls probeAll immediately and then
 // again on each tick of cfg.Interval.
 func (m *Monitor) Run(ctx context.Context) {
-	m.probeAll(ctx)
 	maintenanceDone := make(chan struct{})
 	if m.cfg.Store != nil {
-		if removed, err := m.cfg.Store.CleanupContext(ctx, m.cfg.Retention); err != nil {
-			if ctx.Err() == nil {
-				logMaintenanceError(err)
-			}
-		} else if removed > 0 {
-			slog.Debug("monitor history retention", "removed", removed)
-		}
 		go func() {
 			defer close(maintenanceDone)
-			interval := m.cfg.Retention / 24
-			if interval < time.Minute {
-				interval = time.Minute
-			}
+			m.maintain(ctx)
+			interval := time.Minute
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
@@ -124,13 +114,7 @@ func (m *Monitor) Run(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if removed, err := m.cfg.Store.CleanupContext(ctx, m.cfg.Retention); err != nil {
-						if ctx.Err() == nil {
-							logMaintenanceError(err)
-						}
-					} else if removed > 0 {
-						slog.Debug("monitor history retention", "removed", removed)
-					}
+					m.maintain(ctx)
 				}
 			}
 		}()
@@ -138,6 +122,7 @@ func (m *Monitor) Run(ctx context.Context) {
 		close(maintenanceDone)
 	}
 
+	m.probeAll(ctx)
 	ticker := time.NewTicker(m.cfg.Interval)
 	defer ticker.Stop()
 	defer func() { <-maintenanceDone }()
@@ -149,6 +134,19 @@ func (m *Monitor) Run(ctx context.Context) {
 		case <-ticker.C:
 			m.probeAll(ctx)
 		}
+	}
+}
+
+func (m *Monitor) maintain(ctx context.Context) {
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if removed, err := m.cfg.Store.CleanupContext(ctx, m.cfg.Retention); err != nil {
+		if parent.Err() == nil {
+			logMaintenanceError(err)
+		}
+	} else if removed > 0 {
+		slog.Debug("monitor history retention", "removed", removed)
 	}
 }
 

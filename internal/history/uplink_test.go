@@ -105,7 +105,7 @@ func TestUplinkMigrationFromV1PreservesPeerData(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	_, e = db.Exec(`DROP TABLE uplink_series;DROP TABLE uplink_results;DROP TABLE uplink_snapshots;DROP TABLE uplink_latest;DROP TABLE uplink_metadata;PRAGMA user_version=1;`)
+	_, e = db.Exec(`DROP TABLE events;DROP TABLE event_metadata;DROP TABLE uplink_series;DROP TABLE uplink_results;DROP TABLE uplink_snapshots;DROP TABLE uplink_latest;DROP TABLE uplink_metadata;PRAGMA user_version=1;`)
 	db.Close()
 	if e != nil {
 		t.Fatal(e)

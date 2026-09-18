@@ -22,8 +22,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
@@ -313,7 +311,7 @@ func (s *Server) httpHandler() http.Handler {
 	mux.HandleFunc("/fleet/events", s.handleAuthorizedEvents)
 	mux.HandleFunc("/fleet/alerts", s.handleAuthorizedAlerts)
 	// Prometheus metrics endpoint — no client cert required so Prometheus can scrape without mTLS.
-	mux.Handle("/prom/metrics", promhttp.Handler())
+	mux.Handle("/prom/metrics", s.metricsHandler())
 	// Status page — simple HTML dashboard, no auth required.
 	mux.HandleFunc("/status", statuspage.Handler(s.statusPageData))
 
