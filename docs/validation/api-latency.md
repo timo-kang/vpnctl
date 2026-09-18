@@ -237,5 +237,41 @@ VPNCTL_RACE=0 VPNCTL_TEST_CPUS=1 ./scripts/test-netns.sh -test.run '^TestNetns_P
 VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 ./scripts/test-netns.sh -test.run '^TestNetns_PKILifecycleUplink$'
 ```
 
-CPU-quota network measurements and CI evidence are recorded below and on #58.
+CPU-quota network measurements are recorded below; CI evidence is linked on #58.
 Admin overload admission and result ambiguity remain tracked independently in #60.
+
+
+### Verified sandbox resource envelope (2026-09-18)
+
+The quota includes controller, every agent, traffic worker and harness, all sharing
+one Docker cgroup. It is not the CPU allocation of an isolated production controller.
+All builds below are non-race, Go 1.25, Linux kernel WireGuard. Application budgets
+remain HTTPS 1s and UDP/TCP 500ms, with zero planned-phase loss/reconnects allowed.
+
+| Entire sandbox quota | Fleet | Planned probes | Failures / reconnects | HTTPS p95 / p99 / max |
+|---|---|---:|---|---|
+| 1 CPU | 1 / 3 / 8 | 38,179 total | 0 / 0 | per-size p99 9.59 / 6.38 / 5.83ms |
+| 1 CPU | 32, two attempts | startup incomplete | failed; no passing lifecycle verdict | responder readiness exceeded 5s |
+| 2 CPUs | 1 / 3 / 8 / 32 | 138,966 total | 0 / 0 | 32-node: 7.19 / 9.79 / 46.85ms |
+| 2 CPUs | 32, repeat 1 | 99,558 | 0 / 0 | 10.44 / 14.68 / 60.31ms |
+| 2 CPUs | 32, repeat 2 | 102,057 | 0 / 0 | 7.12 / 10.26 / 66.23ms |
+
+The three successful 32-node runs contain 12,576 / 12,455 / 12,769 HTTPS successes
+and zero planned HTTPS failures. Intentional packet-loss controls detect 100 / 100 /
+101 UDP failures. Relay forwarding, return route, firewall, uplink and NAT fault
+cycles also pass. This remains single controller/relay validation, not multi-relay
+or physical communication-network switching (M3).
+
+The first 1-CPU startup failure recorded approximately 27.22 CPU-seconds consumed
+across 28 seconds, 256 additional throttled periods out of 280, and 128.66 seconds
+of aggregate throttled-task time. Aggregate throttled time is not request latency.
+In the repeat, the final starting agent log is empty while earlier agents/controller
+continue running. The observations establish an insufficient whole-sandbox startup
+profile, not a universal minimum CPU requirement for production. The failed runs
+are retained; no startup or request deadline was raised to claim success.
+
+This failure also exposed late registration of the sanitized-log cleanup. It now
+registers before starting the first process, preserving logs on early initialization
+failure. Private keys and runtime credential files remain excluded from artifacts.
+[PR #61](https://github.com/timo-kang/vpnctl/pull/61) records the exact evidence and
+[its passing CI](https://github.com/timo-kang/vpnctl/actions/runs/35309665582).
