@@ -101,7 +101,35 @@ exec "$VPNCTL_REAL_WG" "$@"
 	mustWrite(t, marker, "fail")
 	nodeLog := filepath.Join(dir, "node.log")
 	agent := startNetworkProcess(t, ns[1], nodeLog, nil, bin, "node", "serve", "--config", nodePath, "--retry-delay", "100ms", "--retry-max-delay", "200ms")
-	time.Sleep(time.Until(leaf.NotAfter) + 500*time.Millisecond)
+	// A live VPN responder must remain reachable through initial registration
+	// failures and retry backoff, not just once the controller recovers.
+	testBin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		cmd := netCommand(ctx, ns[0], testBin, "-test.run=^TestNetworkWorker$")
+		cmd.Env = append(os.Environ(), "VPNCTL_WORKER=peer-probe", "VPNCTL_PROBE_ENDPOINT="+strings.Split(nodeCfg.Node.VPNIP, "/")[0]+":51900")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("probe during registration failure: %w: %s", err, out)
+		}
+		return nil
+	}
+	eventually(t, 5*time.Second, "responder during failed initial registration", probe)
+	probeCount := 0
+	for time.Now().Before(leaf.NotAfter.Add(500 * time.Millisecond)) {
+		if err := probe(); err != nil {
+			t.Fatal(err)
+		}
+		probeCount++
+		time.Sleep(100 * time.Millisecond)
+	}
+	if probeCount < 3 {
+		t.Fatalf("insufficient registration-failure probes: %d", probeCount)
+	}
 	current, err := pki.LoadCredentials(nodeCfg.Node.PKIDir)
 	if err != nil {
 		t.Fatal(err)
@@ -152,6 +180,10 @@ exec "$VPNCTL_REAL_WG" "$@"
 		t.Fatal("controller bypassed WG", route)
 	}
 	agent.terminate(t)
+	if out := netOutput(t, ns[1], "ss", "-H", "-lun", "sport", "=", ":51900"); strings.TrimSpace(out) != "" {
+		t.Fatal("probe socket survived agent shutdown")
+	}
+	t.Logf("%d successful WG probes during registration failure and credential renewal", probeCount)
 	ctrl.terminate(t)
 	t.Log("renewed beyond original 8s certificate lifetime during failed initial registration; same identity/lease recovered over WG")
 }

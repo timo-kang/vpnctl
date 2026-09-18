@@ -21,6 +21,11 @@ import (
 
 // Run starts the long-running node agent loop.
 func Run(ctx context.Context, cfg config.NodeConfig) error {
+	var probes ProbeSupervisor
+	defer probes.Close()
+	if err := probes.Configure(cfg); err != nil {
+		return err
+	}
 	var observations UplinkSupervisor
 	observations.Configure(ctx, cfg)
 	defer observations.Stop()
@@ -33,7 +38,7 @@ func Run(ctx context.Context, cfg config.NodeConfig) error {
 		defer func() { cancelRenewal(); <-done }()
 	}
 
-	return runSession(ctx, cfg, client)
+	return runSessionWithProbe(ctx, cfg, client, probes.shared)
 }
 
 // RunSession runs one agent attempt. Its supervisor owns credential maintenance
@@ -45,6 +50,15 @@ func RunSession(ctx context.Context, cfg config.NodeConfig) error {
 }
 
 func runSession(ctx context.Context, cfg config.NodeConfig, client *api.Client) error {
+	var probes ProbeSupervisor
+	defer probes.Close()
+	if err := probes.Configure(cfg); err != nil {
+		return err
+	}
+	return runSessionWithProbe(ctx, cfg, client, probes.shared)
+}
+
+func runSessionWithProbe(ctx context.Context, cfg config.NodeConfig, client *api.Client, shared *direct.Shared) error {
 
 	nodeID, vpnIP, err := register(ctx, client, cfg)
 	if err != nil {
@@ -52,16 +66,6 @@ func runSession(ctx context.Context, cfg config.NodeConfig, client *api.Client) 
 	}
 	if cfg.VPNIP == "" && vpnIP != "" {
 		cfg.VPNIP = vpnIP
-	}
-
-	var shared *direct.Shared
-	if cfg.ProbePort > 0 {
-		shared, err = direct.ListenShared(fmt.Sprintf(":%d", cfg.ProbePort))
-		if err != nil {
-			return err
-		}
-		defer shared.Close()
-		slog.Info("probe responder started", "addr", shared.LocalAddr())
 	}
 
 	if err := fillServerConfig(ctx, client, &cfg); err != nil {

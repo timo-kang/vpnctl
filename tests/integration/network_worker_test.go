@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"vpnctl/internal/api"
+	"vpnctl/internal/direct"
 	"vpnctl/internal/pki"
 )
 
@@ -46,6 +47,12 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "peer-probe":
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if _, err := direct.ProbePeer(ctx, ":0", os.Getenv("VPNCTL_PROBE_ENDPOINT"), 500*time.Millisecond); err != nil {
+			t.Fatal(err)
+		}
 	case "fleet-page":
 		creds, e := pki.LoadCredentials(os.Getenv("VPNCTL_PKI"))
 		if e != nil {

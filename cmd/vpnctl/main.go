@@ -628,6 +628,8 @@ func nodeServe(args []string) {
 	ctx, cancel := signalContext()
 	defer cancel()
 
+	var probes agent.ProbeSupervisor
+	defer probes.Close()
 	var credentials credentialSupervisor
 	defer credentials.stop()
 	var observations agent.UplinkSupervisor
@@ -661,9 +663,15 @@ func nodeServe(args []string) {
 			fatal(err)
 		}
 
+		tunnelRestored := false
+		// Reachability probes must not depend on controller sync/registration.
+		// The owner retains the same socket through retry and joins it on exit.
+		if err := probes.Configure(*cfg.Node); err != nil {
+			fmt.Fprintf(os.Stderr, "probe responder configuration failed: %v\n", err)
+			goto retry
+		}
 		observations.Configure(ctx, *cfg.Node)
 		credentials.configure(*cfg.Node)
-		tunnelRestored := false
 		// A provisioned node may reach its controller only through WireGuard.
 		// Restore the cached relay path before making any controller request.
 		// Incomplete first-time configurations still enroll/sync before WG up.
@@ -692,7 +700,7 @@ func nodeServe(args []string) {
 			}
 		}
 
-		if err := agent.RunSession(ctx, *cfg.Node); err != nil {
+		if err := probes.RunSession(ctx, *cfg.Node); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}

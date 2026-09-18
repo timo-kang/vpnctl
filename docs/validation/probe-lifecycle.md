@@ -107,3 +107,43 @@ before that measurement correction. That does not establish the cause of the
 CI HTTPS latency. Issue #39 tracks profiling and repeatability with the original
 1s HTTPS criterion. Neither a single successful rerun nor this probe fix closes
 that issue, and M1 remains incomplete.
+
+## Controller-independent responder startup (#63)
+
+The post-merge #61 main run
+[35310183839](https://github.com/timo-kang/vpnctl/actions/runs/35310183839)
+failed the 32-node initial UDP responder readiness check. Earlier agents and the
+controller continued renewing certificates, while the last agent's log was empty.
+That runner had four visible CPUs, no cgroup quota/throttling, and elevated CPU
+pressure; it must not be described as the same one-CPU quota environment as the
+local startup failures recorded in `api-latency.md`.
+
+The actual startup order coupled a local responder to two controller registration
+requests: CLI `syncConfigOnce`, then agent `RunSession`, then UDP bind. A blocked
+registration reproduction returns connection-refused for an otherwise configured
+local probe. The responder is a reachability service and does not require controller
+registration to succeed. Controller-side storage/CPU delays should not themselves
+make that independent service unreachable.
+
+`ProbeSupervisor` now owns the shared UDP socket in the node process across config
+sync, initial registration, session failures and retry backoff. STUN and direct
+workers borrow that same socket, preserving its port and mapping. Sessions join
+their workers before the owner changes configuration or closes the socket. A new
+port is bound before the old socket closes; a bind failure retains the old working
+responder and prevents the new session from starting. Disabling the port closes it.
+Process shutdown closes the socket after sessions finish. Standalone `agent.Run`
+and `RunSession` also bind before registration and release their owned resources.
+
+A successful UDP probe means only responder reachability. Registration failures,
+authentication failures, retries, credential renewal and cached tunnel restoration
+retain their separate contracts. No controller API timeout, readiness deadline,
+packet loss allowance, or fleet size was relaxed. This does not remove the resource
+cost of controller registration or establish a minimum production CPU specification.
+
+Regression tests cover a deliberately held initial registration, 20 failed sessions
+sharing one socket, port reload, bind collision, disable/re-enable and repeated close.
+The real-kernel initial-registration failure test additionally probes the node over
+WireGuard throughout repeated rejected registrations and beyond its original
+certificate expiry, verifies renewal, then checks identity/lease recovery and socket
+release on process shutdown. Existing 1/3/8/32 fleet, controller restart, cold node
+restart and relay fault tests remain part of the required CI gate.
