@@ -151,3 +151,31 @@ WireGuard throughout repeated rejected registrations and beyond its original
 certificate expiry, verifies renewal, then checks identity/lease recovery and socket
 release on process shutdown. Existing 1/3/8/32 fleet, controller restart, cold node
 restart and relay fault tests remain part of the required CI gate.
+
+### Retry dataplane regression found by the new test (#65)
+
+The first kernel run of the continuous registration-failure probe test failed one
+500ms probe even after responder startup was isolated. Investigation found that
+`sameSetConf` treated an omitted desired ListenPort and a kernel-assigned port as
+different interface fields. The default dynamic-port configuration therefore invoked
+`wg syncconf` on every retry, needlessly reapplying peer AllowedIPs. A focused
+before-fix regression measured 100 writes for 100 unchanged inspections.
+
+Comparison now retains a valid kernel-assigned port when configuration deliberately
+omits it. Explicit port changes, keys, peer sets and AllowedIPs still require repair;
+malformed, zero and out-of-range reported ports do not qualify as a match. Each call
+still inspects live kernel state. After this correction the real-kernel
+registration-failure scenario passed three repeats with 80/72/73 successful probes,
+zero probe failures, renewed credentials beyond original expiry, and recovery of
+the same identity/lease. The first failed run is retained as a failure.
+
+The responder change's separate 2-CPU fleet matrix completed 139,396 planned
+UDP/TCP/HTTPS probes with zero failures/reconnects (1/3/8/32 nodes). Its accompanying
+registration-failure test was the failure that triggered #65; that whole command
+is not reported as passing until the corrected integration suite passes.
+A one-CPU 32-node repeat after responder isolation passed 106,174 planned probes,
+zero failures/reconnects, and all relay fault cycles. Its 18,095 successful HTTPS
+requests had p95/p99/max 289.38/327.02/695.62ms. The run took 221.56s, substantially
+slower than the 2-CPU 32-node run (66.26s, HTTPS p99 9.18ms). This demonstrates the
+startup improvement in the previously failing profile; it is one measured sandbox
+run, not a production capacity guarantee. Final PR/main CI records are on #63/#65.

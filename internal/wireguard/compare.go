@@ -6,6 +6,7 @@ package wireguard
 import (
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -26,6 +27,15 @@ func sameSetConf(desired, current string) bool {
 		existing, ok := have[section]
 		if !ok {
 			return false
+		}
+		if section == "interface" && fields["ListenPort"] == "" && existing["ListenPort"] != "" {
+			// An omitted listen port asks the kernel to retain/allocate its own port.
+			// Reapplying unchanged AllowedIPs on every retry can drop in-flight packets.
+			port, err := strconv.Atoi(existing["ListenPort"])
+			if err != nil || port < 1 || port > 65535 {
+				return false
+			}
+			delete(existing, "ListenPort")
 		}
 		if section != "interface" && fields["Endpoint"] == "" {
 			delete(existing, "Endpoint")
