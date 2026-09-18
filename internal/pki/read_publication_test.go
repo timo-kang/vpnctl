@@ -214,6 +214,9 @@ func TestLegacyFirstUsePublishesOnceAndBindsIdentity(t *testing.T) {
 	if err := a.commit(next); err != nil {
 		t.Fatal(err)
 	}
+	if a.CertificateObserved(cert) || a.CertificateObserved(nil) {
+		t.Fatal("unobserved certificate classified as committed")
+	}
 	writes := 0
 	original := a.write
 	a.write = func(path string, raw []byte, mode os.FileMode) error {
@@ -231,6 +234,9 @@ func TestLegacyFirstUsePublishesOnceAndBindsIdentity(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	if !a.CertificateObserved(cert) {
+		t.Fatal("committed first observation remains classified as a writer")
+	}
 	if writes != 1 {
 		t.Fatalf("first use persisted %d times", writes)
 	}
@@ -239,6 +245,9 @@ func TestLegacyFirstUsePublishesOnceAndBindsIdentity(t *testing.T) {
 	}
 	if err := a.Revoke(Fingerprint(cert)); err != nil {
 		t.Fatal(err)
+	}
+	if !a.CertificateObserved(cert) {
+		t.Fatal("revocation removed observation metadata")
 	}
 	if err := a.Observe(cert, "legacy"); !errors.Is(err, ErrCertificateDenied) {
 		t.Fatal("revoked imported certificate accepted", err)

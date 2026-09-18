@@ -214,6 +214,10 @@ func (s *Server) startPKIMaintenance() func() {
 		defer ticker.Stop()
 		var lastCAWarning time.Time
 		for {
+			release, err := s.pkiAdmission.acquire(ctx)
+			if err != nil {
+				return
+			}
 			s.stateMu.RLock()
 			renewed, err := s.authority.MaintainServer()
 			if renewed || err != nil {
@@ -225,6 +229,7 @@ func (s *Server) startPKIMaintenance() func() {
 				slog.Warn("CA expiry approaching", "remaining_seconds", caRemaining)
 			}
 			s.stateMu.RUnlock()
+			release()
 			select {
 			case <-ctx.Done():
 				return

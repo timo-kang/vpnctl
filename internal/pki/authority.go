@@ -422,6 +422,17 @@ func validateAuthorityCertificate(s authorityState, cert *x509.Certificate) (str
 	return Fingerprint(chains[0][len(chains[0])-1]), nil
 }
 
+// CertificateObserved classifies first-use persistence without authorizing the
+// certificate. Records are retained across revocation/retirement, so a known
+// record cannot become an unobserved writer. Callers must still call Observe.
+func (a *Authority) CertificateObserved(cert *x509.Certificate) bool {
+	if cert == nil {
+		return false
+	}
+	_, ok := a.published.Load().Certificates[Fingerprint(cert)]
+	return ok
+}
+
 // Observe checks even established TLS connections against current trust, expiry
 // and revocations. Legacy certificates acquire persisted metadata on first use.
 func (a *Authority) Observe(cert *x509.Certificate, nodeID string) error {

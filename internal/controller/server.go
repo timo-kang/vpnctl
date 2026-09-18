@@ -52,6 +52,7 @@ type Server struct {
 	// stateMu drains admitted requests before removal, including metric writes.
 	stateMu        sync.RWMutex
 	adminAdmission adminAdmission
+	pkiAdmission   pkiAdmission
 	reg            *store.Registry
 	ipam           *ipam
 	history        history.Storage
@@ -350,6 +351,14 @@ type authenticatedNode struct {
 // authorizeNode to bind the authenticated identity to the requested resource.
 func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.requestMayWritePKI(r) {
+			release, err := s.pkiAdmission.acquire(r.Context())
+			if err != nil {
+				writeJSONError(w, http.StatusRequestTimeout, "PKI request canceled before admission")
+				return
+			}
+			defer release()
+		}
 		admissionStart := time.Now()
 		s.stateMu.RLock()
 		observeStage("api", "admission_wait", admissionStart)
@@ -496,6 +505,12 @@ func certificateFingerprint(cert *x509.Certificate) string {
 
 // handleBootstrap handles POST /bootstrap for node enrollment via token + CSR.
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	release, err := s.pkiAdmission.acquire(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusRequestTimeout, "bootstrap canceled before admission")
+		return
+	}
+	defer release()
 	s.stateMu.RLock()
 	defer s.stateMu.RUnlock()
 	if r.Method != http.MethodPost {

@@ -275,3 +275,47 @@ registers before starting the first process, preserving logs on early initializa
 failure. Private keys and runtime credential files remain excluded from artifacts.
 [PR #61](https://github.com/timo-kang/vpnctl/pull/61) records the exact evidence and
 [its passing CI](https://github.com/timo-kang/vpnctl/actions/runs/35309665582).
+
+## PKI writer backlog before the security barrier (#66)
+
+Post-merge main `785ea43`, [run 35312154424](https://github.com/timo-kang/vpnctl/actions/runs/35312154424),
+failed with 84 HTTPS deadlines at 32 nodes: revocation 9, rotation 32, rollback 43.
+The 103,131 planned samples in that fleet had no UDP/TCP failure. Smaller fleets
+and the independent registration-failure/WireGuard renewal test passed. This run
+remains a failure; neither preceding PR success nor a later rerun replaces it.
+
+Unlike the earlier uninstrumented failures, the new stage metrics identify an
+admission backlog. The two CA activations held the exclusive barrier for only
+3.2/3.7ms but waited for admitted readers for 1.223/1.280s. Many renewal/ack
+handlers held `stateMu.RLock` while waiting for the one Authority writer. Once
+an administrator requested the exclusive barrier, new fleet reads stopped until
+all already admitted durable writes drained. The host exposed four CPUs without
+a quota or throttling, with CPU and I/O pressure; this is not evidence of the same
+one-CPU startup fault. HTTP traces completed TLS/request writes before timing out
+waiting for response headers.
+
+PKI writers now queue through a cancellable controller gate **before** taking
+`stateMu`. Renewal, acknowledgement, bootstrap, legacy first observation and server
+maintenance share this order. PKI admin mutations and node removal take that same
+gate before draining admitted requests. Known-certificate reads and PKI status do
+not queue for a writer. Once admitted, requests still recheck current identity,
+trust, expiry, revocation and CA acknowledgement gates. Observation classification
+is only a scheduling hint and grants no authorization. Records remain present
+after revocation/retirement; a known reader cannot silently become a first-use
+writer behind the barrier.
+
+The `pki_writer/admission_wait` controller histogram records this outer queue.
+Canceled request/maintenance waiters leave without later execution. Already
+admitted admin operations retain their durable completion/result-reconciliation
+contract. This serializes PKI writers, not all HTTP connections, and does not claim
+bounded latency for an arbitrarily slow durable commit or a held admitted handler.
+The exclusive security barrier still drains admitted work before mutation.
+
+A regression holds an authenticated PKI handler, queues 32 writers and revocation,
+and requires 32 authenticated fleet reads to finish within the unchanged 1s
+budget while that first handler remains held. It fails before this change and
+passes after it. Additional checks cover canceled waiters, authorization after
+revocation/removal, maintenance shutdown while queued, legacy first-use metadata,
+CA node-set revalidation and removal drain semantics. Authority-level blocked-write
+and pre/post-rename fault tests remain in the full race suite. Final kernel and
+PR/main evidence is recorded on #66 and the current M1 gate #13.

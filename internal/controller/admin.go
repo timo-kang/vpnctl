@@ -266,6 +266,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 var errNodeNotFound = errors.New("node not found")
 
 func (s *Server) removeNode(nodeID string) error {
+	release, _ := s.pkiAdmission.acquire(context.Background())
+	defer release()
 	// Wait for already admitted authenticated requests, then exclude new ones until
 	// the tombstone, dataplane and all volatile node state have been committed.
 	s.stateMu.Lock()
