@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"vpnctl/internal/api"
+	"vpnctl/internal/config"
 	"vpnctl/internal/pki"
 )
 
@@ -372,4 +373,74 @@ func TestSlowPKIBodyDoesNotReserveWriter(t *testing.T) {
 			<-done
 		})
 	}
+}
+
+func TestServerCertificateRenewsAheadOfClientBacklog(t *testing.T) {
+	s, err := NewServer(config.ControllerConfig{DataDir: t.TempDir(), Listen: "127.0.0.1:0", VPNCIDR: "10.7.0.0/24", PKI: &config.PKIConfig{CAExpiry: "24h", ClientExpiry: "24h", ServerExpiry: "3s", ServerRenewBefore: "2s", CheckInterval: "10ms"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InitPKI(); err != nil {
+		t.Fatal(err)
+	}
+	before := s.authority.Status().Server
+	waitPKI(t, 2*time.Second, func() bool { return time.Until(before.ExpiresAt) <= 2*time.Second })
+	release, err := s.pkiAdmission.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	unlock := func() { once.Do(release) }
+	defer unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	normalRelease := make(chan struct{})
+	var closeOnce sync.Once
+	unblock := func() { closeOnce.Do(func() { close(normalRelease) }) }
+	defer unblock()
+	var writers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			release, err := s.pkiAdmission.acquire(ctx)
+			if err == nil {
+				defer release()
+				<-normalRelease
+			}
+		}()
+	}
+	waitPKI(t, time.Second, func() bool {
+		s.pkiAdmission.mu.Lock()
+		defer s.pkiAdmission.mu.Unlock()
+		return len(s.pkiAdmission.normal) == 32
+	})
+	stop := s.startPKIMaintenance()
+	defer stop()
+	waitPKI(t, time.Second, func() bool {
+		s.pkiAdmission.mu.Lock()
+		defer s.pkiAdmission.mu.Unlock()
+		return len(s.pkiAdmission.normal)+len(s.pkiAdmission.priority) == 33
+	})
+	unlock()
+	// Normal writers deliberately cannot finish yet. Maintenance must reach the
+	// signer without waiting for their work, before the original certificate dies.
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	renewed := false
+	for !renewed {
+		select {
+		case <-ticker.C:
+			renewed = s.authority.Status().Server.Fingerprint != before.Fingerprint
+		case <-deadline:
+			unblock()
+			cancel()
+			writers.Wait()
+			t.Fatal("server renewal waited behind client backlog")
+		}
+	}
+	unblock()
+	cancel()
+	writers.Wait()
 }

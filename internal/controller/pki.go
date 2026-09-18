@@ -214,7 +214,7 @@ func (s *Server) startPKIMaintenance() func() {
 		defer ticker.Stop()
 		var lastCAWarning time.Time
 		for {
-			release, err := s.pkiAdmission.acquire(ctx)
+			release, err := s.pkiAdmission.acquirePriority(ctx)
 			if err != nil {
 				return
 			}

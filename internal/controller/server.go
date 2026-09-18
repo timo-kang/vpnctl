@@ -553,7 +553,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	releaseRegistry, err := s.registryAdmission.admit(r.Context(), false, "registry_writer")
+	releaseRegistry, err := s.registryAdmission.admit(r.Context(), true, "registry_writer")
 	if err != nil {
 		writeJSONError(w, http.StatusRequestTimeout, "bootstrap canceled before registry admission")
 		return

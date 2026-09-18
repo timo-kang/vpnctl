@@ -354,3 +354,16 @@ Canceled requests are rechecked after admission and cannot execute late. Repeate
 regressions cover both writer backlogs, fair scheduling, cancellation, revoked
 preflight, post-wait reauthorization, independent renewal during a registry stall,
 and slow request bodies. Request deadlines and loss criteria are unchanged.
+
+The next complete one-CPU run reached all phases but failed 113 HTTPS samples
+at revocation because the server certificate briefly expired. The 10s fixture
+certificate renewed at 06:19:16.555Z and again at 06:19:26.273Z, immediately after
+bootstrap issuance at 06:19:26.162Z. A bootstrap reservation could retain the PKI
+writer while waiting behind the registry backlog, and maintenance still used the
+normal PKI queue. Bootstrap now uses the priority registry class, and controller
+certificate maintenance uses the priority PKI class. Class alternation preserves
+normal client progress. A real 3s-server-certificate regression holds 32 normal
+writers and verifies that the signer renews before those writers are released.
+The run with 113 failures is retained as a failure, not as a successful capacity
+measurement. Final acceptance uses the subsequent exact-commit CI and recorded
+resource profiles on #66.
