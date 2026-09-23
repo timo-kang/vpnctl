@@ -199,7 +199,11 @@ func seedUplinkScale(t *testing.T, s *Store, now time.Time, step time.Duration) 
 			}
 		}
 	}
-	if _, e = tx.Exec("UPDATE uplink_metadata SET row_count=?", 32*count); e != nil {
+	var nodes int
+	if e = tx.QueryRow("SELECT count(*) FROM fixture_nodes").Scan(&nodes); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = tx.Exec("UPDATE uplink_metadata SET row_count=?", nodes*count); e != nil {
 		t.Fatal(e)
 	}
 	if e = tx.Commit(); e != nil {
@@ -213,7 +217,7 @@ func seedUplinkScale(t *testing.T, s *Store, now time.Time, step time.Duration) 
 	if len(out.Summaries) != 4 || out.Summaries[0].Samples != count || len(out.Snapshots) != 100 || !out.Truncated {
 		t.Fatal("incomplete staged history", out)
 	}
-	t.Logf("uplink nodes=32 targets=4 cadence=%s snapshots=%d query=%s", step, count*32, time.Since(start))
+	t.Logf("uplink nodes=%d targets=4 cadence=%s snapshots=%d query=%s", nodes, step, count*nodes, time.Since(start))
 }
 
 func TestUplinkSeriesQuotaRollsBackAndOlderReportsDoNotReplaceLatest(t *testing.T) {

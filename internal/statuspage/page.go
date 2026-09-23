@@ -16,10 +16,11 @@ var tmpl = template.Must(template.ParseFS(content, "index.html"))
 
 // Data is passed to the status page template.
 type Data struct {
-	Title       string
-	Nodes       []NodeStatus
-	OnlineCount int
-	TotalCount  int
+	Title         string
+	Nodes         []NodeStatus
+	OnlineCount   int
+	TotalCount    int
+	HistoryTiered bool
 }
 
 // NodeStatus represents one node in the status page.
