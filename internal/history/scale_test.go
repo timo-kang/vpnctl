@@ -149,6 +149,10 @@ func testWALBackpressure(t *testing.T) {
 	if e = s.Ingest(context.Background(), "robot", []Observation{sample}, now); !errors.Is(e, ErrCapacity) {
 		t.Fatal("pinned oversized WAL was not rejected", e)
 	}
+	var quota *QuotaError
+	if errors.As(e, &quota) {
+		t.Fatal("temporary WAL pressure classified as logical quota", e)
+	}
 	if got := s.Latest(now)["robot"][0]; got.SampleCount != 1 {
 		t.Fatal("failed WAL write published", got)
 	}

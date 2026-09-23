@@ -34,6 +34,19 @@ var (
 	ErrCapacity = errors.New("history capacity reached")
 )
 
+// QuotaError identifies a rejected probe batch whose logical storage budget is
+// exhausted. It deliberately excludes temporary WAL/lock/IO backpressure.
+// ErrCapacity remains the compatibility umbrella for existing storage callers.
+type QuotaError struct {
+	Resource string
+	Limit    int
+}
+
+func (e *QuotaError) Error() string {
+	return fmt.Sprintf("%s: %s limit %d", ErrCapacity, e.Resource, e.Limit)
+}
+func (e *QuotaError) Unwrap() error { return ErrCapacity }
+
 // Observation is one probe outcome, including an explicit unavailable observation.
 // Path/relay/uplink are reporter claims, not independently verified route state.
 type Observation struct {

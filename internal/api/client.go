@@ -18,10 +18,32 @@ import (
 	"vpnctl/internal/history"
 )
 
-// HTTPError preserves the response status for bounded producer retry decisions.
+const CodeHistoryQuota = "history_quota"
+
+// ErrorResponse adds an optional machine-readable classification to the legacy
+// error message. Callers retain status-based handling for unknown/missing codes.
+type ErrorResponse struct {
+	Error    string `json:"error"`
+	Code     string `json:"code,omitempty"`
+	Resource string `json:"resource,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
+// HTTPError preserves the response status and code for producer retry decisions.
 type HTTPError struct {
 	StatusCode      int
 	Status, Message string
+	Code            string
+}
+
+func responseError(res *http.Response) *HTTPError {
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 8192))
+	e := &HTTPError{StatusCode: res.StatusCode, Status: res.Status, Message: strings.TrimSpace(string(body))}
+	var response ErrorResponse
+	if json.Unmarshal(body, &response) == nil {
+		e.Code = response.Code
+	}
+	return e
 }
 
 func (e *HTTPError) Error() string {
@@ -160,8 +182,7 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 8192))
-		return &HTTPError{StatusCode: res.StatusCode, Status: res.Status, Message: strings.TrimSpace(string(body))}
+		return responseError(res)
 	}
 
 	if out == nil {
@@ -185,8 +206,7 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 8192))
-		return &HTTPError{StatusCode: res.StatusCode, Status: res.Status, Message: strings.TrimSpace(string(body))}
+		return responseError(res)
 	}
 
 	decoder := json.NewDecoder(res.Body)

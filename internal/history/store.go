@@ -311,8 +311,11 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 			if err = tx.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(node=?),0) FROM streams", node).Scan(&total, &own); err != nil {
 				return err
 			}
-			if total >= MaxStreams || own >= MaxNodeStreams {
-				return ErrCapacity
+			if total >= MaxStreams {
+				return &QuotaError{Resource: "streams", Limit: MaxStreams}
+			}
+			if own >= MaxNodeStreams {
+				return &QuotaError{Resource: "node_streams", Limit: MaxNodeStreams}
 			}
 			res, e := tx.ExecContext(ctx, "INSERT INTO streams(node,peer,path,relay,uplink,source) VALUES(?,?,?,?,?,?)", node, o.PeerID, o.Path, o.RelayID, o.Uplink, o.Source)
 			if e != nil {
@@ -355,7 +358,7 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 		return err
 	}
 	if count+added > MaxRows {
-		return ErrCapacity
+		return &QuotaError{Resource: "rows", Limit: MaxRows}
 	}
 	// Replay before commit: pathological per-stream sample density is rejected
 	// atomically, not acknowledged before discovering an unusable snapshot.
@@ -412,7 +415,7 @@ func replay(ctx context.Context, db reader, id int64, st Stream) (Measurement, e
 			return Measurement{}, err
 		}
 		if len(samples) > MaxWindowSamples {
-			return Measurement{}, ErrCapacity
+			return Measurement{}, &QuotaError{Resource: "window_samples", Limit: MaxWindowSamples}
 		}
 	}
 	q := quality.ReplayQuality(samples)

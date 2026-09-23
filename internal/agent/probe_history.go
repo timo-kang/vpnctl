@@ -44,6 +44,9 @@ func (s *ProbeHistorySupervisor) Configure(ctx context.Context, cfg config.NodeC
 				var response *api.HTTPError
 				retry := true
 				if errors.As(err, &response) {
+					if response.StatusCode == http.StatusServiceUnavailable && response.Code == api.CodeHistoryQuota {
+						return false, errors.Join(observation.ErrQuotaRejected, err)
+					}
 					// 401/403 can recover after registration/trust sync; still bounded.
 					retry = response.StatusCode != http.StatusBadRequest && response.StatusCode != http.StatusConflict && response.StatusCode != http.StatusRequestEntityTooLarge && response.StatusCode != http.StatusNotFound
 				}
