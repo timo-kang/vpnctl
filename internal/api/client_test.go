@@ -5,11 +5,14 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"vpnctl/internal/history"
 )
 
 func TestClient_ErrorIncludesBody(t *testing.T) {
@@ -36,6 +39,36 @@ func TestClient_ErrorIncludesBody(t *testing.T) {
 	}
 	if want := `"error":"nope"`; !strings.Contains(got, want) {
 		t.Fatalf("error missing body: %q", got)
+	}
+}
+
+func TestFleetHistoryV3RequiresMetadataAndPreservesPageFilters(t *testing.T) {
+	for _, missing := range []string{"", "tiering", "storage"} {
+		t.Run(missing, func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				q := r.URL.Query()
+				if q.Get("source") != "agent-direct" || q.Get("cursor") != "opaque-page" || q.Get("node_id") != "robot" || q.Get("window") != "7d" || q.Get("bucket") != "1h" {
+					t.Error("page filters changed", q)
+				}
+				resp := FleetHistoryResponse{SchemaVersion: 3, Tiering: &history.PageInfo{NextCursor: "next"}, Storage: &history.TieredStats{}, Nodes: []FleetNodeHistory{}}
+				if missing == "tiering" {
+					resp.Tiering = nil
+				}
+				if missing == "storage" {
+					resp.Storage = nil
+				}
+				json.NewEncoder(w).Encode(resp)
+			}))
+			defer s.Close()
+			resp, err := NewClient(s.URL).FleetHistoryPage(context.Background(), "7d", "robot", "1h", "agent-direct", "opaque-page")
+			if missing == "" {
+				if err != nil || resp.Tiering.NextCursor != "next" {
+					t.Fatal(resp, err)
+				}
+			} else if err == nil {
+				t.Fatal("incomplete v3 accepted")
+			}
+		})
 	}
 }
 

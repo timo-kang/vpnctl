@@ -43,7 +43,13 @@ func lifecycleServer(t *testing.T, clientLife ...string) (*Server, *httptest.Ser
 	if len(clientLife) > 0 {
 		clientLifetime, clientWindow = clientLife[0], "1s"
 	}
-	s, err := NewServer(config.ControllerConfig{DataDir: dir, Listen: "127.0.0.1:0", VPNCIDR: "10.7.0.0/24", WGAddress: "10.7.0.1/24", PKI: &config.PKIConfig{CAExpiry: "2m", ServerExpiry: "8s", ClientExpiry: clientLifetime, ServerRenewBefore: "6s", ClientRenewBefore: clientWindow, CheckInterval: "100ms", CAOverlap: "1s"}})
+	caLifetime, serverLifetime, serverWindow := "2m", "8s", "6s"
+	// Long capacity tests use ordinary-lived credentials. Short lifecycle tests
+	// keep deliberately aggressive expiry/renewal settings above.
+	if len(clientLife) > 1 {
+		caLifetime, serverLifetime, serverWindow = clientLife[1], clientLifetime, "1m"
+	}
+	s, err := NewServer(config.ControllerConfig{DataDir: dir, Listen: "127.0.0.1:0", VPNCIDR: "10.7.0.0/24", WGAddress: "10.7.0.1/24", PKI: &config.PKIConfig{CAExpiry: caLifetime, ServerExpiry: serverLifetime, ClientExpiry: clientLifetime, ServerRenewBefore: serverWindow, ClientRenewBefore: clientWindow, CheckInterval: "100ms", CAOverlap: "1s"}})
 	if err != nil {
 		t.Fatal(err)
 	}

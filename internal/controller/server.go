@@ -1434,6 +1434,9 @@ func (s *Server) applyWGContext(ctx context.Context, peers []wireguard.Peer) err
 func (s *Server) statusPageData() statuspage.Data {
 	snapshot := s.fleetSnapshot()
 	data := statuspage.Data{Title: "vpnctl", TotalCount: len(snapshot.Nodes)}
+	if st, ok := s.history.(interface{ Tiered() bool }); ok {
+		data.HistoryTiered = st.Tiered()
+	}
 	for _, n := range snapshot.Nodes {
 		online := n.Status == "online"
 		data.Nodes = append(data.Nodes, statuspage.NodeStatus{

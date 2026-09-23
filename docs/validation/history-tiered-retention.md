@@ -1,5 +1,9 @@
 # Full mesh 이력의 계층 보존 후보와 활성화 조건
 
+후속 구현: [schema v6 운영 저장 계약과 활성화/복구](history-tiered-storage.md).
+아래 내용은 #75에서 수행한 독립 후보 실험의 기록이다. 기본 DB의 v5 동작은 유지하며,
+후속 명령으로 명시적으로 활성화한 DB만 v6를 사용한다.
+
 상태: #71의 **집계 형식과 저장 예산 검증 단계**. `ProbeAggregate`와 별도 SQLite fixture를
 구현했다. production `Store`, API v2, schema v5, 7일 원본 보존, 16/256 stream quota는
 아직 변경하지 않았다. 이 문서는 새 기능이 이미 운영에서 켜져 있다는 뜻이 아니다.

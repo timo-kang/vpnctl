@@ -35,6 +35,16 @@ func ValidateQuery(window, width time.Duration) error {
 // stream in scope. The query is a single SQLite read snapshot. A cancelled or
 // over-budget query returns an error, never a partial successful response.
 func (s *Store) Query(ctx context.Context, node string, end time.Time, window, width time.Duration) ([]Bucket, error) {
+	if s.Tiered() {
+		page, err := s.QueryPage(ctx, PageRequest{Node: node, End: end, Window: window, Width: width})
+		if err != nil {
+			return nil, err
+		}
+		if page.NextCursor != "" {
+			return nil, fmt.Errorf("%w: use paginated history", ErrCapacity)
+		}
+		return page.Buckets, nil
+	}
 	if err := ValidateQuery(window, width); err != nil {
 		return nil, err
 	}

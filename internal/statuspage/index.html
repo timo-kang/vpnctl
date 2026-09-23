@@ -74,6 +74,7 @@
   {{end}}
 
   <div class="footer">
+    {{if .HistoryTiered}}History keeps recent raw probes and older hourly distributions. Long history queries use whole UTC hours and stream pages; current quality uses separate observations.<br>{{end}}
     Auto-refreshes every 5 seconds.
   </div>
 </body>

@@ -17,7 +17,7 @@ jobs:
   go:
     name: Go race, vet and build
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -68,3 +68,17 @@ jobs:
         run: go test ./internal/history -run '^TestTieredHistoryCandidate$' -count=1 -v
       - name: Corrupt and adversarial aggregate encodings
         run: go test ./internal/history -run '^$' -fuzz '^FuzzProbeAggregateDecode$' -fuzztime=10s -parallel=2
+
+  history-transition:
+    name: Production raw to tiered history transition
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Twenty million raw observations, atomic compaction and paginated query
+        env:
+          VPNCTL_HISTORY_TRANSITION_SCALE: '1'
+        run: go test ./internal/history -run '^TestTieredStorageTransitionScale$' -count=1 -timeout 30m -v

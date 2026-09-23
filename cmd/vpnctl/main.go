@@ -53,6 +53,8 @@ Usage:
   vpnctl controller status --config <path>
   vpnctl controller history backup --config <path> --out <history.db>
   vpnctl controller history restore --config <path> --file <history.db>
+  vpnctl controller history enable-tiering --config <path> --out <pre-tiering-backup.db>
+  vpnctl controller history inspect --config <path>
   vpnctl controller token create|list|revoke|result --config <path>
   vpnctl controller pki status|trust|revoke|ca-prepare|ca-activate|ca-retire|ca-rollback|backup --config <path>
   vpnctl controller pki restore --file <backup> --data-dir <fresh-dir> --config-out <path>
@@ -2044,9 +2046,11 @@ func fleetHistory(args []string) {
 	jsonOutput := fs.Bool("json", false, "print fleet API JSON (requires --config)")
 	nodeID := fs.String("node", "", "filter reporting node ID (controller only)")
 	bucket := fs.String("bucket", "", "bucket width, e.g. 1m, 15m, 1h (controller only)")
+	source := fs.String("source", "", "history source filter (tiered controller only)")
+	cursor := fs.String("cursor", "", "next stream page from previous response (same filters)")
 	_ = fs.Parse(args)
-	if *configPath == "" && (*jsonOutput || *nodeID != "" || *bucket != "") {
-		fatal(errors.New("--json, --node and --bucket require --config"))
+	if *configPath == "" && (*jsonOutput || *nodeID != "" || *bucket != "" || *source != "" || *cursor != "") {
+		fatal(errors.New("--json, --node, --bucket, --source and --cursor require --config"))
 	}
 
 	if *configPath != "" && *iface != "" {
@@ -2070,7 +2074,7 @@ func fleetHistory(args []string) {
 
 		client := newAPIClient(cfg.Node)
 		ctx := context.Background()
-		resp, err := client.FleetHistoryQuery(ctx, *window, *nodeID, *bucket)
+		resp, err := client.FleetHistoryPage(ctx, *window, *nodeID, *bucket, *source, *cursor)
 		if err != nil {
 			fatal(err)
 		}

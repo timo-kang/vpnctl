@@ -25,6 +25,7 @@ func TestProbeHistoryCapacityClassificationAndReadyPeerDeadline(t *testing.T) {
 		retry      bool
 	}{
 		{"quota", `{"error":"quota reached","code":"history_quota"}`, 503, false},
+		{"sealed", `{"error":"interval is sealed","code":"history_sealed"}`, 409, false},
 		{"legacy_capacity_text", `{"error":"history capacity reached"}`, 503, true},
 		{"unknown_code", `{"error":"busy","code":"future_code"}`, 503, true},
 		{"malformed", `{"code":"history_quota"`, 503, true},
