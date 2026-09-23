@@ -254,6 +254,10 @@ stream을 사용하므로 legacy와 새 source가 공존하면 둘 다 quota를 
 생산자 cadence/선택 정책, downsampling, 용량 health 및 모든 peer의 공정한 관측은
 #71에서 집중 처리하며 #17/#70 후속 검증과 연결한다.
 
+후속 [계층 보존 후보와 실규모 검증](history-tiered-retention.md)은 최근 6시간 raw와 이전
+시간 단위 분포를 분리하는 설계를 시험한다. 아직 production DB/API에 적용하지 않았으며,
+이 시험이 통과해도 현재 16/256 stream 한도가 자동으로 늘어나지는 않는다.
+
 기존 node의 선택적 `metrics_path` CSV는 성공 표본만 보존하는 호환 출력이다. 자동 agent는
 중앙 legacy `/metrics.samples`로 같은 성공 표본을 이중 저장하지 않으며 중앙 조회는
 `fleet history`를 사용한다. perf 등 다른 legacy 생산자와 기존 CSV 파일은 유지된다.
