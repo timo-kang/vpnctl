@@ -13,6 +13,11 @@ var ProbeHistoryDeliveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "Best-effort raw probe history delivery by fixed result; resets at restart",
 }, []string{"result"})
 
+var ProbeHistoryQuotaRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "vpnctl_probe_history_quota_rejected_total",
+	Help: "Probe history batches rejected by logical quota (streams, node_streams, rows, window_samples); resets at restart",
+}, []string{"resource"})
+
 var DiagnosticDeliveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "vpnctl_diagnostic_delivery_total",
 	Help: "Best-effort automatic event delivery by fixed role and result; counters reset at process restart",

@@ -62,7 +62,7 @@ func TestSilentFleetDoesNotStarveHeartbeatOrHealth(t *testing.T) {
 						peers[i] = api.PeerCandidate{ID: fmt.Sprintf("peer-%d", i), PublicAddr: silent.LocalAddr().String(), ProbePort: silent.LocalAddr().(*net.UDPAddr).Port}
 					}
 					var lastRegister atomic.Int64
-					var reports, inFlight, maxInFlight atomic.Int32
+					var reports, inFlight, maxInFlight, historyRequests atomic.Int32
 					ctrl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						switch r.URL.Path {
 						case "/register":
@@ -70,6 +70,15 @@ func TestSilentFleetDoesNotStarveHeartbeatOrHealth(t *testing.T) {
 							json.NewEncoder(w).Encode(api.RegisterResponse{NodeID: "node", VPNIP: "10.7.0.2/32"})
 						case "/candidates":
 							json.NewEncoder(w).Encode(api.CandidatesResponse{Peers: peers})
+						case "/metrics":
+							io.Copy(io.Discard, r.Body)
+							historyRequests.Add(1)
+							if slow {
+								<-r.Context().Done()
+								return
+							}
+							w.WriteHeader(503)
+							json.NewEncoder(w).Encode(api.ErrorResponse{Error: "history quota reached", Code: api.CodeHistoryQuota, Resource: "node_streams", Limit: 16})
 						case "/direct-result":
 							io.Copy(io.Discard, r.Body)
 							reports.Add(1)
@@ -129,8 +138,8 @@ func TestSilentFleetDoesNotStarveHeartbeatOrHealth(t *testing.T) {
 						}
 						time.Sleep(50 * time.Millisecond)
 					}
-					if reports.Load() == 0 || healthCalls.Load() < 3 {
-						t.Fatalf("fault paths not exercised: reports=%d health=%d", reports.Load(), healthCalls.Load())
+					if reports.Load() == 0 || healthCalls.Load() < 3 || historyRequests.Load() == 0 {
+						t.Fatalf("fault paths not exercised: reports=%d health=%d history=%d", reports.Load(), healthCalls.Load(), historyRequests.Load())
 					}
 					if maxInFlight.Load() > directBatchSize {
 						t.Fatalf("unbounded requests: %d", maxInFlight.Load())

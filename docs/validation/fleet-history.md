@@ -67,6 +67,14 @@ underlay 사이의 실제 경로 선택·전환 검증은 M3의 범위다.
   오류를 204로 숨기지 않으며 저장 성공 후에만 현재 상태를 게시한다. 수정 없이 재시도할
   때 ID를 유지한다. CLI는 제출 오류를 stderr와 nonzero exit로 알린다.
 
+논리 quota로 거절한 probe batch는 503 본문에 `code: "history_quota"`, `resource`,
+`limit`를 추가한다. resource는 `streams`(256), `node_streams`(16), `rows`(4,000,000),
+`window_samples`(최근 2분 1,200개)다. batch 전체가 rollback된다. WAL reader/잠금,
+디스크 I/O, timeout의 503에는 이 code를 붙이지 않는다. **오류 문구로 분류하지 않는다.**
+새 자동 생산자는 이 code를 가진 503을 받으면 해당 표본을 폐기하고 다른 표본을 처리한다.
+이후의 새 표본은 정상적으로 제출하므로 retention/운영 조치로 여유가 생기면 수집을 재개한다.
+동일 ID 재시도는 기존 stream/row quota를 새로 소비하지 않는다.
+
 `ping`은 최대 16개, 완료된 probe 기준 약 5초 또는 마지막 표본에서 batch를 제출한다.
 `--path relay`는 VPN IP를 probe 대상으로 선택했다는 뜻이다. 실제 kernel route가 특정
 릴레이를 통과했음을 증명하지 않는다. ping은 확인할 수 없는 relay/uplink를 빈 문자열로
@@ -202,18 +210,41 @@ public UDP 성공만으로 WireGuard, relay 또는 서버 uplink가 정상이라
 품질 판단을 초기화하며 RTT/loss는 null이 된다. 시간 bucket은 보존된 성공·실패의 분모를
 계속 제공한다. status의 17초 신선도와 60초 품질 window는 기존 계약을 유지한다.
 
-프로세스별 큐는 최대 256개 대기 + 1개 전송 중이며 표본마다 128-bit 난수 ID를 부여한다.
+프로세스별 큐는 대기·재시도 backoff·전송 중을 **모두 합해 최대 256개**이며
+동시에 하나의 요청만 전송한다. 표본마다 128-bit 난수 ID를 부여한다.
 프로세스 재시작도 ID를 재사용하지 않고, 재전송은 ID/UTC microsecond timestamp/본문을
 변경하지 않는다. 한 표본 최대 5회, 요청당 3초, backoff 1/2/4/8초다. 400/404/409/413은
-즉시 폐기하며 401/403/503 및 네트워크 실패는 유한 재시도한다. 인증 정보는 기존 credential
+즉시 폐기하며 `503 + history_quota`도 해당 표본을 폐기한다. 나머지 401/403/503 및
+네트워크 실패는 유한 재시도한다. 인증 정보는 기존 credential
 client로 매 요청 갱신한다. 이 큐는 heartbeat·PKI 갱신·route apply를 기다리게 하지 않는다.
+
+재시도는 backoff가 끝난 뒤 큐 순서에 따라 수행한다. 대기 중인 표본을 건너뛰어 전송 가능한
+다른 표본을 처리하므로 한 표본의 1/2/4/8초 backoff를 뒤쪽 peer가 모두 기다리지 않는다.
+현재 진행 중인 요청은 최대 3초를 소비할 수 있고 앞에 전송 가능한 표본이 많으면 그만큼
+지연된다. 지속적인 과부하에서는 새 표본이 overflow로 거절될 수 있다. 모든 peer에 대한
+수집 기회/보존 보장은 별도의 sampling·저장 정책 과제이며 이 큐의 보장에 포함되지 않는다.
 
 메모리 큐이므로 종료·overflow·거절·retry 소진에 따른 손실은 가능하다. 이력은 전달된
 표본의 집계이며 수집 공백을 시간 가동률 100%로 바꾸지 않는다. 손실은 node 로그의
-`probe history incomplete` 누계와 `vpnctl_probe_history_delivery_total{result}`에 기록한다.
+`probe history incomplete`의 `dropped`(전체 손실), `quota_dropped`(명시적 quota 거절)
+누계와 `vpnctl_probe_history_delivery_total{result}`에 기록한다. 손실이 변하면 약 10초마다,
+그리고 종료 시 로그를 남긴다(진행 중 요청으로 최대 약 3초 늦어질 수 있다).
 result는 queued/delivered/retry 및 overflow_dropped/stopped_dropped/shutdown_dropped/
-rejected_dropped/exhausted_dropped로 고정한다. node serve 자체는 Prometheus HTTP
+quota_dropped/rejected_dropped/exhausted_dropped로 고정한다. node serve 자체는 Prometheus HTTP
 listener를 제공하지 않으므로 현 배포의 기본 운영 신호는 node 로그다.
+
+controller의 `GET /prom/metrics`에서
+`vpnctl_probe_history_quota_rejected_total{resource}`로 quota별 거절 **batch 수**를 확인한다.
+peer/node ID를 metric label로 사용하지 않는다. 이 값은 저장 중인 행 수/DB 사용량이나 누락
+시간 구간을 나타내지 않으며 프로세스 재시작 시 초기화된다. 배포 저장소는 node 로그를
+수집하고 counter 증가를 경보에 연결한다. 이 endpoint는 기존처럼 client 인증서를 요구하지
+않으므로 배포의 scrape 접근 정책을 따른다. 반복 `node_streams`/`streams` 거절은 관측 관계
+계획을, `rows`는 cadence/보존 예산을, `window_samples`는 짧은 시간의 생산량을 확인한다.
+코드 없는 503은 WAL reader·디스크·시간 제한 등 일시적 장애를 먼저 조사한다. 배포는
+controller를 먼저 갱신해야 새 node가 quota와 일시적 장애를 구분할 수 있다. 구 controller와
+조합하면 503을 기존처럼 유한 재시도하고, 재시도 backoff를 건너뛰는 스케줄링은 유지된다.
+이 변경은 schema v5와 저장 한도를 유지하므로 직전 v5 바이너리로 되돌릴 수 있다. 단,
+되돌린 node의 순차 재시도와 controller의 구형 오류 응답으로 전송 지연이 다시 발생한다.
 
 7일·4백만 raw rows·노드당 16/전체 256 stream·1 GiB 한도는 유지한다. source별로 별도
 stream을 사용하므로 legacy와 새 source가 공존하면 둘 다 quota를 소비한다. 32노드 시험은

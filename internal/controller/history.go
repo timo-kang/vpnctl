@@ -14,6 +14,7 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/history"
+	"vpnctl/internal/metrics"
 	"vpnctl/internal/quality"
 	"vpnctl/internal/store"
 	"vpnctl/internal/uplink"
@@ -53,6 +54,14 @@ func (s *Server) handleObservations(w http.ResponseWriter, r *http.Request, req 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	if err := s.history.Ingest(ctx, req.NodeID, req.Observations, time.Now()); err != nil {
+		var quota *history.QuotaError
+		if errors.As(err, &quota) {
+			metrics.ProbeHistoryQuotaRejectedTotal.WithLabelValues(quota.Resource).Inc()
+			writeJSON(w, http.StatusServiceUnavailable, api.ErrorResponse{
+				Error: err.Error(), Code: api.CodeHistoryQuota, Resource: quota.Resource, Limit: quota.Limit,
+			})
+			return
+		}
 		code := http.StatusServiceUnavailable
 		if errors.Is(err, history.ErrInvalid) {
 			code = http.StatusBadRequest

@@ -183,6 +183,7 @@ func TestRetentionAndCapacityRollback(t *testing.T) {
 	if e = s.Ingest(context.Background(), "robot", []Observation{obs("over", now, pointer(8.0))}, now); !errors.Is(e, ErrCapacity) {
 		t.Fatal(e)
 	}
+	assertProbeQuota(t, e, "rows", MaxRows)
 	if query(t, s, now)[3].Count != 1 {
 		t.Fatal("capacity failure was committed")
 	}
@@ -262,9 +263,7 @@ func TestDimensionsAndStreamCapacity(t *testing.T) {
 	}
 	over := obs("over", now, nil)
 	over.Uplink = "overflow"
-	if e := s.Ingest(context.Background(), "robot", []Observation{over}, now); !errors.Is(e, ErrCapacity) {
-		t.Fatal(e)
-	}
+	assertProbeQuota(t, s.Ingest(context.Background(), "robot", []Observation{over}, now), "node_streams", MaxNodeStreams)
 	if len(s.Latest(now)["robot"]) != MaxNodeStreams {
 		t.Fatal("streams merged")
 	}
@@ -292,9 +291,7 @@ func TestRepeatedConflictsDensityAndCancelledBackup(t *testing.T) {
 		}
 		ingest(t, s, "robot", batch, now)
 	}
-	if e := s.Ingest(context.Background(), "robot", []Observation{obs("over-density", now, nil)}, now); !errors.Is(e, ErrCapacity) {
-		t.Fatal(e)
-	}
+	assertProbeQuota(t, s.Ingest(context.Background(), "robot", []Observation{obs("over-density", now, nil)}, now), "window_samples", MaxWindowSamples)
 	if query(t, s, now)[3].Count != MaxWindowSamples {
 		t.Fatal("density failure mutated history")
 	}
@@ -306,6 +303,35 @@ func TestRepeatedConflictsDensityAndCancelledBackup(t *testing.T) {
 	}
 	if _, e := os.Stat(target); !os.IsNotExist(e) {
 		t.Fatal("cancelled snapshot published", e)
+	}
+}
+
+func assertProbeQuota(t *testing.T, err error, resource string, limit int) {
+	t.Helper()
+	var quota *QuotaError
+	if !errors.Is(err, ErrCapacity) || !errors.As(err, &quota) || quota.Resource != resource || quota.Limit != limit {
+		t.Fatalf("want %s quota %d, got %v", resource, limit, err)
+	}
+}
+
+func TestGlobalProbeStreamQuotaAndExistingStreamRecovery(t *testing.T) {
+	s, now := newStore(t)
+	for n := 0; n < MaxStreams/MaxNodeStreams; n++ {
+		var batch []Observation
+		for p := 0; p < MaxNodeStreams; p++ {
+			o := obs("first", now, pointer(1.0))
+			o.PeerID = fmt.Sprint(p)
+			batch = append(batch, o)
+		}
+		ingest(t, s, fmt.Sprint(n), batch, now)
+	}
+	o := obs("new-node", now, pointer(1.0))
+	assertProbeQuota(t, s.Ingest(context.Background(), "another", []Observation{o}, now), "streams", MaxStreams)
+	o.PeerID = "0"
+	ingest(t, s, "0", []Observation{o}, now)
+	ingest(t, s, "0", []Observation{o}, now)
+	if len(s.Latest(now)) != MaxStreams/MaxNodeStreams {
+		t.Fatal("rejected stream published")
 	}
 }
 
