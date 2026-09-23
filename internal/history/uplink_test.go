@@ -156,9 +156,15 @@ func seedUplinkScale(t *testing.T, s *Store, now time.Time, step time.Duration) 
 		t.Fatal(e)
 	}
 	defer tx.Rollback()
+	// Materialize once: a full mesh has many retained streams for each node.
+	// Repeating DISTINCT for every target/snapshot makes fixture generation
+	// scale with retained path history instead of with the node population.
+	if _, e = tx.Exec("CREATE TEMP TABLE fixture_nodes AS SELECT DISTINCT node FROM streams"); e != nil {
+		t.Fatal(e)
+	}
 	targets := []string{"app", "health", "control", "telemetry"}
 	for _, target := range targets {
-		if _, e = tx.Exec("INSERT INTO uplink_series SELECT node,?,'tcp' FROM streams", target); e != nil {
+		if _, e = tx.Exec("INSERT INTO uplink_series SELECT node,?,'tcp' FROM fixture_nodes", target); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -179,16 +185,16 @@ func seedUplinkScale(t *testing.T, s *Store, now time.Time, step time.Duration) 
 		if e != nil {
 			t.Fatal(e)
 		}
-		if _, e = tx.Exec("INSERT INTO uplink_snapshots SELECT node,?,?,?,? FROM streams", v.ID, v.At.UnixMicro(), payload, digest); e != nil {
+		if _, e = tx.Exec("INSERT INTO uplink_snapshots SELECT node,?,?,?,? FROM fixture_nodes", v.ID, v.At.UnixMicro(), payload, digest); e != nil {
 			t.Fatal(e)
 		}
 		for _, target := range v.Targets {
-			if _, e = tx.Exec("INSERT INTO uplink_results SELECT node,?,?,?,?,?,? FROM streams", v.ID, target.ID, target.Protocol, v.At.UnixMicro(), target.Service.State, target.Service.RTTMs); e != nil {
+			if _, e = tx.Exec("INSERT INTO uplink_results SELECT node,?,?,?,?,?,? FROM fixture_nodes", v.ID, target.ID, target.Protocol, v.At.UnixMicro(), target.Service.State, target.Service.RTTMs); e != nil {
 				t.Fatal(e)
 			}
 		}
 		if i == count {
-			if _, e = tx.Exec("INSERT INTO uplink_latest SELECT node,?,?,? FROM streams", v.At.UnixMicro(), v.ID, payload); e != nil {
+			if _, e = tx.Exec("INSERT INTO uplink_latest SELECT node,?,?,? FROM fixture_nodes", v.At.UnixMicro(), v.ID, payload); e != nil {
 				t.Fatal(e)
 			}
 		}

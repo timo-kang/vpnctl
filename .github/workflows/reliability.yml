@@ -52,3 +52,19 @@ jobs:
           path: ${{ runner.temp }}/vpnctl-network-results
           if-no-files-found: warn
           retention-days: 14
+
+  history-tiering:
+    name: Full mesh tiered history capacity candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Two sources, four uplink generations and seven days of full mesh history
+        env:
+          VPNCTL_HISTORY_TIERED_SCALE: '1'
+        run: go test ./internal/history -run '^TestTieredHistoryCandidate$' -count=1 -v
+      - name: Corrupt and adversarial aggregate encodings
+        run: go test ./internal/history -run '^$' -fuzz '^FuzzProbeAggregateDecode$' -fuzztime=10s -parallel=2
