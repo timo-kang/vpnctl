@@ -39,7 +39,7 @@ type ProbeAggregate struct {
 // Any rejected update leaves the aggregate unchanged.
 func (a *ProbeAggregate) Add(success *bool, rttMS *float64) error {
 	if a.attempts+a.unknown >= MaxAggregateSamples {
-		return fmt.Errorf("%w: aggregate sample limit", ErrCapacity)
+		return &QuotaError{Resource: "aggregate_samples", Limit: MaxAggregateSamples}
 	}
 	var us int64
 	if success == nil || !*success {
@@ -52,7 +52,7 @@ func (a *ProbeAggregate) Add(success *bool, rttMS *float64) error {
 		}
 		us = int64(math.Round(*rttMS * 1000))
 		if _, exists := a.rtts[us]; !exists && len(a.rtts) >= MaxAggregateRTTValues {
-			return fmt.Errorf("%w: aggregate distinct RTT limit", ErrCapacity)
+			return &QuotaError{Resource: "aggregate_rtt_values", Limit: MaxAggregateRTTValues}
 		}
 	}
 	if success == nil {
@@ -78,7 +78,7 @@ func (a *ProbeAggregate) Merge(b *ProbeAggregate) error {
 		return fmt.Errorf("%w: aggregate cannot merge itself", ErrInvalid)
 	}
 	if a.attempts+a.unknown+b.attempts+b.unknown > MaxAggregateSamples {
-		return fmt.Errorf("%w: aggregate sample limit", ErrCapacity)
+		return &QuotaError{Resource: "aggregate_samples", Limit: MaxAggregateSamples}
 	}
 	newValues := len(a.rtts)
 	for us := range b.rtts {
@@ -87,7 +87,7 @@ func (a *ProbeAggregate) Merge(b *ProbeAggregate) error {
 		}
 	}
 	if newValues > MaxAggregateRTTValues {
-		return fmt.Errorf("%w: aggregate distinct RTT limit", ErrCapacity)
+		return &QuotaError{Resource: "aggregate_rtt_values", Limit: MaxAggregateRTTValues}
 	}
 	if len(b.rtts) > 0 && a.rtts == nil {
 		a.rtts = make(map[int64]int64, newValues)
@@ -151,7 +151,7 @@ func (a *ProbeAggregate) MarshalBinary() ([]byte, error) {
 	}
 	out = binary.LittleEndian.AppendUint32(out, crc32.ChecksumIEEE(out))
 	if len(out) > MaxAggregateBytes {
-		return nil, fmt.Errorf("%w: aggregate byte limit", ErrCapacity)
+		return nil, &QuotaError{Resource: "aggregate_bytes", Limit: MaxAggregateBytes}
 	}
 	return out, nil
 }

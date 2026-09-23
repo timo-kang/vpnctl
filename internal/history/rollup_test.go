@@ -128,13 +128,15 @@ func TestAggregateBudgetsAreAtomicAndRecoverable(t *testing.T) {
 		}
 	}
 	before := encodedAggregate(t, &a)
-	if err := a.Add(pointer(true), pointer(float64(MaxAggregateRTTValues)/1000)); !errors.Is(err, ErrCapacity) || !bytes.Equal(before, encodedAggregate(t, &a)) {
-		t.Fatal("distinct limit is not atomic", err)
+	assertProbeQuota(t, a.Add(pointer(true), pointer(float64(MaxAggregateRTTValues)/1000)), "aggregate_rtt_values", MaxAggregateRTTValues)
+	if !bytes.Equal(before, encodedAggregate(t, &a)) {
+		t.Fatal("distinct limit is not atomic")
 	}
 	var extra ProbeAggregate
 	extra.Add(pointer(true), pointer(60_000.))
-	if err := a.Merge(&extra); !errors.Is(err, ErrCapacity) || !bytes.Equal(before, encodedAggregate(t, &a)) {
-		t.Fatal("merge limit is not atomic", err)
+	assertProbeQuota(t, a.Merge(&extra), "aggregate_rtt_values", MaxAggregateRTTValues)
+	if !bytes.Equal(before, encodedAggregate(t, &a)) {
+		t.Fatal("merge limit is not atomic")
 	}
 	// Existing values can still be accumulated at the distinct-value ceiling.
 	if err := a.Add(pointer(true), pointer(0.)); err != nil {
@@ -157,8 +159,9 @@ func TestAggregateBudgetsAreAtomicAndRecoverable(t *testing.T) {
 		t.Fatal(err)
 	}
 	before = encodedAggregate(t, &full)
-	if err := full.Add(nil, nil); !errors.Is(err, ErrCapacity) || !bytes.Equal(before, encodedAggregate(t, &full)) {
-		t.Fatal("sample limit is not atomic", err)
+	assertProbeQuota(t, full.Add(nil, nil), "aggregate_samples", MaxAggregateSamples)
+	if !bytes.Equal(before, encodedAggregate(t, &full)) {
+		t.Fatal("sample limit is not atomic")
 	}
 }
 

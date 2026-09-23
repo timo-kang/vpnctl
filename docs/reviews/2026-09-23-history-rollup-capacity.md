@@ -55,6 +55,8 @@
    변형도 입력하여 varint·개수·분포 검사까지 도달시켰다.
 4. 형식의 표본 상한을 raw row quota와 같은 상수에 묶으면 향후 quota 축소 시 과거 인코딩을
    거절할 수 있다. 별도의 `MaxAggregateSamples` 형식 한도로 분리했다.
+5. 집계의 논리 한도도 기존 `QuotaError`로 구분했다. 후속 저장 경로 연결에서 이 한도가
+   일시적 WAL/IO 장애와 다시 섞이지 않도록 resource/limit를 회귀 검증한다.
 
 ## 판정과 한계
 
