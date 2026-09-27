@@ -77,6 +77,7 @@ func TestTieredStorageTransitionScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	var peakWAL, total, transactions int64
+	var seedTime, compactTime time.Duration
 	started := time.Now()
 	samples := int(time.Hour / cadence)
 	measure := func() {
@@ -91,6 +92,7 @@ func TestTieredStorageTransitionScale(t *testing.T) {
 		}
 	}
 	for hour := 0; hour < hours; hour++ {
+		phaseStarted := time.Now()
 		hourEnd := start.Add(time.Duration(hour+1) * time.Hour)
 		tx, err = db.Begin()
 		if err != nil {
@@ -134,6 +136,8 @@ SELECT ?,lower(hex(randomblob(16))),?+i*?,CASE WHEN i%10 IN (0,1) THEN NULL ELSE
 			t.Fatal(err)
 		}
 		measure()
+		seedTime += time.Since(phaseStarted)
+		phaseStarted = time.Now()
 		for {
 			more, e := s.compactStep(ctx, db, hourEnd)
 			if e != nil {
@@ -145,8 +149,9 @@ SELECT ?,lower(hex(randomblob(16))),?+i*?,CASE WHEN i%10 IN (0,1) THEN NULL ELSE
 				break
 			}
 		}
+		compactTime += time.Since(phaseStarted)
 		if (hour+1)%24 == 0 {
-			t.Logf("hours=%d raw_observations=%d elapsed=%s", hour+1, total, time.Since(started))
+			t.Logf("hours=%d raw_observations=%d seed=%s compaction=%s elapsed=%s", hour+1, total, seedTime, compactTime, time.Since(started))
 		}
 	}
 	// Persist the same live snapshots that Ingest writes. Every generation has
@@ -269,7 +274,9 @@ SELECT ?,lower(hex(randomblob(16))),?+i*?,CASE WHEN i%10 IN (0,1) THEN NULL ELSE
 	}
 	t.Logf("nodes=%d streams=%d observations=%d raw=%d rollups=%d db_bytes=%d peak_compaction_and_raw_wal=%d transactions=%d pages=%d max_page_query_json=%s max_reporter_pages_with_oracle=%s max_page_json=%d elapsed=%s", nodes, len(streams), total, stats.RawRows, stats.RollupRows, stats.DatabaseBytes, peakWAL, transactions, pageCount, maxQuery, maxReporter, maxJSON, time.Since(started))
 	if full {
-		testTieredSharedSpaceRetry(t, s, end)
+		t.Run("shared_space_retry_and_recovery", func(t *testing.T) {
+			testTieredSharedSpaceRetry(t, s, end)
+		})
 	}
 }
 

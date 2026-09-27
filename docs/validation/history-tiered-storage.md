@@ -130,6 +130,13 @@ VPNCTL_HISTORY_TRANSITION_SCALE=1 go test ./internal/history \
 포함하지 않는다. mTLS 행렬은 별도로 1/3/8/32노드 hub/full mesh, 두 source·네 uplink 세대를
 제출하고 중복 재전송·집계·페이지·폐기 인증서를 검증한다.
 
+CI의 실규모 전환 job은 2GiB로 제한한 tmpfs에 DB/WAL을 두고 7일치 처리를 가속한다.
+SQLite `synchronous(FULL)`, 실제 파일, 원본/집계 transaction, 데이터 규모와 예산 검사는 유지한다.
+이 job의 실행 시간은 물리 디스크 쓰기 성능이나 전원 차단 내구성의 증거가 아니다.
+디스크의 소규모 전환·commit 전후 프로세스 종료·복구 시험은 별도 `Go race, vet and build`
+job에서 계속 실행한다. 위 로컬 명령은 기본 임시 디렉터리의 저장장치를 사용하므로 디스크에
+따라 전체 시험 시간이 달라진다. 진행 로그의 seed/compaction 누적 시간을 함께 확인한다.
+
 commit 직전/직후 실제 프로세스 종료, 원본+부분 집계 혼합, 정각/unknown/빈 구간, 시계 역행,
 live snapshot, v1~v5 업그레이드, preflight 거절, 백업 손상, pinned WAL과 취소도 회귀 시험에 포함한다.
 이 결과를 실물 무선망의 다중 relay/underlay 전환(M3) 완료나 monitor 자동 수집(#70) 완료로 해석하지 않는다.

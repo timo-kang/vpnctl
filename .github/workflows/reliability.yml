@@ -78,7 +78,22 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+      # This job checks population, file/WAL size and query bounds while
+      # compressing seven days into minutes. Keep FULL synchronous mode and
+      # real files, but remove hosted-disk fsync latency from that experiment.
+      # The go job still runs crash/reopen and smaller transitions on disk.
+      - name: Allocate bounded memory filesystem for accelerated capacity test
+        run: |
+          mkdir -p "$RUNNER_TEMP/vpnctl-history"
+          sudo mount -t tmpfs -o size=2G,nodev,nosuid,mode=1777 tmpfs "$RUNNER_TEMP/vpnctl-history"
       - name: Twenty million raw observations, atomic compaction and paginated query
         env:
           VPNCTL_HISTORY_TRANSITION_SCALE: '1'
-        run: go test ./internal/history -run '^TestTieredStorageTransitionScale$' -count=1 -timeout 30m -v
+          TMPDIR: ${{ runner.temp }}/vpnctl-history
+        run: /usr/bin/time -v go test ./internal/history -run '^TestTieredStorageTransitionScale$' -count=1 -timeout 30m -v
+      - name: Release capacity test filesystem
+        if: always()
+        run: |
+          if mountpoint -q "$RUNNER_TEMP/vpnctl-history"; then
+            sudo umount "$RUNNER_TEMP/vpnctl-history"
+          fi
