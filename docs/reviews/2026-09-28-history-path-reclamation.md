@@ -36,6 +36,11 @@
    `reclamation_work_bytes`와 실제 byte limit를 반환하도록 고쳤다. 고밀도 분포를 가진
    유효 집계 fixture로 행 상한 이하에서 byte 한도를 넘기고, 전체 rollback 및 배치를
    나눈 후 정확한 population 회수를 검증했다.
+10. **CI 누적 race 실행 시간 초과.** run `36365489111`의 history 패키지가 600초에 종료됐다.
+    controller는 308.970초에 통과했고, history는 기존 손상 복구 시험을 실행 중이었다.
+    로컬 전체 suite 통과와 개별 fault/규모 검증을 확인한 뒤 CI에서 새 `TestPathChurn*`를
+    별도 runner로 분리했다. 기존 job의 skip과 새 job의 run은 서로 보완하며 모든 시험을
+    유지한다. 디스크 crash/WAL 검증과 개별 API·조회 예산, 패키지 10분 제한도 유지한다.
 
 ## 검증 근거
 
