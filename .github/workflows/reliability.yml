@@ -17,7 +17,7 @@ jobs:
   m2-smoke:
     name: M2 persistent mixed producer smoke
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -25,17 +25,57 @@ jobs:
           go-version-file: go.mod
       - name: Real producers across repeated faults (short validation, not 24h qualification)
         env:
-          VPNCTL_SOAK_DURATION: 8m
+          VPNCTL_SOAK_DURATION: 12m
           VPNCTL_SOAK_NODES: '3'
           VPNCTL_SOAK_PHASE_INTERVAL: 30s
           VPNCTL_TEST_WORK_ROOT: ${{ runner.temp }}
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-m2-results
-        run: ./scripts/test-m2-soak.sh
+        run: |
+          status=0
+          ./scripts/test-m2-soak.sh || status=$?
+          mkdir -p "$VPNCTL_ARTIFACT_DIR"
+          printf '%s\n' "$status" > "$VPNCTL_ARTIFACT_DIR/process-exit.txt"
+          exit "$status"
+      - name: Analyze artifacts and independently recorded process exit
+        if: always()
+        env:
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-m2-results
+        run: |
+          go build -o "$RUNNER_TEMP/vpnctl-lab-report" ./cmd/vpnctl-lab-report
+          shopt -s nullglob
+          runs=("$VPNCTL_ARTIFACT_DIR"/m2-soak-*)
+          manifests=("$VPNCTL_ARTIFACT_DIR"/run-*.txt)
+          test "${#runs[@]}" -eq 1
+          test "${#manifests[@]}" -eq 1
+          "$RUNNER_TEMP/vpnctl-lab-report" --dir "${runs[0]}" \
+            --manifest "${manifests[0]}" --exit-file "$VPNCTL_ARTIFACT_DIR/process-exit.txt" \
+            > "$VPNCTL_ARTIFACT_DIR/analysis.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: m2-mixed-smoke
           path: ${{ runner.temp }}/vpnctl-m2-results
+          if-no-files-found: warn
+          retention-days: 14
+  m2-pressure:
+    name: M2 authenticated mixed WAL pressure and accounting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Real backpressure, control requests, certificate renewal and exact fixture population
+        env:
+          VPNCTL_M2_PRESSURE: '1'
+          VPNCTL_M2_PRESSURE_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-m2-pressure
+        run: go test -race ./internal/controller -run '^TestM2MixedWALPressureAccounting$' -count=1 -timeout=5m -v
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: m2-mixed-pressure
+          path: ${{ runner.temp }}/vpnctl-m2-pressure
           if-no-files-found: warn
           retention-days: 14
   go:
@@ -51,8 +91,10 @@ jobs:
       # Concurrent SQLite race packages on two CPUs can starve live producers
       # past their unchanged 45s convergence budget. Every test still runs.
       - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$'
+      - run: go test -race -tags=integration ./tests/integration -run '^TestSoakReadiness' -count=1
       - run: go vet ./...
       - run: go build ./cmd/vpnctl
+      - run: go build ./cmd/vpnctl-lab-report
 
   history-churn:
     name: History path churn race and fault recovery
