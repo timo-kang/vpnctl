@@ -54,6 +54,7 @@ Usage:
   vpnctl controller history backup --config <path> --out <history.db>
   vpnctl controller history restore --config <path> --file <history.db>
   vpnctl controller history enable-tiering --config <path> --out <pre-tiering-backup.db>
+  vpnctl controller history enable-reclamation --config <path> --out <pre-reclamation-backup.db>
   vpnctl controller history inspect --config <path>
   vpnctl controller token create|list|revoke|result --config <path>
   vpnctl controller pki status|trust|revoke|ca-prepare|ca-activate|ca-retire|ca-rollback|backup --config <path>

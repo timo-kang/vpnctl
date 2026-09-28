@@ -327,10 +327,62 @@ func testTieredSharedSpaceRetry(t *testing.T, s *Store, now time.Time) {
 	}
 	o.ID = "new-at-shared-budget"
 	assertProbeQuota(t, s.Ingest(ctx, node, []Observation{o}, now), "database_used_bytes", ProbeStorageBudget)
-	if _, err = db.Exec("DROP TABLE shared_pressure"); err != nil {
+	if _, err = db.Exec("DELETE FROM shared_pressure WHERE rowid IN (SELECT rowid FROM shared_pressure ORDER BY rowid DESC LIMIT 2)"); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Ingest(ctx, node, []Observation{o}, now); err != nil {
 		t.Fatal("freed shared pages did not restore admission", err)
+	}
+	// A live snapshot is written after raw admission. Account for its pages too:
+	// crossing the budget during that write must roll back raw and live together.
+	stats, err := s.TieredStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padding := ProbeStorageBudget - stats.UsedBytes + (1 << 20)
+	if _, err = db.Exec("CREATE TABLE live_pressure(data BLOB)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(fmt.Sprintf("CREATE TRIGGER grow_live_snapshot BEFORE INSERT ON probe_live BEGIN INSERT INTO live_pressure VALUES(zeroblob(%d)); END", padding)); err != nil {
+		t.Fatal(err)
+	}
+	o.ID = "new-with-live-pressure"
+	assertProbeQuota(t, s.Ingest(ctx, node, []Observation{o}, now), "database_used_bytes", ProbeStorageBudget)
+	after, err := s.TieredStats(ctx)
+	if err != nil || after.RawRows != stats.RawRows {
+		t.Fatal("live allocation failure changed raw population", after, err)
+	}
+	var rows int
+	if err = db.QueryRow("SELECT count(*) FROM live_pressure").Scan(&rows); err != nil || rows != 0 {
+		t.Fatal("live allocation was not rolled back", rows, err)
+	}
+	if _, err = db.Exec("DROP TRIGGER grow_live_snapshot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec("DROP TABLE live_pressure"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec("DROP TABLE shared_pressure"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Ingest(ctx, node, []Observation{o}, now); err != nil {
+		t.Fatal("live pressure recovery failed", err)
+	}
+}
+
+// Fast opt-in reproduction of the shared-space boundary without staging the
+// full twenty-million-observation transition (which also runs this helper).
+func TestTieredLiveSnapshotSpaceBudget(t *testing.T) {
+	if os.Getenv("VPNCTL_HISTORY_SPACE_SCALE") != "1" {
+		t.Skip("set VPNCTL_HISTORY_SPACE_SCALE=1 for 768 MiB shared-space fault injection")
+	}
+	s, now := newStore(t)
+	if err := s.EnableTiering(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	ingest(t, s, "robot", []Observation{{ID: "seed", Timestamp: now, PeerID: "peer", Path: "direct", Success: pointer(true), RTTMs: pointer(1.)}}, now)
+	testTieredSharedSpaceRetry(t, s, now)
+	if err := Check(context.Background(), s.path); err != nil {
+		t.Fatal(err)
 	}
 }

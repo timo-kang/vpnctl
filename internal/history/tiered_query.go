@@ -25,15 +25,16 @@ type PageRequest struct {
 }
 
 type PageInfo struct {
-	RequestedStart      time.Time `json:"requested_start"`
-	RequestedEnd        time.Time `json:"requested_end"`
-	SealedUntil         time.Time `json:"sealed_until"`
-	ExpiredUntil        time.Time `json:"expired_until"`
-	RawRetentionSeconds int64     `json:"raw_retention_seconds"`
-	AggregateSeconds    int64     `json:"aggregate_seconds"`
-	Aligned             bool      `json:"aligned"`
-	NextCursor          string    `json:"next_cursor,omitempty"`
-	StreamLimit         int       `json:"stream_limit"`
+	RequestedStart      time.Time        `json:"requested_start"`
+	RequestedEnd        time.Time        `json:"requested_end"`
+	SealedUntil         time.Time        `json:"sealed_until"`
+	ExpiredUntil        time.Time        `json:"expired_until"`
+	RawRetentionSeconds int64            `json:"raw_retention_seconds"`
+	AggregateSeconds    int64            `json:"aggregate_seconds"`
+	Aligned             bool             `json:"aligned"`
+	NextCursor          string           `json:"next_cursor,omitempty"`
+	StreamLimit         int              `json:"stream_limit"`
+	Coverage            *HistoryCoverage `json:"coverage,omitempty"`
 }
 
 type HistoryPage struct {
@@ -44,12 +45,13 @@ type HistoryPage struct {
 }
 
 type pageCursor struct {
-	Version       int `json:"v"`
-	Node, Source  string
-	End           time.Time
-	Window, Width time.Duration
-	Align         bool
-	After         int64
+	Version          int `json:"v"`
+	Node, Source     string
+	End              time.Time
+	Window, Width    time.Duration
+	Align            bool
+	After            int64
+	ReclamationEpoch int64
 }
 
 // QueryPage uses one read snapshot per page. The cursor fixes the requested
@@ -69,6 +71,11 @@ func (s *Store) QueryPage(ctx context.Context, req PageRequest) (HistoryPage, er
 		return out, ErrInvalid
 	}
 	after := int64(0)
+	cursorEpoch := int64(0)
+	cursorVersion := 1
+	if s.ReclamationEnabled() {
+		cursorVersion = 2
+	}
 	if req.Cursor != "" {
 		if len(req.Cursor) > 2048 {
 			return out, ErrInvalid
@@ -78,10 +85,11 @@ func (s *Store) QueryPage(ctx context.Context, req PageRequest) (HistoryPage, er
 			return out, ErrInvalid
 		}
 		var c pageCursor
-		if json.Unmarshal(data, &c) != nil || c.Version != 1 || c.After <= 0 || c.Node != req.Node || c.Source != req.Source || c.Window != req.Window || c.Width != req.Width || c.Align != req.Align || (!req.End.IsZero() && !req.End.Equal(c.End)) {
+		if json.Unmarshal(data, &c) != nil || c.Version != cursorVersion || c.After <= 0 || c.Node != req.Node || c.Source != req.Source || c.Window != req.Window || c.Width != req.Width || c.Align != req.Align || (!req.End.IsZero() && !req.End.Equal(c.End)) {
 			return out, fmt.Errorf("%w: cursor does not match query", ErrInvalid)
 		}
 		after = c.After
+		cursorEpoch = c.ReclamationEpoch
 		req.End = c.End
 	}
 	if req.End.IsZero() {
@@ -140,6 +148,18 @@ func (s *Store) QueryPage(ctx context.Context, req PageRequest) (HistoryPage, er
 	if out.Start.UnixMicro() < expired {
 		return out, fmt.Errorf("%w: requested history has expired through %s", ErrInvalid, out.ExpiredUntil.Format(time.RFC3339))
 	}
+	var epoch int64
+	if s.ReclamationEnabled() {
+		if err = tx.QueryRowContext(ctx, "SELECT evicted_streams FROM reclamation_metadata WHERE id=1").Scan(&epoch); err != nil {
+			return out, err
+		}
+		if req.Cursor != "" && cursorEpoch != epoch {
+			return out, fmt.Errorf("%w: archived paths were reclaimed; restart pagination", ErrInvalid)
+		}
+		if out.Coverage, err = queryCoverage(ctx, tx, req.Node, req.Source, out.Start, out.End); err != nil {
+			return out, err
+		}
+	}
 	q := `SELECT id,node,peer,path,relay,uplink,source FROM streams WHERE id>?`
 	args := []any{after}
 	if req.Node != "" {
@@ -174,7 +194,7 @@ func (s *Store) QueryPage(ctx context.Context, req PageRequest) (HistoryPage, er
 	}
 	if len(streams) > MaxPageStreams {
 		streams = streams[:MaxPageStreams]
-		data, e := json.Marshal(pageCursor{Version: 1, Node: req.Node, Source: req.Source, End: req.End, Window: req.Window, Width: req.Width, Align: req.Align, After: streams[len(streams)-1].id})
+		data, e := json.Marshal(pageCursor{Version: cursorVersion, Node: req.Node, Source: req.Source, End: req.End, Window: req.Window, Width: req.Width, Align: req.Align, After: streams[len(streams)-1].id, ReclamationEpoch: epoch})
 		if e != nil {
 			return out, e
 		}

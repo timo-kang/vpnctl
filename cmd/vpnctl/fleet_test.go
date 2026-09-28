@@ -157,6 +157,39 @@ func TestHistoryCLIEnableTieringPreservesBackupAndOwnership(t *testing.T) {
 	if !strings.Contains(output.String(), "hour-aligned=true") || !strings.Contains(output.String(), "--cursor next-page") {
 		t.Fatal("CLI hid effective window/page", output.String())
 	}
+	backupV6 := filepath.Join(t.TempDir(), "before-reclamation.db")
+	args = []string{"enable-reclamation", "--config", cfg, "--out", backupV6}
+	lock, err = controller.AcquireStateLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = runControllerHistory(args); err == nil {
+		t.Fatal("reclamation ignored ownership")
+	}
+	lock.Close()
+	if err = runControllerHistory(args); err != nil {
+		t.Fatal(err)
+	}
+	before, err = history.Inspect(context.Background(), backupV6)
+	if err != nil || before.SchemaVersion != 6 {
+		t.Fatal(before, err)
+	}
+	after, err = history.Inspect(context.Background(), path)
+	if err != nil || after.SchemaVersion != 7 || !after.Tiering.ReclamationEnabled {
+		t.Fatal(after, err)
+	}
+	if err = runControllerHistory(args); err == nil {
+		t.Fatal("reclamation overwrote backup")
+	}
+	first, last := now.Add(-24*time.Hour), now.Add(-23*time.Hour)
+	resp.Tiering.Coverage = &history.HistoryCoverage{Partial: true, DiscardedSamples: 42, FirstAffected: &first, LastAffected: &last}
+	output.Reset()
+	if err = printFleetHistory(&output, resp, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "PARTIAL HISTORY: 42") {
+		t.Fatal("CLI hid reclamation loss", output.String())
+	}
 }
 
 func TestPingSubmitsIndividualObservationsAndReportsUploadFailure(t *testing.T) {

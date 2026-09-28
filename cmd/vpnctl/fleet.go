@@ -39,6 +39,9 @@ func printFleetHistory(w io.Writer, resp api.FleetHistoryResponse, asJSON bool) 
 	fmt.Fprintf(output, "Window (%s, %s], buckets %.0fs; availability = successful probes / attempts\n", resp.Start.Format(time.RFC3339), resp.End.Format(time.RFC3339), resp.BucketSeconds)
 	if t := resp.Tiering; t != nil {
 		fmt.Fprintf(output, "Tiered history: sealed through %s; hour-aligned=%t; requested (%s, %s]\n", t.SealedUntil.Format(time.RFC3339), t.Aligned, t.RequestedStart.Format(time.RFC3339), t.RequestedEnd.Format(time.RFC3339))
+		if c := t.Coverage; c != nil && c.Partial {
+			fmt.Fprintf(output, "PARTIAL HISTORY: %d observations reclaimed within (%s, %s]; counts cover the requested node/source window, not just this page.\n", c.DiscardedSamples, c.FirstAffected.Format(time.RFC3339), c.LastAffected.Format(time.RFC3339))
+		}
 		if t.NextCursor != "" {
 			fmt.Fprintf(output, "More streams available. Repeat the same filters with --cursor %s\n", t.NextCursor)
 		}
@@ -54,8 +57,8 @@ func printFleetHistory(w io.Writer, resp api.FleetHistoryResponse, asJSON bool) 
 }
 
 func runControllerHistory(args []string) error {
-	if len(args) == 0 || (args[0] != "backup" && args[0] != "restore" && args[0] != "enable-tiering" && args[0] != "inspect") {
-		return fmt.Errorf("history subcommand required: backup|restore|enable-tiering|inspect (controller must be stopped)")
+	if len(args) == 0 || (args[0] != "backup" && args[0] != "restore" && args[0] != "enable-tiering" && args[0] != "enable-reclamation" && args[0] != "inspect") {
+		return fmt.Errorf("history subcommand required: backup|restore|enable-tiering|enable-reclamation|inspect (controller must be stopped)")
 	}
 	fs := flag.NewFlagSet("controller history "+args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "controller YAML configuration")
@@ -75,8 +78,8 @@ func runControllerHistory(args []string) error {
 		return fmt.Errorf("controller config required")
 	}
 	config.ApplyDefaults(&cfg)
-	if (args[0] == "backup" || args[0] == "enable-tiering") && *out == "" || args[0] == "restore" && *in == "" {
-		return fmt.Errorf("backup/enable-tiering require --out; restore requires --file")
+	if (args[0] == "backup" || args[0] == "enable-tiering" || args[0] == "enable-reclamation") && *out == "" || args[0] == "restore" && *in == "" {
+		return fmt.Errorf("backup/enable-tiering/enable-reclamation require --out; restore requires --file")
 	}
 	lock, err := controller.AcquireStateLock(cfg.Controller.DataDir)
 	if err != nil {
@@ -89,13 +92,16 @@ func runControllerHistory(args []string) error {
 	if args[0] == "backup" {
 		return history.Backup(ctx, path, *out)
 	}
-	if args[0] == "enable-tiering" {
+	if args[0] == "enable-tiering" || args[0] == "enable-reclamation" {
 		if err = history.Backup(ctx, path, *out); err != nil {
 			return err
 		}
 		st, e := history.Open(path, time.Now())
 		if e != nil {
 			return e
+		}
+		if args[0] == "enable-reclamation" {
+			return st.EnableReclamation(ctx)
 		}
 		return st.EnableTiering(ctx, time.Now())
 	}

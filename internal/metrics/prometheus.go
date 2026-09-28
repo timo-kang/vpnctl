@@ -15,7 +15,7 @@ var ProbeHistoryDeliveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 
 var ProbeHistoryQuotaRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "vpnctl_probe_history_quota_rejected_total",
-	Help: "Probe history batches rejected by logical quota (streams, node_streams, rows, window_samples); resets at restart",
+	Help: "Probe history batches rejected by logical stream, row, density, space or reclamation quota; resets at restart",
 }, []string{"resource"})
 
 var ProbeHistorySealedTotal = promauto.NewCounter(prometheus.CounterOpts{

@@ -56,6 +56,7 @@ type Store struct {
 	lastCleanup  time.Time   // writer-owned
 	tiered       atomic.Bool // enabled only by the offline migration or Open
 	tierSeal     atomic.Int64
+	reclamation  atomic.Bool
 }
 
 func connect(path string, readOnly bool) (*sql.DB, error) {
@@ -153,7 +154,7 @@ func Open(path string, now time.Time) (*Store, error) {
 		if e = tx.Commit(); e != nil {
 			return nil, e
 		}
-	} else if (version < 1 || version > 6) || app != applicationID {
+	} else if (version < 1 || version > 7) || app != applicationID {
 		return nil, fmt.Errorf("unsupported history schema: version=%d application=%d", version, app)
 	}
 	if version < 2 {
@@ -202,7 +203,8 @@ func Open(path string, now time.Time) (*Store, error) {
 		return nil, fmt.Errorf("WAL unavailable: %s", journal)
 	}
 	s := &Store{path: path, writer: make(chan struct{}, 1), query: make(chan struct{}, 1), latest: make(map[int64]Measurement), uplinks: make(map[string]uplink.Snapshot), uplinkRecent: make(map[string][]uplink.Snapshot)}
-	s.tiered.Store(version == 6)
+	s.tiered.Store(version >= 6)
+	s.reclamation.Store(version == 7)
 	// A fresh process replays retained observations; never restores a stale 'good'
 	// flag. Empty/old history remains explicitly unknown at read time.
 	if !s.Tiered() {
@@ -315,8 +317,8 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 		return err
 	}
 	defer tx.Rollback()
+	var seal int64
 	if s.Tiered() {
-		var seal int64
 		if err = tx.QueryRowContext(ctx, "SELECT sealed_until FROM tier_metadata WHERE id=1").Scan(&seal); err != nil {
 			return err
 		}
@@ -334,16 +336,34 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 	// streams do not need this scan at all.
 	var total, own int
 	counted := false
+	reclaimer := pathReclaimer{protected: make(map[Stream]struct{}, len(observations))}
+	// Protect the entire upload, including paths refreshed later in the batch.
+	// This also keeps cached reclamation candidates valid until commit.
+	for _, o := range observations {
+		reclaimer.protected[Stream{NodeID: node, PeerID: o.PeerID, Path: o.Path, RelayID: o.RelayID, Uplink: o.Uplink, Source: o.Source}] = struct{}{}
+	}
 	for _, o := range observations {
 		st := Stream{NodeID: node, PeerID: o.PeerID, Path: o.Path, RelayID: o.RelayID, Uplink: o.Uplink, Source: o.Source}
 		var id int64
 		err = tx.QueryRowContext(ctx, "SELECT id FROM streams WHERE node=? AND peer=? AND path=? AND relay=? AND uplink=? AND source=?", node, o.PeerID, o.Path, o.RelayID, o.Uplink, o.Source).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			if !counted {
-				if err = tx.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(node=?),0) FROM streams", node).Scan(&total, &own); err != nil {
+				if err = tx.QueryRowContext(ctx, "SELECT (SELECT count(*) FROM streams),(SELECT count(*) FROM streams WHERE node=?)", node).Scan(&total, &own); err != nil {
 					return err
 				}
 				counted = true
+			}
+			if s.ReclamationEnabled() && (total >= s.streamLimit() || own >= s.nodeStreamLimit()) {
+				owner, reclaimed, e := reclaimer.reclaim(ctx, tx, node, own >= s.nodeStreamLimit(), seal)
+				if e != nil {
+					return e
+				}
+				if reclaimed {
+					total--
+					if owner == node {
+						own--
+					}
+				}
 			}
 			if total >= s.streamLimit() {
 				return &QuotaError{Resource: "streams", Limit: s.streamLimit()}
@@ -351,7 +371,15 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 			if own >= s.nodeStreamLimit() {
 				return &QuotaError{Resource: "node_streams", Limit: s.nodeStreamLimit()}
 			}
-			res, e := tx.ExecContext(ctx, "INSERT INTO streams(node,peer,path,relay,uplink,source) VALUES(?,?,?,?,?,?)", node, o.PeerID, o.Path, o.RelayID, o.Uplink, o.Source)
+			var nextID any
+			if s.ReclamationEnabled() {
+				var next int64
+				if e := tx.QueryRowContext(ctx, "UPDATE reclamation_metadata SET next_stream_id=next_stream_id+1 WHERE id=1 RETURNING next_stream_id-1").Scan(&next); e != nil {
+					return e
+				}
+				nextID = next
+			}
+			res, e := tx.ExecContext(ctx, "INSERT INTO streams(id,node,peer,path,relay,uplink,source) VALUES(?,?,?,?,?,?,?)", nextID, node, o.PeerID, o.Path, o.RelayID, o.Uplink, o.Source)
 			if e != nil {
 				return e
 			}
@@ -431,6 +459,14 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 			}
 		}
 	}
+	// Live snapshots and reclamation accounting also consume shared pages.
+	// Include their writes in admission, while preserving idempotent retries
+	// when no raw observation was added.
+	if s.Tiered() && added > 0 {
+		if err = checkProbeSpace(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, "UPDATE metadata SET row_count=row_count+? WHERE id=1", added); err != nil {
 		return err
 	}
@@ -438,6 +474,9 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 		return err
 	}
 	s.mu.Lock()
+	for _, id := range reclaimer.removed {
+		delete(s.latest, id)
+	}
 	for id, m := range updates {
 		s.latest[id] = m
 	}
