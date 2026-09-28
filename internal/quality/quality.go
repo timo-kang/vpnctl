@@ -95,6 +95,7 @@ func (q QualityConfig) Normalized(interval time.Duration) (QualityConfig, error)
 // PeerQuality is shared verbatim by HTTP, terminal and Prometheus consumers.
 // Nil RTT/loss means unmeasured, never a zero-latency or lossless observation.
 type PeerQuality struct {
+	JitterStats
 	PeerIP        string      `json:"peer"`
 	Quality       string      `json:"quality"`
 	RTTMs         *float64    `json:"rtt_ms"`
@@ -122,6 +123,7 @@ func copyPtr[T any](v *T) *T {
 }
 
 func (q PeerQuality) Clone() PeerQuality {
+	q.JitterStats = q.JitterStats.Clone()
 	q.RTTMs = copyPtr(q.RTTMs)
 	q.P50RTTMs = copyPtr(q.P50RTTMs)
 	q.P95RTTMs = copyPtr(q.P95RTTMs)

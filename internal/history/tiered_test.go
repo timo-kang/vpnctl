@@ -53,6 +53,9 @@ func tieredFixture(t *testing.T) (*Store, time.Time, []Bucket, map[string][]Meas
 	if err = s.EnableTiering(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.EnableJitter(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	return s, now, oracle, live
 }
 

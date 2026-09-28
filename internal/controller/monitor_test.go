@@ -136,6 +136,9 @@ func TestMonitorBindingOverMTLSChangesRevertsRemovalAndRevocation(t *testing.T) 
 	}
 	var count, unknown int
 	for _, b := range bs {
+		if b.JitterStatus != "complete" || b.JitterPairs == nil || b.JitterKnownSamples != int64(b.Count+b.UnknownCount) {
+			t.Fatal("producer jitter contract", b)
+		}
 		count += b.Count
 		unknown += b.UnknownCount
 	}
@@ -293,7 +296,7 @@ func TestMonitorActualUDPOverMTLSAndCredentialRenewal(t *testing.T) {
 }
 
 func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
-	for _, schema := range []int{5, 6, 7} {
+	for _, schema := range []int{5, 6, 7, 8, 9} {
 		for _, size := range []int{1, 3, 8, 32} {
 			t.Run(fmt.Sprintf("schema_%d_nodes_%d", schema, size), func(t *testing.T) {
 				s, h := lifecycleServer(t, "10m", "30m")
@@ -307,8 +310,13 @@ func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if schema == 7 {
+				if schema == 7 || schema == 9 {
 					if err := st.EnableReclamation(ctx); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if schema >= 8 {
+					if err := st.EnableJitter(ctx); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -417,16 +425,23 @@ func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
 							if err != nil {
 								t.Fatal(err)
 							}
-							if resp.SchemaVersion != schema-3 {
+							apiVersion := 3
+							if schema == 7 || schema == 9 {
+								apiVersion = 4
+							}
+							if resp.SchemaVersion != apiVersion {
 								t.Fatal("API version", resp.SchemaVersion)
 							}
-							if schema == 7 && (resp.Tiering == nil || resp.Tiering.Coverage == nil) {
+							if (schema == 7 || schema == 9) && (resp.Tiering == nil || resp.Tiering.Coverage == nil) {
 								t.Fatal("missing coverage")
 							}
 							for _, n := range resp.Nodes {
 								for _, b := range n.Buckets {
 									if b.Source != source {
 										t.Fatal("source mixed", b)
+									}
+									if b.JitterStatus != "complete" || b.JitterPairs == nil || b.JitterKnownSamples != int64(b.Count+b.UnknownCount) {
+										t.Fatal("producer jitter contract", b)
 									}
 									count += b.Count
 								}

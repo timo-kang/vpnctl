@@ -288,3 +288,60 @@ func TestControllerEventCLIContract(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryCLIEnableJitterBackupAndOwnership(t *testing.T) {
+	for _, reclaim := range []bool{false, true} {
+		t.Run(fmt.Sprint(reclaim), func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := filepath.Join(dir, "controller.yaml")
+			if err := os.WriteFile(cfg, []byte(fmt.Sprintf("controller:\n  data_dir: %q\n", dir)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			path := filepath.Join(dir, "history.db")
+			st, err := history.Open(path, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = st.EnableTiering(ctx, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			oldVersion := 6
+			newVersion := 8
+			if reclaim {
+				oldVersion = 7
+				newVersion = 9
+				if err = st.EnableReclamation(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			backup := filepath.Join(t.TempDir(), "before.db")
+			args := []string{"enable-jitter", "--config", cfg, "--out", backup}
+			lock, err := controller.AcquireStateLock(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = runControllerHistory(args); err == nil {
+				t.Fatal("ignored ownership")
+			}
+			lock.Close()
+			if err = runControllerHistory(args[:3]); err == nil {
+				t.Fatal("omitted backup")
+			}
+			if err = runControllerHistory(args); err != nil {
+				t.Fatal(err)
+			}
+			before, err := history.Inspect(ctx, backup)
+			if err != nil || before.SchemaVersion != oldVersion || before.Tiering.JitterEnabled {
+				t.Fatal(before, err)
+			}
+			after, err := history.Inspect(ctx, path)
+			if err != nil || after.SchemaVersion != newVersion || !after.Tiering.JitterEnabled || after.Tiering.ReclamationEnabled != reclaim {
+				t.Fatal(after, err)
+			}
+			if err = runControllerHistory(args); err == nil {
+				t.Fatal("overwrote rollback backup")
+			}
+		})
+	}
+}

@@ -91,5 +91,5 @@ func formatPercentiles(q PeerQuality) string {
 		}
 		return fmt.Sprintf("%.2f", *v)
 	}
-	return fmt.Sprintf("p50/p95/p99(ms)=%s/%s/%s", value(q.P50RTTMs), value(q.P95RTTMs), value(q.P99RTTMs))
+	return fmt.Sprintf("p50/p95/p99(ms)=%s/%s/%s", value(q.P50RTTMs), value(q.P95RTTMs), value(q.P99RTTMs)) + " " + q.JitterText()
 }

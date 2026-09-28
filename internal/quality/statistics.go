@@ -29,10 +29,13 @@ func RTTPercentiles(rtts []int64) (p50, p95, p99 *float64) {
 
 func (w *Window) percentiles(q *PeerQuality) {
 	rtts := make([]int64, 0, len(w.samples))
+	var jitter JitterSummary
 	for _, s := range w.samples {
+		jitter.Add(s.at.UnixMicro(), s.rtt, s.success)
 		if s.success {
 			rtts = append(rtts, s.rtt)
 		}
 	}
 	q.P50RTTMs, q.P95RTTMs, q.P99RTTMs = RTTPercentiles(rtts)
+	q.JitterStats = jitter.Stats()
 }

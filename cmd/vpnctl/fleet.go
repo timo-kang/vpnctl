@@ -25,9 +25,9 @@ func printFleetStatus(w io.Writer, resp api.FleetStatusResponse, asJSON bool) er
 		return json.NewEncoder(w).Encode(resp)
 	}
 	output := bufio.NewWriter(w)
-	fmt.Fprintln(output, "NAME  VPN_IP  CONTACT  QUALITY  STALE  PEER  REPORTED_PATH  RELAY  UPLINK  SOURCE  RTT_MS  P50_RTT_MS  P95_RTT_MS  P99_RTT_MS  LOSS%  REASON  LAST_SEEN")
+	fmt.Fprintln(output, "NAME  VPN_IP  CONTACT  QUALITY  STALE  PEER  REPORTED_PATH  RELAY  UPLINK  SOURCE  RTT_MS  P50_RTT_MS  P95_RTT_MS  P99_RTT_MS  LOSS%  REASON  LAST_SEEN  JITTER")
 	for _, n := range resp.Nodes {
-		fmt.Fprintf(output, "%s  %s  %s  %s  %t  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s\n", n.Name, n.VPNIP, n.Status, n.Quality, n.Stale, n.PeerID, n.Path, n.RelayID, n.Uplink, n.Source, history.FormatNumber(n.RTTMs), history.FormatNumber(n.P50RTTMs), history.FormatNumber(n.P95RTTMs), history.FormatNumber(n.P99RTTMs), history.FormatNumber(n.LossPct), n.ErrorReason, n.LastSeen)
+		fmt.Fprintf(output, "%s  %s  %s  %s  %t  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s\n", n.Name, n.VPNIP, n.Status, n.Quality, n.Stale, n.PeerID, n.Path, n.RelayID, n.Uplink, n.Source, history.FormatNumber(n.RTTMs), history.FormatNumber(n.P50RTTMs), history.FormatNumber(n.P95RTTMs), history.FormatNumber(n.P99RTTMs), history.FormatNumber(n.LossPct), n.ErrorReason, n.LastSeen, n.JitterText())
 	}
 	return output.Flush()
 }
@@ -48,17 +48,17 @@ func printFleetHistory(w io.Writer, resp api.FleetHistoryResponse, asJSON bool) 
 	}
 	for _, n := range resp.Nodes {
 		fmt.Fprintf(output, "Node: %s (%s)\n", n.Name, n.NodeID)
-		fmt.Fprintln(output, "TIME  PEER  REPORTED_PATH  RELAY  UPLINK  SOURCE  SAMPLES  UNKNOWN  AVAILABLE%  AVG_RTT_MS  P50_RTT_MS  P95_RTT_MS  P99_RTT_MS  LOSS%")
+		fmt.Fprintln(output, "TIME  PEER  REPORTED_PATH  RELAY  UPLINK  SOURCE  SAMPLES  UNKNOWN  AVAILABLE%  AVG_RTT_MS  P50_RTT_MS  P95_RTT_MS  P99_RTT_MS  LOSS%  JITTER")
 		for _, b := range n.Buckets {
-			fmt.Fprintf(output, "%s  %s  %s  %s  %s  %s  %d  %d  %s  %s  %s  %s  %s  %s\n", b.Time.Format(time.RFC3339), b.PeerID, b.Path, b.RelayID, b.Uplink, b.Source, b.Count, b.UnknownCount, history.FormatNumber(b.AvailabilityPct), history.FormatNumber(b.AvgRTTMs), history.FormatNumber(b.P50RTTMs), history.FormatNumber(b.P95RTTMs), history.FormatNumber(b.P99RTTMs), history.FormatNumber(b.LossPct))
+			fmt.Fprintf(output, "%s  %s  %s  %s  %s  %s  %d  %d  %s  %s  %s  %s  %s  %s  %s\n", b.Time.Format(time.RFC3339), b.PeerID, b.Path, b.RelayID, b.Uplink, b.Source, b.Count, b.UnknownCount, history.FormatNumber(b.AvailabilityPct), history.FormatNumber(b.AvgRTTMs), history.FormatNumber(b.P50RTTMs), history.FormatNumber(b.P95RTTMs), history.FormatNumber(b.P99RTTMs), history.FormatNumber(b.LossPct), b.JitterText())
 		}
 	}
 	return output.Flush()
 }
 
 func runControllerHistory(args []string) error {
-	if len(args) == 0 || (args[0] != "backup" && args[0] != "restore" && args[0] != "enable-tiering" && args[0] != "enable-reclamation" && args[0] != "inspect") {
-		return fmt.Errorf("history subcommand required: backup|restore|enable-tiering|enable-reclamation|inspect (controller must be stopped)")
+	if len(args) == 0 || (args[0] != "backup" && args[0] != "restore" && args[0] != "enable-tiering" && args[0] != "enable-reclamation" && args[0] != "enable-jitter" && args[0] != "inspect") {
+		return fmt.Errorf("history subcommand required: backup|restore|enable-tiering|enable-reclamation|enable-jitter|inspect (controller must be stopped)")
 	}
 	fs := flag.NewFlagSet("controller history "+args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "controller YAML configuration")
@@ -78,8 +78,8 @@ func runControllerHistory(args []string) error {
 		return fmt.Errorf("controller config required")
 	}
 	config.ApplyDefaults(&cfg)
-	if (args[0] == "backup" || args[0] == "enable-tiering" || args[0] == "enable-reclamation") && *out == "" || args[0] == "restore" && *in == "" {
-		return fmt.Errorf("backup/enable-tiering/enable-reclamation require --out; restore requires --file")
+	if (args[0] == "backup" || args[0] == "enable-tiering" || args[0] == "enable-reclamation" || args[0] == "enable-jitter") && *out == "" || args[0] == "restore" && *in == "" {
+		return fmt.Errorf("backup/enable-tiering/enable-reclamation/enable-jitter require --out; restore requires --file")
 	}
 	lock, err := controller.AcquireStateLock(cfg.Controller.DataDir)
 	if err != nil {
@@ -92,13 +92,16 @@ func runControllerHistory(args []string) error {
 	if args[0] == "backup" {
 		return history.Backup(ctx, path, *out)
 	}
-	if args[0] == "enable-tiering" || args[0] == "enable-reclamation" {
+	if args[0] == "enable-tiering" || args[0] == "enable-reclamation" || args[0] == "enable-jitter" {
 		if err = history.Backup(ctx, path, *out); err != nil {
 			return err
 		}
 		st, e := history.Open(path, time.Now())
 		if e != nil {
 			return e
+		}
+		if args[0] == "enable-jitter" {
+			return st.EnableJitter(ctx)
 		}
 		if args[0] == "enable-reclamation" {
 			return st.EnableReclamation(ctx)

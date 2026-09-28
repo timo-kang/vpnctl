@@ -53,6 +53,7 @@ Usage:
   vpnctl controller status --config <path>
   vpnctl controller history backup --config <path> --out <history.db>
   vpnctl controller history restore --config <path> --file <history.db>
+  vpnctl controller history enable-jitter --config <path> --out <pre-jitter-backup.db>
   vpnctl controller history enable-tiering --config <path> --out <pre-tiering-backup.db>
   vpnctl controller history enable-reclamation --config <path> --out <pre-reclamation-backup.db>
   vpnctl controller history inspect --config <path>

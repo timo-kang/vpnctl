@@ -238,7 +238,7 @@ func (s *Store) QueryPage(ctx context.Context, req PageRequest) (HistoryPage, er
 		if e != nil {
 			return out, e
 		}
-		rows, err = tx.QueryContext(ctx, "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=?", st.id, out.Start.UnixMicro(), out.End.UnixMicro())
+		rows, err = tx.QueryContext(ctx, "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=? ORDER BY ts,id", st.id, out.Start.UnixMicro(), out.End.UnixMicro())
 		if err != nil {
 			return out, err
 		}
@@ -263,7 +263,7 @@ func (s *Store) QueryPage(ctx context.Context, req PageRequest) (HistoryPage, er
 			if rtt.Valid {
 				ms = pointer(float64(rtt.Int64) / 1000)
 			}
-			if err = agg[i].Add(success, ms); err != nil {
+			if err = agg[i].AddAt(ts, success, ms); err != nil {
 				break
 			}
 		}

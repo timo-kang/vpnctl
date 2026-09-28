@@ -72,6 +72,10 @@ func TestAggregateMatchesRawQueryAcrossPartitionsAndOrder(t *testing.T) {
 	}
 	want := buckets[0]
 	got := aggregate.Bucket(want.Stream, want.Time)
+	if got.JitterStatus != "unavailable_order" || got.JitterMs != nil {
+		t.Fatal("legacy invented jitter")
+	}
+	want.JitterStats = got.JitterStats
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("aggregate=%+v raw=%+v", got, want)
 	}
@@ -209,6 +213,11 @@ func FuzzProbeAggregateDecode(f *testing.F) {
 	a.Add(nil, nil)
 	encoded, _ := a.MarshalBinary()
 	f.Add(encoded)
+	var ordered ProbeAggregate
+	ordered.AddAt(100, pointer(true), pointer(1.))
+	ordered.AddAt(200, pointer(true), pointer(3.))
+	v2, _ := ordered.MarshalBinary()
+	f.Add(v2)
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		inputs := [][]byte{data}

@@ -62,6 +62,9 @@ func TestFleetMeasurementAPIPageAndHistory(t *testing.T) {
 		t.Fatal(resp)
 	}
 	m := resp.Nodes[0]
+	if m.JitterMs == nil || *m.JitterMs != 10 || m.JitterPairs == nil || *m.JitterPairs != 2 {
+		t.Fatal("fleet jitter", m)
+	}
 	if m.P50RTTMs == nil || m.P95RTTMs == nil || m.P99RTTMs == nil || *m.P50RTTMs != 10 || *m.P95RTTMs != 20 || *m.P99RTTMs != 20 {
 		t.Fatal("fleet status percentiles", m)
 	}
@@ -74,7 +77,7 @@ func TestFleetMeasurementAPIPageAndHistory(t *testing.T) {
 	}
 	html := httptest.NewRecorder()
 	statuspage.Handler(s.statusPageData)(html, httptest.NewRequest("GET", "/status", nil))
-	for _, text := range []string{"10.00", "0.00", "wlan0", "unknown", "Reported peer", "p50 / p95 / p99 (ms)", "10.00 / 20.00 / 20.00", "- / - / -"} {
+	for _, text := range []string{"10.00", "0.00", "wlan0", "unknown", "Reported peer", "jitter(ms)=10.00 pairs=2 known=3 complete", "p50 / p95 / p99 (ms)", "10.00 / 20.00 / 20.00", "- / - / -"} {
 		if !strings.Contains(html.Body.String(), text) {
 			t.Fatal("page missing", text)
 		}
@@ -92,6 +95,9 @@ func TestFleetMeasurementAPIPageAndHistory(t *testing.T) {
 		t.Fatal(hist)
 	}
 	b := hist.Nodes[0].Buckets[95]
+	if b.JitterMs == nil || *b.JitterMs != 10 || *b.JitterPairs != 2 {
+		t.Fatal("history jitter", b)
+	}
 	if b.P50RTTMs == nil || b.P99RTTMs == nil || *b.P50RTTMs != 10 || *b.P99RTTMs != 20 {
 		t.Fatal("fleet history percentiles", b)
 	}

@@ -27,11 +27,14 @@ const (
 // ProbeAggregate is a lossless distribution of already validated, distinct
 // probes from one stream and one interval. The storage owner must deduplicate
 // IDs and ensure disjoint intervals when merging: this deliberately retains no
-// IDs, timestamps, reasons or ordering. It cannot reconstruct partial intervals,
-// jitter or live quality state, and is not a substitute for a raw observation.
+// IDs or reasons. Ordered v2 summaries also retain jitter and timestamp
+// boundaries. They cannot reconstruct partial intervals or live quality state.
 // Its zero value is empty; callers must not copy it after first use or use it
 // concurrently. Use the binary representation for detached snapshots.
 type ProbeAggregate struct {
+	orderedEncoding                     bool
+	unordered                           int64
+	jitter                              quality.JitterSummary
 	attempts, unknown, successes, sumUS int64
 	rtts                                map[int64]int64
 }
@@ -40,6 +43,36 @@ type ProbeAggregate struct {
 // the attempt denominator; successful zero RTT is a measurement, not missing.
 // Any rejected update leaves the aggregate unchanged.
 func (a *ProbeAggregate) Add(success *bool, rttMS *float64) error {
+	if err := a.add(success, rttMS); err != nil {
+		return err
+	}
+	a.unordered++
+	a.jitter = quality.JitterSummary{}
+	return nil
+}
+
+// AddAt requires nondecreasing timestamps. Equal timestamps are ambiguous
+// barriers; stable ID order cannot establish their physical observation order.
+func (a *ProbeAggregate) AddAt(at int64, success *bool, rttMS *float64) error {
+	if at <= 0 || (a.unordered == 0 && a.jitter.Samples > 0 && at < a.jitter.Last.At) {
+		return fmt.Errorf("%w: unordered jitter population", ErrInvalid)
+	}
+	if err := a.add(success, rttMS); err != nil {
+		return err
+	}
+	a.orderedEncoding = true
+	if a.unordered == 0 {
+		us := int64(0)
+		ok := success != nil && *success
+		if ok {
+			us = int64(math.Round(*rttMS * 1000))
+		}
+		a.jitter.Add(at, us, ok)
+	}
+	return nil
+}
+
+func (a *ProbeAggregate) add(success *bool, rttMS *float64) error {
 	if a.attempts+a.unknown >= MaxAggregateSamples {
 		return &QuotaError{Resource: "aggregate_samples", Limit: MaxAggregateSamples}
 	}
@@ -82,6 +115,19 @@ func (a *ProbeAggregate) Merge(b *ProbeAggregate) error {
 	if a.attempts+a.unknown+b.attempts+b.unknown > MaxAggregateSamples {
 		return &QuotaError{Resource: "aggregate_samples", Limit: MaxAggregateSamples}
 	}
+	combined := a.jitter
+	if a.unordered+b.unordered == 0 {
+		if combined.Samples > 0 && b.jitter.Samples > 0 && (b.jitter.First.At < combined.First.At || (b.jitter.First.At == combined.First.At && b.jitter.Last.At < combined.Last.At)) {
+			combined = b.jitter
+			if !combined.Append(a.jitter) {
+				return fmt.Errorf("%w: overlapping jitter populations", ErrInvalid)
+			}
+		} else if !combined.Append(b.jitter) {
+			return fmt.Errorf("%w: overlapping jitter populations", ErrInvalid)
+		}
+	} else {
+		combined = quality.JitterSummary{}
+	}
 	newValues := len(a.rtts)
 	for us := range b.rtts {
 		if _, exists := a.rtts[us]; !exists {
@@ -97,6 +143,9 @@ func (a *ProbeAggregate) Merge(b *ProbeAggregate) error {
 	for us, n := range b.rtts {
 		a.rtts[us] += n
 	}
+	a.jitter = combined
+	a.unordered += b.unordered
+	a.orderedEncoding = a.orderedEncoding || b.orderedEncoding
 	a.attempts += b.attempts
 	a.unknown += b.unknown
 	a.successes += b.successes
@@ -109,6 +158,10 @@ func (a *ProbeAggregate) Merge(b *ProbeAggregate) error {
 // may be included in the population.
 func (a *ProbeAggregate) Bucket(stream Stream, start time.Time) Bucket {
 	b := Bucket{Stream: stream, Time: start, Count: int(a.attempts), UnknownCount: int(a.unknown), Successes: int(a.successes)}
+	b.JitterStats = a.jitter.Stats()
+	if a.unordered > 0 {
+		b.JitterStats = quality.JitterStats{JitterStatus: "unavailable_order", JitterKnownSamples: a.attempts + a.unknown - a.unordered}
+	}
 	if a.attempts > 0 {
 		b.AvailabilityPct = pointer(100 * float64(a.successes) / float64(a.attempts))
 		b.LossPct = pointer(100 - *b.AvailabilityPct)
@@ -147,6 +200,9 @@ func (a *ProbeAggregate) sortedRTTs() []int64 {
 // checksum detects accidental corruption; it does not authenticate a database.
 func (a *ProbeAggregate) MarshalBinary() ([]byte, error) {
 	out := []byte{'V', 'P', 'A', 1}
+	if a.orderedEncoding {
+		out[3] = 2
+	}
 	for _, n := range []int64{a.attempts, a.unknown, int64(len(a.rtts))} {
 		out = binary.AppendUvarint(out, uint64(n))
 	}
@@ -155,6 +211,15 @@ func (a *ProbeAggregate) MarshalBinary() ([]byte, error) {
 		out = binary.AppendUvarint(out, uint64(us-prev))
 		out = binary.AppendUvarint(out, uint64(a.rtts[us]))
 		prev = us
+	}
+	if a.orderedEncoding {
+		out = binary.AppendUvarint(out, uint64(a.unordered))
+		if a.unordered == 0 && a.attempts+a.unknown > 0 {
+			j := a.jitter
+			for _, v := range []int64{j.Groups, j.First.At, j.First.Count, j.First.RTTUS + 1, j.Last.At - j.First.At, j.Last.Count, j.Last.RTTUS + 1, j.Total.Pairs, j.Total.SumUS, j.Head.Pairs, j.Head.SumUS, j.Tail.Pairs, j.Tail.SumUS} {
+				out = binary.AppendUvarint(out, uint64(v))
+			}
+		}
 	}
 	out = binary.LittleEndian.AppendUint32(out, crc32.ChecksumIEEE(out))
 	if len(out) > MaxAggregateBytes {
@@ -167,7 +232,7 @@ func (a *ProbeAggregate) MarshalBinary() ([]byte, error) {
 // oversized input before publishing any counts. Work and allocation are bounded.
 func DecodeProbeAggregate(data []byte) (*ProbeAggregate, error) {
 	invalid := fmt.Errorf("%w: invalid aggregate encoding", ErrInvalid)
-	if len(data) < 11 || len(data) > MaxAggregateBytes || !bytes.Equal(data[:4], []byte{'V', 'P', 'A', 1}) {
+	if len(data) < 11 || len(data) > MaxAggregateBytes || !bytes.Equal(data[:3], []byte{'V', 'P', 'A'}) || (data[3] != 1 && data[3] != 2) {
 		return nil, invalid
 	}
 	payload := data[:len(data)-4]
@@ -214,6 +279,40 @@ func DecodeProbeAggregate(data []byte) (*ProbeAggregate, error) {
 		a.successes += count
 		a.sumUS += us * count
 		prev = us
+	}
+	a.unordered = attempts + unknown
+	if data[3] == 2 {
+		a.orderedEncoding = true
+		a.unordered, ok = read(uint64(attempts + unknown))
+		if !ok {
+			return nil, invalid
+		}
+		if a.unordered == 0 && attempts+unknown > 0 {
+			var v [13]int64
+			for i := range v {
+				v[i], ok = read(math.MaxInt64)
+				if !ok {
+					return nil, invalid
+				}
+			}
+			if v[4] > math.MaxInt64-v[1] {
+				return nil, invalid
+			}
+			a.jitter = quality.JitterSummary{Samples: attempts + unknown, Groups: v[0],
+				First: quality.JitterGroup{At: v[1], Count: v[2], RTTUS: v[3] - 1},
+				Last:  quality.JitterGroup{At: v[1] + v[4], Count: v[5], RTTUS: v[6] - 1},
+				Total: quality.JitterEdge{Pairs: v[7], SumUS: v[8]},
+				Head:  quality.JitterEdge{Pairs: v[9], SumUS: v[10]},
+				Tail:  quality.JitterEdge{Pairs: v[11], SumUS: v[12]}}
+			if !validJitter(a.jitter, a.successes) {
+				return nil, invalid
+			}
+			for _, g := range []quality.JitterGroup{a.jitter.First, a.jitter.Last} {
+				if g.RTTUS >= 0 && a.rtts[g.RTTUS] == 0 {
+					return nil, invalid
+				}
+			}
+		}
 	}
 	if len(in) != 0 {
 		return nil, invalid

@@ -24,6 +24,10 @@ func (m *Monitor) Collector() prometheus.Collector {
 		"vpnctl_link_quality":                           "Windowed quality (-1=unknown, 0=offline, 1=poor, 2=degraded, 3=good)",
 		"vpnctl_probe_loss_ratio":                       "Windowed failed probes divided by all probes; NaN when unmeasured",
 		"vpnctl_quality_rtt_seconds":                    "Windowed mean of successful RTTs in seconds; NaN when unmeasured",
+		"vpnctl_quality_jitter_seconds":                 "Mean absolute RTT change across eligible adjacent successful probes; NaN without pairs",
+		"vpnctl_quality_jitter_pair_count":              "Eligible adjacent RTT pairs; NaN when order is unavailable",
+		"vpnctl_quality_jitter_known_samples":           "Observations with retained order, not a delivery completeness guarantee",
+		"vpnctl_quality_jitter_order_available":         "One when the complete retained population has ordering information",
 		"vpnctl_quality_rtt_p50_seconds":                "Windowed nearest-rank p50 of successful RTTs in seconds; NaN when unmeasured",
 		"vpnctl_quality_rtt_p95_seconds":                "Windowed nearest-rank p95 of successful RTTs in seconds; NaN when unmeasured",
 		"vpnctl_quality_rtt_p99_seconds":                "Windowed nearest-rank p99 of successful RTTs in seconds; NaN when unmeasured",
@@ -85,6 +89,10 @@ func (c *qualityCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, p := range snap.Peers {
 		q := p.Quality
+		jitterPairs := math.NaN()
+		if q.JitterPairs != nil {
+			jitterPairs = float64(*q.JitterPairs)
+		}
 		latestRTT, latestSuccess := math.NaN(), math.NaN()
 		if !q.Stale && q.SampleCount > 0 {
 			latestSuccess = truth(p.Success)
@@ -96,6 +104,10 @@ func (c *qualityCollector) Collect(ch chan<- prometheus.Metric) {
 			"vpnctl_link_quality":                           float64(q.Level),
 			"vpnctl_probe_loss_ratio":                       optional(q.LossPct, .01),
 			"vpnctl_quality_rtt_seconds":                    optional(q.RTTMs, .001),
+			"vpnctl_quality_jitter_seconds":                 optional(q.JitterMs, .001),
+			"vpnctl_quality_jitter_pair_count":              jitterPairs,
+			"vpnctl_quality_jitter_known_samples":           float64(q.JitterKnownSamples),
+			"vpnctl_quality_jitter_order_available":         truth(q.JitterStatus == "complete"),
 			"vpnctl_quality_rtt_p50_seconds":                optional(q.P50RTTMs, .001),
 			"vpnctl_quality_rtt_p95_seconds":                optional(q.P95RTTMs, .001),
 			"vpnctl_quality_rtt_p99_seconds":                optional(q.P99RTTMs, .001),

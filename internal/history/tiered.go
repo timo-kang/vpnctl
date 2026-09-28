@@ -179,6 +179,9 @@ func decodeLive(payload, digest []byte, observed int64, st Stream) (Measurement,
 	if len(payload) > 16384 || !bytes.Equal(sum[:], digest) || json.Unmarshal(payload, &m) != nil || m.Stream != st || m.ObservedAt == nil || m.ObservedAt.UnixMicro() != observed {
 		return m, fmt.Errorf("invalid live history snapshot")
 	}
+	if m.JitterStatus == "" {
+		m.JitterStats = quality.JitterStats{JitterStatus: "unavailable_order"}
+	}
 	// Level is intentionally excluded from the public JSON representation.
 	switch m.Quality {
 	case "unknown":
@@ -360,7 +363,7 @@ func (s *Store) compactStep(ctx context.Context, db *sql.DB, now time.Time) (boo
 	hour := (first - 1) / time.Hour.Microseconds()
 	// Pack small stream/hour populations into one bounded transaction. The
 	// expression index avoids rescanning/sorting an entire fleet hour per batch.
-	rows, err := tx.QueryContext(ctx, `SELECT stream,rtt,unknown FROM probes WHERE (ts-1)/3600000000=? ORDER BY stream,ts,id LIMIT ?`, hour, compactBatch)
+	rows, err := tx.QueryContext(ctx, `SELECT stream,ts,rtt,unknown FROM probes WHERE (ts-1)/3600000000=? ORDER BY stream,ts,id LIMIT ?`, hour, compactBatch)
 	if err != nil {
 		return false, err
 	}
@@ -368,10 +371,10 @@ func (s *Store) compactStep(ctx context.Context, db *sql.DB, now time.Time) (boo
 	groups := map[int64]*ProbeAggregate{}
 	var order []int64
 	for rows.Next() {
-		var stream int64
+		var stream, ts int64
 		var rtt sql.NullInt64
 		var unknown bool
-		if err = rows.Scan(&stream, &rtt, &unknown); err != nil {
+		if err = rows.Scan(&stream, &ts, &rtt, &unknown); err != nil {
 			break
 		}
 		success := pointer(rtt.Valid)
@@ -388,7 +391,12 @@ func (s *Store) compactStep(ctx context.Context, db *sql.DB, now time.Time) (boo
 			groups[stream] = a
 			order = append(order, stream)
 		}
-		if err = a.Add(success, ms); err != nil {
+		if s.JitterEnabled() {
+			err = a.AddAt(ts, success, ms)
+		} else {
+			err = a.Add(success, ms)
+		}
+		if err != nil {
 			break
 		}
 		n++
@@ -476,6 +484,7 @@ type TieredStats struct {
 	UsedBytes          int64     `json:"used_bytes"`
 	FreeBytes          int64     `json:"free_bytes"`
 	WALBytes           int64     `json:"wal_bytes"`
+	JitterEnabled      bool      `json:"jitter_enabled"`
 	ReclamationEnabled bool      `json:"reclamation_enabled"`
 	ReclaimedStreams   int64     `json:"reclaimed_streams"`
 	ReclaimedSamples   int64     `json:"reclaimed_samples"`
@@ -503,13 +512,14 @@ func Inspect(ctx context.Context, path string) (StorageInspection, error) {
 	if err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&out.SchemaVersion); err != nil {
 		return out, err
 	}
-	if app != applicationID || out.SchemaVersion < 1 || out.SchemaVersion > 7 {
+	if app != applicationID || out.SchemaVersion < 1 || out.SchemaVersion > 9 {
 		return out, fmt.Errorf("unsupported history database")
 	}
 	if out.SchemaVersion >= 6 {
 		s := &Store{path: path}
 		s.tiered.Store(true)
-		s.reclamation.Store(out.SchemaVersion == 7)
+		s.reclamation.Store(out.SchemaVersion == 7 || out.SchemaVersion == 9)
+		s.jitterEnabled.Store(out.SchemaVersion >= 8)
 		stats, e := s.TieredStats(ctx)
 		if e != nil {
 			return out, e
@@ -520,7 +530,7 @@ func Inspect(ctx context.Context, path string) (StorageInspection, error) {
 }
 
 func (s *Store) TieredStats(ctx context.Context) (TieredStats, error) {
-	var v TieredStats
+	v := TieredStats{JitterEnabled: s.JitterEnabled()}
 	if !s.Tiered() {
 		return v, fmt.Errorf("tiering is not enabled")
 	}
