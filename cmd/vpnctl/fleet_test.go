@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -103,6 +104,58 @@ func TestHistoryCLIBackupRestoreRequiresStoppedController(t *testing.T) {
 	}
 	if got := again.Latest(now)["node-a"]; len(got) != 1 || *got[0].RTTMs != 10 {
 		t.Fatal(got)
+	}
+}
+
+func TestHistoryCLIEnableTieringPreservesBackupAndOwnership(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "controller.yaml")
+	if err := os.WriteFile(cfg, []byte(fmt.Sprintf("controller:\n  data_dir: %q\n", dir)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "history.db")
+	now := time.Now()
+	st, err := history.Open(path, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.Ingest(context.Background(), "robot", []history.Observation{{ID: "one", Timestamp: now, PeerID: "peer", Path: "direct", Success: fleetPtr(false)}}, now); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "before.db")
+	args := []string{"enable-tiering", "--config", cfg, "--out", backup}
+	lock, err := controller.AcquireStateLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = runControllerHistory(args); err == nil {
+		t.Fatal("migration ignored ownership")
+	}
+	lock.Close()
+	if err = runControllerHistory([]string{"enable-tiering", "--config", cfg}); err == nil {
+		t.Fatal("migration omitted backup")
+	}
+	if err = runControllerHistory(args); err != nil {
+		t.Fatal(err)
+	}
+	before, err := history.Inspect(context.Background(), backup)
+	if err != nil || before.SchemaVersion != 5 {
+		t.Fatal(before, err)
+	}
+	after, err := history.Inspect(context.Background(), path)
+	if err != nil || after.SchemaVersion != 6 {
+		t.Fatal(after, err)
+	}
+	if err = runControllerHistory(args); err == nil {
+		t.Fatal("backup was overwritten")
+	}
+	var output bytes.Buffer
+	resp := api.FleetHistoryResponse{SchemaVersion: 3, Tiering: &history.PageInfo{Aligned: true, NextCursor: "next-page"}}
+	if err = printFleetHistory(&output, resp, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "hour-aligned=true") || !strings.Contains(output.String(), "--cursor next-page") {
+		t.Fatal("CLI hid effective window/page", output.String())
 	}
 }
 

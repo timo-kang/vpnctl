@@ -130,7 +130,7 @@ func Check(ctx context.Context, path string) error {
 	if err = db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app); err != nil {
 		return err
 	}
-	if (version != 1 && version != 2 && version != 3 && version != 4 && version != 5) || app != applicationID {
+	if (version < 1 || version > 6) || app != applicationID {
 		return fmt.Errorf("unsupported history backup schema %d", version)
 	}
 	if err = db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil {
@@ -149,7 +149,14 @@ func Check(ctx context.Context, path string) error {
 	if err = db.QueryRowContext(ctx, "SELECT count(*) FROM streams").Scan(&streams); err != nil {
 		return err
 	}
-	if rows != count || rows > MaxRows || streams > MaxStreams {
+	streamLimit, nodeLimit := MaxStreams, MaxNodeStreams
+	if version == 6 {
+		streamLimit, nodeLimit = TieredMaxStreams, TieredMaxNodeStreams
+		if err = checkTiered(ctx, db); err != nil {
+			return err
+		}
+	}
+	if rows != count || rows > MaxRows || streams > int64(streamLimit) {
 		return fmt.Errorf("invalid history counts or capacity")
 	}
 	var invalid int
@@ -179,7 +186,7 @@ func Check(ctx context.Context, path string) error {
 		counts := map[string]int{}
 		for _, st := range streams {
 			counts[st.NodeID]++
-			if counts[st.NodeID] > MaxNodeStreams {
+			if counts[st.NodeID] > nodeLimit {
 				return ErrCapacity
 			}
 			o := Observation{ID: "check", Timestamp: time.Now().UTC(), PeerID: st.PeerID, Path: st.Path, RelayID: st.RelayID, Uplink: st.Uplink, Source: st.Source, Success: pointer(false)}

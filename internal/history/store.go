@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -52,7 +53,9 @@ type Store struct {
 	latest       map[int64]Measurement
 	uplinks      map[string]uplink.Snapshot
 	uplinkRecent map[string][]uplink.Snapshot
-	lastCleanup  time.Time // writer-owned
+	lastCleanup  time.Time   // writer-owned
+	tiered       atomic.Bool // enabled only by the offline migration or Open
+	tierSeal     atomic.Int64
 }
 
 func connect(path string, readOnly bool) (*sql.DB, error) {
@@ -150,7 +153,7 @@ func Open(path string, now time.Time) (*Store, error) {
 		if e = tx.Commit(); e != nil {
 			return nil, e
 		}
-	} else if (version != 1 && version != 2 && version != 3 && version != 4 && version != 5) || app != applicationID {
+	} else if (version < 1 || version > 6) || app != applicationID {
 		return nil, fmt.Errorf("unsupported history schema: version=%d application=%d", version, app)
 	}
 	if version < 2 {
@@ -199,20 +202,32 @@ func Open(path string, now time.Time) (*Store, error) {
 		return nil, fmt.Errorf("WAL unavailable: %s", journal)
 	}
 	s := &Store{path: path, writer: make(chan struct{}, 1), query: make(chan struct{}, 1), latest: make(map[int64]Measurement), uplinks: make(map[string]uplink.Snapshot), uplinkRecent: make(map[string][]uplink.Snapshot)}
+	s.tiered.Store(version == 6)
 	// A fresh process replays retained observations; never restores a stale 'good'
 	// flag. Empty/old history remains explicitly unknown at read time.
-	if err = s.maintainDB(ctx, db, now); err != nil {
+	if !s.Tiered() {
+		if err = s.maintainDB(ctx, db, now); err != nil {
+			return nil, err
+		}
+	} else if err = Check(ctx, path); err != nil {
 		return nil, err
+	}
+	if s.Tiered() {
+		var seal int64
+		if err = db.QueryRowContext(ctx, "SELECT sealed_until FROM tier_metadata WHERE id=1").Scan(&seal); err != nil {
+			return nil, err
+		}
+		s.tierSeal.Store(seal)
 	}
 	streams, err := readStreams(ctx, db, "")
 	if err != nil {
 		return nil, err
 	}
-	if len(streams) > MaxStreams {
+	if len(streams) > s.streamLimit() {
 		return nil, ErrCapacity
 	}
 	for _, st := range streams {
-		m, e := replay(ctx, db, st.id, st.Stream)
+		m, e := s.replay(ctx, db, st.id, st.Stream)
 		if e != nil {
 			return nil, e
 		}
@@ -245,7 +260,7 @@ func readStreams(ctx context.Context, db reader, node string) ([]streamRow, erro
 		query += " WHERE node=?"
 		args = append(args, node)
 	}
-	query += " ORDER BY node,peer,path,relay,uplink,source LIMIT 257"
+	query += fmt.Sprintf(" ORDER BY node,peer,path,relay,uplink,source LIMIT %d", TieredMaxStreams+1)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -287,7 +302,7 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 		return err
 	}
 	defer db.Close()
-	if now.Sub(s.lastCleanup) >= time.Minute {
+	if !s.Tiered() && now.Sub(s.lastCleanup) >= time.Minute {
 		if err = s.maintainDB(ctx, db, now); err != nil {
 			return err
 		}
@@ -300,28 +315,49 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 		return err
 	}
 	defer tx.Rollback()
+	if s.Tiered() {
+		var seal int64
+		if err = tx.QueryRowContext(ctx, "SELECT sealed_until FROM tier_metadata WHERE id=1").Scan(&seal); err != nil {
+			return err
+		}
+		for _, o := range observations {
+			if o.Timestamp.UnixMicro() <= seal {
+				return &SealedError{Until: time.UnixMicro(seal).UTC()}
+			}
+		}
+	}
 	affected := map[int64]Stream{}
+	hours := map[[2]int64]struct{}{}
 	added := int64(0)
+	// Count admission once per transaction. Counting the whole stream table for
+	// every new relation becomes quadratic for a full mesh batch. Existing
+	// streams do not need this scan at all.
+	var total, own int
+	counted := false
 	for _, o := range observations {
 		st := Stream{NodeID: node, PeerID: o.PeerID, Path: o.Path, RelayID: o.RelayID, Uplink: o.Uplink, Source: o.Source}
 		var id int64
 		err = tx.QueryRowContext(ctx, "SELECT id FROM streams WHERE node=? AND peer=? AND path=? AND relay=? AND uplink=? AND source=?", node, o.PeerID, o.Path, o.RelayID, o.Uplink, o.Source).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
-			var total, own int
-			if err = tx.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(node=?),0) FROM streams", node).Scan(&total, &own); err != nil {
-				return err
+			if !counted {
+				if err = tx.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(node=?),0) FROM streams", node).Scan(&total, &own); err != nil {
+					return err
+				}
+				counted = true
 			}
-			if total >= MaxStreams {
-				return &QuotaError{Resource: "streams", Limit: MaxStreams}
+			if total >= s.streamLimit() {
+				return &QuotaError{Resource: "streams", Limit: s.streamLimit()}
 			}
-			if own >= MaxNodeStreams {
-				return &QuotaError{Resource: "node_streams", Limit: MaxNodeStreams}
+			if own >= s.nodeStreamLimit() {
+				return &QuotaError{Resource: "node_streams", Limit: s.nodeStreamLimit()}
 			}
 			res, e := tx.ExecContext(ctx, "INSERT INTO streams(node,peer,path,relay,uplink,source) VALUES(?,?,?,?,?,?)", node, o.PeerID, o.Path, o.RelayID, o.Uplink, o.Source)
 			if e != nil {
 				return e
 			}
 			id, err = res.LastInsertId()
+			total++
+			own++
 		}
 		if err != nil {
 			return err
@@ -352,6 +388,9 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 		}
 		added += n
 		affected[id] = st
+		if s.Tiered() && n > 0 {
+			hours[[2]int64{id, (o.Timestamp.UnixMicro() - 1) / time.Hour.Microseconds()}] = struct{}{}
+		}
 	}
 	var count int64
 	if err = tx.QueryRowContext(ctx, "SELECT row_count FROM metadata WHERE id=1").Scan(&count); err != nil {
@@ -360,15 +399,37 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 	if count+added > MaxRows {
 		return &QuotaError{Resource: "rows", Limit: MaxRows}
 	}
+	if s.Tiered() && added > 0 {
+		// Bound every accepted hour, including backfill outside the current live
+		// replay window. Otherwise adversarial old samples can wedge compaction
+		// after their raw ingestion has already been acknowledged.
+		for key := range hours {
+			var n int
+			if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM (SELECT 1 FROM probes WHERE (ts-1)/3600000000=? AND stream=? LIMIT ?)`, key[1], key[0], MaxAggregateRTTValues+1).Scan(&n); err != nil {
+				return err
+			}
+			if n > MaxAggregateRTTValues {
+				return &QuotaError{Resource: "hour_samples", Limit: MaxAggregateRTTValues}
+			}
+		}
+		if err = checkProbeSpace(ctx, tx); err != nil {
+			return err
+		}
+	}
 	// Replay before commit: pathological per-stream sample density is rejected
 	// atomically, not acknowledged before discovering an unusable snapshot.
 	updates := map[int64]Measurement{}
 	for id, st := range affected {
-		m, e := replay(ctx, tx, id, st)
+		m, e := s.replay(ctx, tx, id, st)
 		if e != nil {
 			return e
 		}
 		updates[id] = m
+		if s.Tiered() {
+			if e = saveLive(ctx, tx, id, m); e != nil {
+				return e
+			}
+		}
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE metadata SET row_count=row_count+? WHERE id=1", added); err != nil {
 		return err
@@ -454,6 +515,11 @@ func (s *Store) Latest(now time.Time) map[string][]Measurement {
 	}
 	for _, m := range s.latest {
 		m.PeerQuality = quality.FreshQuality(m.PeerQuality, now)
+		if seal := s.tierSeal.Load(); seal > 0 && now.Before(time.UnixMicro(seal).Add(CandidateRawRetention)) {
+			m.Stale = true
+			m.SetLevel(quality.QualityUnknown)
+			m.ErrorReason = "clock_regressed"
+		}
 		out[m.NodeID] = append(out[m.NodeID], m)
 	}
 	s.mu.RUnlock()
@@ -476,6 +542,9 @@ func (s *Store) Latest(now time.Time) map[string][]Measurement {
 }
 
 func (s *Store) Maintain(ctx context.Context, now time.Time) error {
+	if s.Tiered() {
+		return s.maintainTiered(ctx, now)
+	}
 	if err := acquire(ctx, s.writer); err != nil {
 		return err
 	}

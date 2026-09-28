@@ -6,6 +6,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 
 	"errors"
 	"log/slog"
@@ -54,6 +55,11 @@ func (s *Server) handleObservations(w http.ResponseWriter, r *http.Request, req 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	if err := s.history.Ingest(ctx, req.NodeID, req.Observations, time.Now()); err != nil {
+		if errors.Is(err, history.ErrSealed) {
+			metrics.ProbeHistorySealedTotal.Inc()
+			writeJSON(w, http.StatusConflict, api.ErrorResponse{Error: err.Error(), Code: api.CodeHistorySealed})
+			return
+		}
 		var quota *history.QuotaError
 		if errors.As(err, &quota) {
 			metrics.ProbeHistoryQuotaRejectedTotal.WithLabelValues(quota.Resource).Inc()
@@ -155,6 +161,17 @@ func (s *Server) handleFleetHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 404, "node not found")
 		return
 	}
+	if tiered, ok := s.history.(tieredHistoryStorage); ok && tiered.Tiered() {
+		if r.URL.Query().Get("bucket") == "" {
+			width = 0
+		}
+		s.handleTieredHistory(w, r, tiered, nodes, window, width, nodeID)
+		return
+	}
+	if r.URL.Query().Get("source") != "" || r.URL.Query().Get("cursor") != "" {
+		writeJSONError(w, 400, "source and cursor require tiered history")
+		return
+	}
 	end := time.Now().UTC().Truncate(time.Microsecond)
 	buckets, err := s.history.Query(r.Context(), nodeID, end, window, width)
 	if err != nil {
@@ -194,12 +211,69 @@ func (s *Server) startHistoryMaintenance() func() {
 				err := s.history.Maintain(work, now)
 				stop()
 				if err != nil && ctx.Err() == nil {
+					metrics.HistoryMaintenanceTotal.WithLabelValues("failure").Inc()
 					slog.Error("fleet history retention failed", "error", err)
+				} else if err == nil {
+					metrics.HistoryMaintenanceTotal.WithLabelValues("success").Inc()
 				}
 			}
 		}
 	}()
 	return func() { cancel(); <-done }
+}
+
+type tieredHistoryStorage interface {
+	Tiered() bool
+	QueryPage(context.Context, history.PageRequest) (history.HistoryPage, error)
+	TieredStats(context.Context) (history.TieredStats, error)
+}
+
+func (s *Server) handleTieredHistory(w http.ResponseWriter, r *http.Request, storage tieredHistoryStorage, nodes []store.NodeInfo, window, width time.Duration, nodeID string) {
+	ctx, cancel := context.WithTimeout(r.Context(), history.QueryTimeout)
+	defer cancel()
+	page, err := storage.QueryPage(ctx, history.PageRequest{Node: nodeID, Source: r.URL.Query().Get("source"), Window: window, Width: width, Cursor: r.URL.Query().Get("cursor"), Align: true})
+	if err != nil {
+		code := 503
+		if errors.Is(err, history.ErrInvalid) {
+			code = 400
+		}
+		writeJSONError(w, code, err.Error())
+		return
+	}
+	if page.RequestedEnd.After(time.Now()) {
+		writeJSONError(w, 400, "history cursor cannot select a future window")
+		return
+	}
+	stats, err := storage.TieredStats(ctx)
+	if err != nil {
+		writeJSONError(w, 503, err.Error())
+		return
+	}
+	byNode := map[string][]history.Bucket{}
+	for _, b := range page.Buckets {
+		byNode[b.NodeID] = append(byNode[b.NodeID], b)
+	}
+	resp := api.FleetHistoryResponse{SchemaVersion: 3, Start: page.Start, End: page.End, BucketSeconds: page.Width.Seconds(), RetentionSeconds: history.Retention.Seconds(), Tiering: &page.PageInfo, Storage: &stats, Nodes: []api.FleetNodeHistory{}}
+	for _, n := range nodes {
+		if nodeID != "" && nodeID != n.ID {
+			continue
+		}
+		if bs, ok := byNode[n.ID]; ok {
+			resp.Nodes = append(resp.Nodes, api.FleetNodeHistory{NodeID: n.ID, Name: n.Name, Buckets: bs})
+		}
+	}
+	data, err := json.Marshal(resp)
+	if err != nil || len(data) > history.MaxHistoryResponseBytes {
+		writeJSONError(w, 503, "history response exceeds encoding budget")
+		return
+	}
+	if err = ctx.Err(); err != nil {
+		writeJSONError(w, 503, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, _ = w.Write(data)
 }
 
 // Long history reads run outside admission's state lock. They are authenticated

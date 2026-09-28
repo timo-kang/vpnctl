@@ -18,6 +18,16 @@ var ProbeHistoryQuotaRejectedTotal = promauto.NewCounterVec(prometheus.CounterOp
 	Help: "Probe history batches rejected by logical quota (streams, node_streams, rows, window_samples); resets at restart",
 }, []string{"resource"})
 
+var ProbeHistorySealedTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "vpnctl_probe_history_sealed_rejected_total",
+	Help: "Probe batches permanently rejected at the durable compaction boundary; resets at restart",
+})
+
+var HistoryMaintenanceTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "vpnctl_history_maintenance_total",
+	Help: "History maintenance attempts by success or failure; resets at restart",
+}, []string{"result"})
+
 var DiagnosticDeliveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "vpnctl_diagnostic_delivery_total",
 	Help: "Best-effort automatic event delivery by fixed role and result; counters reset at process restart",

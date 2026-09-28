@@ -19,6 +19,7 @@ import (
 )
 
 const CodeHistoryQuota = "history_quota"
+const CodeHistorySealed = "history_sealed"
 
 // ErrorResponse adds an optional machine-readable classification to the legacy
 // error message. Callers retain status-based handling for unknown/missing codes.
@@ -146,19 +147,29 @@ func (c *Client) FleetStatus(ctx context.Context) (FleetStatusResponse, error) {
 	return resp, nil
 }
 
-// FleetHistory fetches time-bucketed history for all fleet nodes.
+// FleetHistory fetches the first history page. In v3, Tiering.NextCursor signals
+// additional streams; FleetHistoryPage continues with the same filters.
 func (c *Client) FleetHistory(ctx context.Context, window string) (FleetHistoryResponse, error) {
 	return c.FleetHistoryQuery(ctx, window, "", "")
 }
 
 func (c *Client) FleetHistoryQuery(ctx context.Context, window, nodeID, bucket string) (FleetHistoryResponse, error) {
+	return c.FleetHistoryPage(ctx, window, nodeID, bucket, "", "")
+}
+
+// FleetHistoryPage returns one bounded page. Callers must follow NextCursor
+// explicitly; collecting every stream is not silently folded into one response.
+func (c *Client) FleetHistoryPage(ctx context.Context, window, nodeID, bucket, source, cursor string) (FleetHistoryResponse, error) {
 	var resp FleetHistoryResponse
-	values := url.Values{"window": {window}, "node_id": {nodeID}, "bucket": {bucket}}
+	values := url.Values{"window": {window}, "node_id": {nodeID}, "bucket": {bucket}, "source": {source}, "cursor": {cursor}}
 	if err := c.getJSON(ctx, "/fleet/history?"+values.Encode(), &resp); err != nil {
 		return resp, err
 	}
-	if resp.SchemaVersion != 2 {
-		return resp, fmt.Errorf("unsupported fleet schema %d; controller and client must support v2", resp.SchemaVersion)
+	if resp.SchemaVersion != 2 && resp.SchemaVersion != 3 {
+		return resp, fmt.Errorf("unsupported fleet history schema %d; supported: v2, v3", resp.SchemaVersion)
+	}
+	if resp.SchemaVersion == 3 && (resp.Tiering == nil || resp.Storage == nil) {
+		return resp, fmt.Errorf("incomplete fleet history v3: tiering and storage metadata required")
 	}
 	return resp, nil
 }

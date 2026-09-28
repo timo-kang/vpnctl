@@ -122,12 +122,14 @@ type FleetNodeHistory struct {
 }
 
 type FleetHistoryResponse struct {
-	SchemaVersion    int                `json:"schema_version"`
-	Start            time.Time          `json:"start"`
-	End              time.Time          `json:"end"`
-	BucketSeconds    float64            `json:"bucket_seconds"`
-	RetentionSeconds float64            `json:"retention_seconds"`
-	Nodes            []FleetNodeHistory `json:"nodes"`
+	Tiering          *history.PageInfo    `json:"tiering,omitempty"`
+	Storage          *history.TieredStats `json:"storage,omitempty"`
+	SchemaVersion    int                  `json:"schema_version"`
+	Start            time.Time            `json:"start"`
+	End              time.Time            `json:"end"`
+	BucketSeconds    float64              `json:"bucket_seconds"`
+	RetentionSeconds float64              `json:"retention_seconds"`
+	Nodes            []FleetNodeHistory   `json:"nodes"`
 }
 
 // BootstrapRequest is sent by a node during initial enrollment.
