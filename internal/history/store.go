@@ -20,6 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 	"vpnctl/internal/quality"
 	"vpnctl/internal/uplink"
+	"vpnctl/internal/wgstats"
 )
 
 const applicationID = 0x76706368
@@ -47,6 +48,8 @@ PRAGMA user_version=1;
 // Status reads use only published snapshots, never SQLite locks.
 // Writers and expensive history queries are separately bounded and cancellable.
 type Store struct {
+	wgEnabled     atomic.Bool
+	wgRecent      map[string][]wgstats.Report
 	path          string
 	writer        chan struct{}
 	query         chan struct{}
@@ -186,9 +189,11 @@ func Open(path string, now time.Time) (*Store, error) {
 		if e = tx.Commit(); e != nil {
 			return nil, e
 		}
-	} else if (version < 1 || version > 9) || app != applicationID {
+	} else if !supportedHistoryVersion(version) || app != applicationID {
 		return nil, fmt.Errorf("unsupported history schema: version=%d application=%d", version, app)
 	}
+	wgEnabled := version >= 15
+	version = probeSchemaVersion(version)
 	if version < 2 {
 		tx, e := db.BeginTx(ctx, nil)
 		if e != nil {
@@ -235,6 +240,7 @@ func Open(path string, now time.Time) (*Store, error) {
 		return nil, fmt.Errorf("WAL unavailable: %s", journal)
 	}
 	s := &Store{path: path, writer: make(chan struct{}, 1), query: make(chan struct{}, 1), latest: make(map[int64]Measurement), uplinks: make(map[string]uplink.Snapshot), uplinkRecent: make(map[string][]uplink.Snapshot)}
+	s.wgEnabled.Store(wgEnabled)
 	s.tiered.Store(version >= 6)
 	s.reclamation.Store(version == 7 || version == 9)
 	s.jitterEnabled.Store(version >= 8)
@@ -267,6 +273,9 @@ func Open(path string, now time.Time) (*Store, error) {
 			return nil, e
 		}
 		s.latest[st.id] = m
+	}
+	if err = s.loadWireGuard(ctx, db); err != nil {
+		return nil, err
 	}
 	if err = s.loadUplinks(ctx, db); err != nil {
 		return nil, err
@@ -674,6 +683,9 @@ func (s *Store) maintainDB(ctx context.Context, db *sql.DB, now time.Time) error
 				return err
 			}
 			if err = s.maintainEvents(ctx, db, now); err != nil {
+				return err
+			}
+			if err = s.maintainWireGuard(ctx, db, now); err != nil {
 				return err
 			}
 			s.lastCleanup = now

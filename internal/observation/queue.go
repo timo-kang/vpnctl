@@ -37,6 +37,7 @@ type delivery struct {
 }
 
 type Queue struct {
+	wireguard    bool
 	dropped      atomic.Uint64
 	quotaDropped atomic.Uint64
 	delivered    atomic.Uint64
@@ -71,7 +72,11 @@ func (q *Queue) emitLocked(e history.Observation, send Sender) {
 		q.count("stopped_dropped")
 		return
 	}
-	if q.outstanding == Capacity {
+	capacity := Capacity
+	if q.wireguard {
+		capacity = 8
+	}
+	if q.outstanding == capacity {
 		q.count("overflow_dropped")
 		return
 	}
@@ -110,7 +115,11 @@ func (q *Queue) count(result string) {
 	if result == "quota_dropped" {
 		q.quotaDropped.Add(1)
 	}
-	metrics.ProbeHistoryDeliveryTotal.WithLabelValues(result).Inc()
+	if q.wireguard {
+		metrics.WireGuardDeliveryTotal.WithLabelValues(result).Inc()
+	} else {
+		metrics.ProbeHistoryDeliveryTotal.WithLabelValues(result).Inc()
+	}
 }
 
 // Run has one lifecycle owner. Each observation gets at most five attempts (3s each)
@@ -122,7 +131,11 @@ func (q *Queue) Run(ctx context.Context, send Sender) {
 	var reported uint64
 	report := func() {
 		if count := q.dropped.Load(); count != reported {
-			slog.Warn("probe history incomplete", "dropped", count, "quota_dropped", q.quotaDropped.Load())
+			kind := "probe"
+			if q.wireguard {
+				kind = "wireguard"
+			}
+			slog.Warn("observation history incomplete", "kind", kind, "dropped", count, "quota_dropped", q.quotaDropped.Load())
 			reported = count
 		}
 	}
@@ -248,3 +261,10 @@ func WithQueue(ctx context.Context, q *Queue) context.Context {
 }
 func FromContext(ctx context.Context) *Queue          { q, _ := ctx.Value(contextKey{}).(*Queue); return q }
 func Emit(ctx context.Context, o history.Observation) { FromContext(ctx).Emit(o) }
+
+// NewWireGuard supplies a separate eight-report budget (at most 8 MiB payload).
+// Do uses the queue's stable ID and retry scheduling; no probe is submitted.
+func NewWireGuard() *Queue { q := New(); q.wireguard = true; return q }
+func (q *Queue) Do(send func(context.Context, string) (bool, error)) {
+	q.EmitTo(history.Observation{}, func(ctx context.Context, e history.Observation) (bool, error) { return send(ctx, e.ID) })
+}

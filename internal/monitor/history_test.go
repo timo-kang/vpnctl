@@ -22,6 +22,7 @@ import (
 	"vpnctl/internal/history"
 	"vpnctl/internal/observation"
 	"vpnctl/internal/peersource"
+	"vpnctl/internal/wgstats"
 )
 
 func mappedReporter(url string) (*HistoryReporter, peersource.Peer) {
@@ -314,5 +315,48 @@ func TestMonitorMappingErrorsCannotBlockOnDiagnosticSink(t *testing.T) {
 	}
 	if status := h.Status(); status.MappingDropped != 1 || status.ErrorReason != "catalog_unavailable" {
 		t.Fatal("failure signal lost", status)
+	}
+}
+
+func TestWireGuardReporterRejectsWrongLocalKeyAndCapturesBinding(t *testing.T) {
+	key := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	remote := "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	at := time.Now().UTC()
+	n := wgstats.Counter(5)
+	h := &HistoryReporter{node: "robot", queue: observation.New(), wgqueue: observation.NewWireGuard(), observed: at, self: api.MonitorPeer{NodeID: "robot", PublicKey: key, VPNIP: "10.7.0.1", Epoch: strings.Repeat("a", 32)}, peers: map[string]api.MonitorPeer{remote: {NodeID: "peer", PublicKey: remote, VPNIP: "10.7.0.2", Epoch: strings.Repeat("b", 32)}}}
+	peer := peersource.Peer{PublicKey: remote, VPNIP: "10.7.0.2", LocalPublicKey: remote, WireGuard: wgstats.Sample{ObservedAt: at, Generation: wgstats.ID(), Validity: "observed", RX: &n, TX: &n}}
+	h.reportWireGuard([]peersource.Peer{peer}, "wg0")
+	if got := h.Status(); got.WireGuardDelivery.Pending != 0 || got.LastMappingDrop != "wireguard_reporter_binding_mismatch" {
+		t.Fatal(got)
+	}
+	reports := make(chan wgstats.Report, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var received wgstats.Report
+		if e := json.NewDecoder(r.Body).Decode(&received); e != nil {
+			t.Error(e)
+		}
+		reports <- received
+		w.WriteHeader(204)
+	}))
+	defer server.Close()
+	h.client = api.NewClient(server.URL)
+	peer.LocalPublicKey = key
+	h.reportWireGuard([]peersource.Peer{peer}, "wg0")
+	if h.Status().WireGuardDelivery.Pending != 1 {
+		t.Fatal(h.Status())
+	}
+	// Mutation of source data and a catalog refresh cannot retag pending work.
+	peer.WireGuard.RX = ptr(wgstats.Counter(999))
+	h.self.Epoch = strings.Repeat("c", 32)
+	delete(h.peers, remote)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); h.wgqueue.Run(ctx, nil) }()
+	waitHistory(t, func() bool { return h.wgqueue.Stats().Delivered == 1 })
+	cancel()
+	<-done
+	received := <-reports
+	if received.Reporter.Epoch != strings.Repeat("a", 32) || len(received.Peers) != 1 || received.Peers[0].Peer.PublicKey != remote || *received.Peers[0].Sample.RX != 5 {
+		t.Fatal(received)
 	}
 }

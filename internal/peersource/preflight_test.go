@@ -3,6 +3,7 @@ package peersource
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 )
@@ -34,6 +35,7 @@ func TestMonitorPreflight(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := NewWgSource("wg0", 51900)
 			s.runner = tc.runner
+			s.interfaceLookup = func(string) (*net.Interface, error) { return &net.Interface{Index: 1}, nil }
 			_, err := s.CheckContext(context.Background())
 			if tc.want == "" {
 				if err != nil {

@@ -62,6 +62,9 @@ func (s *Server) handleMonitorPeers(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	out := api.MonitorPeersResponse{SchemaVersion: 1, Peers: []api.MonitorPeer{}}
 	for _, n := range s.reg.Nodes {
+		if n.ID == node && !n.EnrollmentPending {
+			out.Self = monitorPeer(n)
+		}
 		if n.ID == node || n.EnrollmentPending || n.PubKey == "" || n.VPNIP == "" {
 			continue
 		}

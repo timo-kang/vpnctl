@@ -311,6 +311,8 @@ func (s *Server) httpHandler() http.Handler {
 	mux.HandleFunc("/candidates", s.requireClientCert(s.handleCandidates))
 	mux.HandleFunc("/metrics", s.requireClientCert(s.handleMetrics))
 	mux.HandleFunc("/monitor/peers", s.requireClientCert(s.handleMonitorPeers))
+	mux.HandleFunc("/monitor/wireguard", s.requireClientCert(s.handleWireGuard))
+	mux.HandleFunc("/fleet/wireguard", s.handleAuthorizedWireGuard)
 	mux.HandleFunc("/monitor/metrics", s.requireClientCert(s.handleMonitorMetrics))
 	mux.HandleFunc("/nat-probe", s.requireClientCert(s.handleNATProbe))
 	mux.HandleFunc("/direct-result", s.requireClientCert(s.handleDirectResult))
@@ -1451,8 +1453,17 @@ func (s *Server) statusPageData() statuspage.Data {
 	}
 	for _, n := range snapshot.Nodes {
 		online := n.Status == "online"
+		var wg []string
+		if n.WireGuard != nil {
+			if n.WireGuard.ViewsTruncated {
+				wg = append(wg, "Additional peers omitted; use fleet wireguard for this node")
+			}
+			for _, p := range n.WireGuard.Views {
+				wg = append(wg, p.Peer.NodeID+" "+p.View.Text())
+			}
+		}
 		data.Nodes = append(data.Nodes, statuspage.NodeStatus{
-			Name: n.Name, VPNIP: n.VPNIP, NATType: n.NATType, LastSeen: n.LastSeen,
+			WireGuard: wg, Name: n.Name, VPNIP: n.VPNIP, NATType: n.NATType, LastSeen: n.LastSeen,
 			Online: online, Status: n.Status, Quality: n.Quality, RTTMs: history.FormatNumber(n.RTTMs), LossPct: history.FormatNumber(n.LossPct),
 			Jitter:   n.JitterText(),
 			P50RTTMs: history.FormatNumber(n.P50RTTMs), P95RTTMs: history.FormatNumber(n.P95RTTMs), P99RTTMs: history.FormatNumber(n.P99RTTMs),

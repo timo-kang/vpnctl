@@ -19,6 +19,7 @@ import (
 
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/peersource"
+	"vpnctl/internal/wgstats"
 )
 
 // Config holds configuration for a Monitor instance.
@@ -44,10 +45,11 @@ type Snapshot struct {
 
 // PeerState holds the result of probing a single peer.
 type PeerState struct {
-	Peer    peersource.Peer
-	RTTus   int64
-	Success bool
-	Quality PeerQuality
+	WireGuard wgstats.View
+	Peer      peersource.Peer
+	RTTus     int64
+	Success   bool
+	Quality   PeerQuality
 }
 
 // Monitor runs a periodic probe loop over discovered VPN peers.
@@ -164,20 +166,28 @@ func (m *Monitor) probeAll(ctx context.Context) {
 		return
 	}
 	if err != nil {
-		m.reportDiscoveryFailure("discovery_failed")
-		m.recordCycle(time.Now().UTC(), nil, nil, "discovery_failed", "")
+		m.reportDiscoveryFailure("discovery_failed", peersource.WireGuardFailureReason(err))
+		m.recordCycle(time.Now().UTC(), nil, nil, "discovery_failed", "", peersource.WireGuardFailureReason(err))
 		return
 	}
 	peers = filterPeers(peers, m.cfg.Peers)
+	collected := time.Now().UTC()
+	for i := range peers {
+		if peers[i].WireGuard.Validity == "" {
+			peers[i].WireGuard = wgstats.Unknown(collected, "file_source")
+		}
+	}
+
 	seen := make(map[string]bool)
 	for _, p := range peers {
-		if seen[p.VPNIP] {
+		if p.VPNIP != "" && seen[p.VPNIP] {
 			m.reportDiscoveryFailure("discovery_conflict")
 			m.recordCycle(time.Now().UTC(), nil, nil, "discovery_conflict", "")
 			return
 		}
 		seen[p.VPNIP] = true
 	}
+	m.cfg.History.reportWireGuard(peers, m.cfg.Source.InterfaceName())
 	outcomes := make([]probeOutcome, len(peers))
 	senders := make([]func(time.Time, probeOutcome), len(peers))
 	var wg sync.WaitGroup
@@ -225,7 +235,7 @@ func (m *Monitor) probeAll(ctx context.Context) {
 }
 
 // recordCycle owns the only quality calculation; persistence is not its source.
-func (m *Monitor) recordCycle(now time.Time, peers []peersource.Peer, outcomes []probeOutcome, discoveryError, storageError string) {
+func (m *Monitor) recordCycle(now time.Time, peers []peersource.Peer, outcomes []probeOutcome, discoveryError, storageError string, wgReason ...string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	snap := Snapshot{Time: now, Peers: make([]PeerState, 0, len(peers)), StorageError: storageError}
@@ -233,6 +243,12 @@ func (m *Monitor) recordCycle(now time.Time, peers []peersource.Peer, outcomes [
 		snap.Peers = cloneSnapshot(m.latest).Peers
 		snap.ErrorReason, snap.Stale = discoveryError, true
 		for i := range snap.Peers {
+			reason := discoveryError
+			if len(wgReason) > 0 {
+				reason = wgReason[0]
+			}
+			snap.Peers[i].Peer.WireGuard = wgstats.Unknown(now, reason)
+			snap.Peers[i].WireGuard = wgstats.Compare(snap.Peers[i].Peer.WireGuard, nil)
 			snap.Peers[i].Quality.SetLevel(QualityUnknown)
 			snap.Peers[i].Quality.Stale = true
 			snap.Peers[i].Quality.ErrorReason = discoveryError
@@ -246,6 +262,10 @@ func (m *Monitor) recordCycle(now time.Time, peers []peersource.Peer, outcomes [
 		if len(peers) == 0 {
 			snap.ErrorReason = "no_peers"
 		}
+		previous := map[peerID]wgstats.Sample{}
+		for _, p := range m.latest.Peers {
+			previous[identify(p.Peer)] = p.Peer.WireGuard
+		}
 		active := make(map[peerID]*qualityWindow, len(peers))
 		for i, p := range peers {
 			id := identify(p)
@@ -255,7 +275,14 @@ func (m *Monitor) recordCycle(now time.Time, peers []peersource.Peer, outcomes [
 			}
 			q := w.observe(now, outcomes[i], m.cfg.Quality)
 			q.PeerIP = p.VPNIP
-			snap.Peers = append(snap.Peers, PeerState{Peer: p, RTTus: outcomes[i].rtt, Success: outcomes[i].success, Quality: q})
+			var prev *wgstats.Sample
+			if sample, ok := previous[id]; ok {
+				prev = &sample
+			}
+			if p.WireGuard.Validity == "" {
+				p.WireGuard = wgstats.Unknown(now, "file_source")
+			}
+			snap.Peers = append(snap.Peers, PeerState{WireGuard: wgstats.Compare(p.WireGuard, prev), Peer: p, RTTus: outcomes[i].rtt, Success: outcomes[i].success, Quality: q})
 			active[id] = w
 		}
 		m.windows = active // Removed or reassigned identities never inherit old quality.
@@ -300,6 +327,9 @@ type probeOutcome struct {
 // probePeer validates an exact UDP echo within two seconds. Timeouts alone cannot
 // distinguish a failed tunnel from an unavailable remote responder.
 func probePeer(ctx context.Context, peer peersource.Peer) probeOutcome {
+	if peer.WireGuard.Validity == "observed" && !peer.WireGuard.Endpoint {
+		return probeOutcome{unknown: true, reason: "no_endpoint"}
+	}
 	if net.ParseIP(peer.VPNIP) == nil || peer.ProbePort <= 0 || peer.ProbePort > 65535 {
 		return probeOutcome{reason: "invalid_probe_target"}
 	}
@@ -387,6 +417,7 @@ func (m *Monitor) latestAt(now time.Time) Snapshot {
 		}
 	}
 	for i := range snap.Peers {
+		snap.Peers[i].WireGuard = snap.Peers[i].WireGuard.Fresh(now, m.cfg.Quality.StaleAfter)
 		q := &snap.Peers[i].Quality
 		if snap.Stale || q.ObservedAt == nil || !now.Before(q.ObservedAt.Add(m.cfg.Quality.StaleAfter)) {
 			q.Stale = true
@@ -424,6 +455,8 @@ func cloneSnapshot(s Snapshot) Snapshot {
 	s.Peers = slices.Clone(s.Peers)
 	for i := range s.Peers {
 		s.Peers[i].Quality = s.Peers[i].Quality.Clone()
+		s.Peers[i].Peer.WireGuard = s.Peers[i].Peer.WireGuard.Clone()
+		s.Peers[i].WireGuard = s.Peers[i].WireGuard.Clone()
 	}
 	return s
 }

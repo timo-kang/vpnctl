@@ -8,10 +8,14 @@ package peersource
 import (
 	"context"
 	"time"
+	"vpnctl/internal/wgstats"
 )
 
 // Peer holds the observable attributes of a single WireGuard peer.
 type Peer struct {
+	WireGuard      wgstats.Sample
+	LocalPublicKey string
+
 	// PublicKey is the peer's WireGuard public key (base64-encoded).
 	PublicKey string
 	// VPNIP is the peer's VPN address (host part, no prefix length).

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,91 @@ func TestNetns_MonitorQuality(t *testing.T) {
 		})
 	}
 	check("healthy", "good")
+	// Compare the shipped collector against independent kernel transfer output.
+	// Counter snapshots bracket the API observation while ordinary echo traffic
+	// continues; do not persist wg dump because it contains private keys.
+	kernel := func() (uint64, uint64) {
+		rows := strings.Split(strings.TrimSpace(netOutput(t, ns[1], "wg", "show", "wg0", "transfer")), "\n")
+		for _, line := range rows {
+			f := strings.Fields(line)
+			if len(f) == 3 && f[0] == pubA {
+				rx, e := strconv.ParseUint(f[1], 10, 64)
+				if e != nil {
+					t.Fatal(e)
+				}
+				tx, e := strconv.ParseUint(f[2], 10, 64)
+				if e != nil {
+					t.Fatal(e)
+				}
+				return rx, tx
+			}
+		}
+		t.Fatal("missing kernel peer")
+		return 0, 0
+	}
+	lowerRX, lowerTX := kernel()
+	var priorGeneration string
+	eventually(t, 5*time.Second, "real WireGuard counter and handshake", func() error {
+		body, e := read("/network/quality")
+		if e != nil {
+			return e
+		}
+		var r monitor.QualityResponse
+		if e = json.Unmarshal(body, &r); e != nil {
+			return e
+		}
+		if len(r.WireGuard) != 1 {
+			return fmt.Errorf("missing WG observation")
+		}
+		v := r.WireGuard[0]
+		upperRX, upperTX := kernel()
+		if v.RX == nil || v.TX == nil || uint64(*v.RX) < lowerRX || uint64(*v.TX) < lowerTX || uint64(*v.RX) > upperRX || uint64(*v.TX) > upperTX || *v.RX == 0 || *v.TX == 0 || v.HandshakeState != "observed" || v.RXPerSecond == nil {
+			return fmt.Errorf("kernel/collector not converged: %+v", v)
+		}
+		priorGeneration = v.Generation
+		return os.WriteFile(filepath.Join(dir, "wireguard-kernel.json"), body, 0600)
+	})
+	// Observe removal before re-add, with no endpoint: the peer remains visible,
+	// carries real zero counters and never-handshaken state, and is not a probe.
+	netOutput(t, ns[1], "wg", "set", "wg0", "peer", pubA, "remove")
+	eventually(t, 5*time.Second, "removed WG peer", func() error {
+		body, e := read("/network/quality")
+		if e != nil {
+			return e
+		}
+		var r monitor.QualityResponse
+		e = json.Unmarshal(body, &r)
+		if e != nil {
+			return e
+		}
+		if len(r.WireGuard) != 0 {
+			return fmt.Errorf("old peer visible")
+		}
+		return nil
+	})
+	netOutput(t, ns[1], "wg", "set", "wg0", "peer", pubA, "allowed-ips", "10.77.0.1/32")
+	eventually(t, 5*time.Second, "endpointless WG peer", func() error {
+		body, e := read("/network/quality")
+		if e != nil {
+			return e
+		}
+		var r monitor.QualityResponse
+		e = json.Unmarshal(body, &r)
+		if e != nil {
+			return e
+		}
+		if len(r.WireGuard) != 1 {
+			return fmt.Errorf("peer absent")
+		}
+		v := r.WireGuard[0]
+		if v.Endpoint || v.HandshakeState != "never" || v.Generation == priorGeneration || v.RX == nil || *v.RX != 0 || v.TX == nil || *v.TX != 0 || len(r.Peers) != 1 || r.Peers[0].ErrorReason != "no_endpoint" || r.Peers[0].SampleCount != 0 {
+			return fmt.Errorf("endpointless contract: %+v", r)
+		}
+		return os.WriteFile(filepath.Join(dir, "wireguard-no-endpoint.json"), body, 0600)
+	})
+	netOutput(t, ns[1], "wg", "set", "wg0", "peer", pubA, "endpoint", "192.0.2.1:51820")
+	check("wireguard-peer-restored", "good")
+
 	// The shipped CLI must reject an occupied metrics port before entering its loop.
 	bindCtx, stopBind := context.WithTimeout(context.Background(), 5*time.Second)
 	bindCmd := netCommand(bindCtx, ns[1], integrationBinary(t), "monitor", "--interface", "wg0", "--watch", "--data", filepath.Join(dir, "conflict.db"), "--metrics-port", "19100")
@@ -108,6 +194,15 @@ func TestNetns_MonitorQuality(t *testing.T) {
 	check("responder-stopped", "offline")
 	echo = startEcho()
 	check("responder-restored", "good")
+	beforeRecreate, e := read("/network/quality")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var saved monitor.QualityResponse
+	if e = json.Unmarshal(beforeRecreate, &saved); e != nil {
+		t.Fatal(e)
+	}
+	beforeGeneration := saved.WireGuard[0].Generation
 	netOutput(t, ns[1], "ip", "link", "del", "wg0")
 	check("interface-removed", "unknown")
 	netOutput(t, ns[1], "ip", "link", "add", "wg0", "type", "wireguard")
@@ -132,5 +227,34 @@ func TestNetns_MonitorQuality(t *testing.T) {
 		}
 		return os.WriteFile(filepath.Join(dir, "empty.json"), data, 0600)
 	})
+	netOutput(t, ns[1], "wg", "set", "wg0", "private-key", filepath.Join(keys, "key-1"), "listen-port", "51820")
+	netOutput(t, ns[1], "ip", "address", "add", "10.77.0.2/24", "dev", "wg0")
+	netOutput(t, ns[1], "ip", "link", "set", "wg0", "up")
+	netOutput(t, ns[1], "wg", "set", "wg0", "peer", pubA, "allowed-ips", "10.77.0.1/32", "endpoint", "192.0.2.1:51820")
+	check("interface-recreated", "good")
+	current, e := read("/network/quality")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = json.Unmarshal(current, &saved); e != nil {
+		t.Fatal(e)
+	}
+	if saved.WireGuard[0].Generation == beforeGeneration {
+		t.Fatal("interface recreation reused counter generation")
+	}
+	beforeGeneration = saved.WireGuard[0].Generation
+	process.terminate(t)
+	process = startNetworkProcess(t, ns[1], filepath.Join(dir, "monitor-restarted.log"), nil, integrationBinary(t), "monitor", "--interface", "wg0", "--watch", "--data", filepath.Join(dir, "monitor.db"), "--probe-port", "9191", "--metrics-port", "19100", "--interval", "200ms", "--quality-window", "4s", "--quality-stale-after", "3s")
+	check("monitor-restarted", "good")
+	current, e = read("/network/quality")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = json.Unmarshal(current, &saved); e != nil {
+		t.Fatal(e)
+	}
+	if saved.WireGuard[0].Generation == beforeGeneration {
+		t.Fatal("collector restart reused counter generation")
+	}
 	process.terminate(t)
 }

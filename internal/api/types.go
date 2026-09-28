@@ -9,6 +9,7 @@ import (
 	"vpnctl/internal/history"
 	"vpnctl/internal/model"
 	"vpnctl/internal/uplink"
+	"vpnctl/internal/wgstats"
 )
 
 // RegisterRequest is sent by a node when joining the controller.
@@ -98,7 +99,8 @@ type FleetEventHistory = history.EventHistory
 type FleetAlert = history.Alert
 
 type FleetNodeStatus struct {
-	UplinkObservation *uplink.Snapshot `json:"uplink_observation,omitempty"`
+	WireGuard         *wgstats.Snapshot `json:"wireguard,omitempty"`
+	UplinkObservation *uplink.Snapshot  `json:"uplink_observation,omitempty"`
 	history.Measurement
 	Status       string                `json:"status"`
 	Name         string                `json:"name"`

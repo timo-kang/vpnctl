@@ -26,6 +26,7 @@ type Data struct {
 
 // NodeStatus represents one node in the status page.
 type NodeStatus struct {
+	WireGuard                                 []string
 	Status                                    string
 	Peer, Path, Relay, Uplink, Source, Reason string
 	Stale                                     bool

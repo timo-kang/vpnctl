@@ -27,6 +27,7 @@ func (ww *WatchWriter) Write(snap Snapshot) {
 	ts := snap.Time.Local().Format("15:04:05")
 	if h := snap.History; h.Enabled {
 		fmt.Fprintf(ww.w, "[%s] central history: mapping=%t delivered=%d pending=%d dropped=%d quota_dropped=%d mapping_dropped=%d reason=%s last_mapping_drop=%s\n", ts, h.MappingReady, h.Delivery.Delivered, h.Delivery.Pending, h.Delivery.Dropped, h.Delivery.QuotaDropped, h.MappingDropped, h.ErrorReason, h.LastMappingDrop)
+		fmt.Fprintf(ww.w, "[%s] WireGuard history: delivered=%d pending=%d dropped=%d quota_dropped=%d interval=%.0fs\n", ts, h.WireGuardDelivery.Delivered, h.WireGuardDelivery.Pending, h.WireGuardDelivery.Dropped, h.WireGuardDelivery.QuotaDropped, h.WireGuardIntervalSeconds)
 	}
 	if snap.ErrorReason != "" || snap.StorageError != "" {
 		fmt.Fprintf(ww.w, "[%s] collection=%s stale=%t storage=%s\n", ts, snap.ErrorReason, snap.Stale, snap.StorageError)
@@ -37,10 +38,10 @@ func (ww *WatchWriter) Write(snap Snapshot) {
 
 		rtt, loss := formatQuality(ps.Quality)
 
-		hs := formatHandshake(ps.Peer.LastHandshake)
+		hs := ps.WireGuard.HandshakeState
 
 		fmt.Fprintf(ww.w, "[%s] %-12s %-15s %6s %5s  %-8s %s %s\n",
-			ts, name, ip, rtt, loss, ps.Quality.Quality, hs+" "+ps.Quality.ErrorReason, formatPercentiles(ps.Quality))
+			ts, name, ip, rtt, loss, ps.Quality.Quality, hs+" "+ps.Quality.ErrorReason, formatPercentiles(ps.Quality)+" "+ps.WireGuard.Text())
 	}
 }
 

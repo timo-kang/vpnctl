@@ -46,7 +46,7 @@ func checkTiered(ctx context.Context, db reader) error {
 		if err != nil {
 			break
 		}
-		if a.orderedEncoding && version < 8 {
+		if a.orderedEncoding && probeSchemaVersion(version) < 8 {
 			err = fmt.Errorf("ordered aggregate requires schema 8 or 9")
 			break
 		}

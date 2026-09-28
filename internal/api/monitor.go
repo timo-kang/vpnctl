@@ -8,22 +8,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"vpnctl/internal/history"
 	"vpnctl/internal/observation"
+	"vpnctl/internal/wgstats"
 )
 
 const MaxMonitorPeers = 1024
 
 // MonitorPeer identifies the registered peer at observation time. Epoch changes
 // with its key/address binding; it is not a claim about the packet's route.
-type MonitorPeer struct {
-	NodeID    string `json:"node_id"`
-	PublicKey string `json:"public_key"`
-	VPNIP     string `json:"vpn_ip"`
-	Epoch     string `json:"epoch"`
-}
+type MonitorPeer = wgstats.Binding
 type MonitorPeersResponse struct {
+	Self          MonitorPeer   `json:"self"`
 	SchemaVersion int           `json:"schema_version"`
 	Peers         []MonitorPeer `json:"peers"`
 }
@@ -57,4 +55,18 @@ func HistoryDeliveryResult(err error) (bool, error) {
 		return code != 400 && code != 409 && code != 413 && code != 404, err
 	}
 	return true, err
+}
+
+func (c *Client) SubmitWireGuard(ctx context.Context, r wgstats.Report) error {
+	return c.postJSON(ctx, "/monitor/wireguard", r, nil)
+}
+
+func (c *Client) FleetWireGuard(ctx context.Context, node, window string, limit int) (history.WireGuardHistory, error) {
+	var out history.WireGuardHistory
+	q := url.Values{"node_id": {node}, "window": {window}, "limit": {strconv.Itoa(limit)}}
+	err := c.getJSON(ctx, "/fleet/wireguard?"+q.Encode(), &out)
+	if err == nil && out.SchemaVersion != 1 {
+		err = fmt.Errorf("unsupported WireGuard history schema")
+	}
+	return out, err
 }

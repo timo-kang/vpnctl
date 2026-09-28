@@ -138,6 +138,9 @@ func (s *Store) EnableTiering(ctx context.Context, now time.Time) error {
 	if _, err = tx.ExecContext(ctx, "UPDATE tier_metadata SET sealed_until=? WHERE id=1", seal); err != nil {
 		return err
 	}
+	if err = preserveWireGuardVersion(ctx, tx, s.wgEnabled.Load(), 6); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
@@ -250,7 +253,10 @@ func (s *Store) maintainTiered(ctx context.Context, now time.Time) error {
 	if err = acquire(ctx, s.writer); err != nil {
 		return err
 	}
-	err = s.maintainUplinks(ctx, db, now)
+	err = s.maintainWireGuard(ctx, db, now)
+	if err == nil {
+		err = s.maintainUplinks(ctx, db, now)
+	}
 	if err == nil {
 		err = s.maintainEvents(ctx, db, now)
 	}
@@ -492,8 +498,9 @@ type TieredStats struct {
 }
 
 type StorageInspection struct {
-	SchemaVersion int          `json:"schema_version"`
-	Tiering       *TieredStats `json:"tiering,omitempty"`
+	WireGuard     *WireGuardStorage `json:"wireguard,omitempty"`
+	SchemaVersion int               `json:"schema_version"`
+	Tiering       *TieredStats      `json:"tiering,omitempty"`
 }
 
 // Inspect is read-only: unlike Open it neither creates a file, migrates a schema
@@ -512,14 +519,22 @@ func Inspect(ctx context.Context, path string) (StorageInspection, error) {
 	if err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&out.SchemaVersion); err != nil {
 		return out, err
 	}
-	if app != applicationID || out.SchemaVersion < 1 || out.SchemaVersion > 9 {
+	if app != applicationID || !supportedHistoryVersion(out.SchemaVersion) {
 		return out, fmt.Errorf("unsupported history database")
 	}
-	if out.SchemaVersion >= 6 {
+	if out.SchemaVersion >= 15 {
+		stats, e := wireGuardStorage(ctx, db)
+		if e != nil {
+			return out, e
+		}
+		out.WireGuard = &stats
+	}
+	baseVersion := probeSchemaVersion(out.SchemaVersion)
+	if baseVersion >= 6 {
 		s := &Store{path: path}
 		s.tiered.Store(true)
-		s.reclamation.Store(out.SchemaVersion == 7 || out.SchemaVersion == 9)
-		s.jitterEnabled.Store(out.SchemaVersion >= 8)
+		s.reclamation.Store(baseVersion == 7 || baseVersion == 9)
+		s.jitterEnabled.Store(baseVersion >= 8)
 		stats, e := s.TieredStats(ctx)
 		if e != nil {
 			return out, e

@@ -44,7 +44,7 @@ func TestMonitorCLIMetricsBindFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cmd := cliProcess(t, "monitor", "--interface", "wg0", "--watch", "--data", filepath.Join(dir, "monitor.db"), "--metrics-port", strconv.Itoa(port))
+	cmd := cliProcess(t, "monitor", "--interface", "lo", "--watch", "--data", filepath.Join(dir, "monitor.db"), "--metrics-port", strconv.Itoa(port))
 	cmd.Env = append(cmd.Env, "PATH="+dir)
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "metrics bind") {

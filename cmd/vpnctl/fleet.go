@@ -28,6 +28,14 @@ func printFleetStatus(w io.Writer, resp api.FleetStatusResponse, asJSON bool) er
 	fmt.Fprintln(output, "NAME  VPN_IP  CONTACT  QUALITY  STALE  PEER  REPORTED_PATH  RELAY  UPLINK  SOURCE  RTT_MS  P50_RTT_MS  P95_RTT_MS  P99_RTT_MS  LOSS%  REASON  LAST_SEEN  JITTER")
 	for _, n := range resp.Nodes {
 		fmt.Fprintf(output, "%s  %s  %s  %s  %t  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s  %s\n", n.Name, n.VPNIP, n.Status, n.Quality, n.Stale, n.PeerID, n.Path, n.RelayID, n.Uplink, n.Source, history.FormatNumber(n.RTTMs), history.FormatNumber(n.P50RTTMs), history.FormatNumber(n.P95RTTMs), history.FormatNumber(n.P99RTTMs), history.FormatNumber(n.LossPct), n.ErrorReason, n.LastSeen, n.JitterText())
+		if n.WireGuard != nil {
+			if n.WireGuard.ViewsTruncated {
+				fmt.Fprintln(output, "  WireGuard view truncated; use fleet wireguard --node for complete reports")
+			}
+			for _, p := range n.WireGuard.Views {
+				fmt.Fprintf(output, "  WG peer=%s %s\n", p.Peer.NodeID, p.View.Text())
+			}
+		}
 	}
 	return output.Flush()
 }
@@ -255,4 +263,48 @@ func printFleetUplinks(w io.Writer, result history.UplinkHistory, asJSON bool) e
 		}
 	}
 	return out.Flush()
+}
+func runFleetWireGuard(args []string) error {
+	fs := flag.NewFlagSet("fleet wireguard", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "node client YAML")
+	node := fs.String("node", "", "node identity (required)")
+	window := fs.String("window", "1h", "history window, at most 168h")
+	limit := fs.Int("limit", 20, "recent WireGuard reports, 1..100")
+	asJSON := fs.Bool("json", false, "full staged observations and history")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *cfgPath == "" || *node == "" {
+		return fmt.Errorf("--config and --node required")
+	}
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Node == nil {
+		return fmt.Errorf("node config required")
+	}
+	client := newAPIClient(cfg.Node)
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := client.FleetWireGuard(ctx, *node, *window, *limit)
+	if err != nil {
+		return err
+	}
+	return printFleetWireGuard(os.Stdout, result, *asJSON)
+}
+
+func printFleetWireGuard(w io.Writer, r history.WireGuardHistory, asJSON bool) error {
+	if asJSON {
+		return json.NewEncoder(w).Encode(r)
+	}
+	fmt.Fprintf(w, "WireGuard reports (%s,%s] truncated=%t; retention<=%.0fs; fleet storage rows=%d/%d compressed=%d/%d bytes; evicted=%d expired=%d loss-envelope=%v..%v\n", r.Start.Format(time.RFC3339), r.End.Format(time.RFC3339), r.Truncated, r.Storage.RetentionSeconds, r.Storage.Rows, r.Storage.MaxRows, r.Storage.Bytes, r.Storage.MaxBytes, r.Storage.Evicted, r.Storage.Expired, r.Storage.LossStart, r.Storage.LossEnd)
+	for _, s := range r.Snapshots {
+		fmt.Fprintf(w, "%s unmapped=%d collection=%s\n", s.ObservedAt.Format(time.RFC3339), s.Unmapped, s.CollectionReason)
+		for _, p := range s.Views {
+			fmt.Fprintf(w, "  peer=%s %s\n", p.Peer.NodeID, p.View.Text())
+		}
+	}
+	return nil
 }

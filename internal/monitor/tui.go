@@ -111,6 +111,7 @@ func (m TUIModel) View() string {
 	}
 	if h := m.snap.History; h.Enabled {
 		sb.WriteString(fmt.Sprintf("history mapping=%t delivered=%d pending=%d dropped=%d quota=%d unmapped=%d reason=%s last-drop=%s\n", h.MappingReady, h.Delivery.Delivered, h.Delivery.Pending, h.Delivery.Dropped, h.Delivery.QuotaDropped, h.MappingDropped, h.ErrorReason, h.LastMappingDrop))
+		sb.WriteString(fmt.Sprintf("WireGuard history delivered=%d pending=%d dropped=%d interval=%.0fs\n", h.WireGuardDelivery.Delivered, h.WireGuardDelivery.Pending, h.WireGuardDelivery.Dropped, h.WireGuardIntervalSeconds))
 	}
 
 	// Column headers
@@ -126,7 +127,7 @@ func (m TUIModel) View() string {
 	for _, ps := range m.snap.Peers {
 		name := FormatPeerName(ps.Peer)
 		ip := ps.Peer.VPNIP
-		hs := formatHandshake(ps.Peer.LastHandshake)
+		hs := ps.WireGuard.HandshakeState
 
 		rtt, loss := formatQuality(ps.Quality)
 
@@ -136,7 +137,7 @@ func (m TUIModel) View() string {
 
 		sb.WriteString(qualityStyle(ps.Quality.Level).Render(prefix + qualityStyle(ps.Quality.Level).Render(qualStr) + suffix))
 		sb.WriteString("\n")
-		sb.WriteString(dimStyle.Render("    " + formatPercentiles(ps.Quality)))
+		sb.WriteString(dimStyle.Render("    " + formatPercentiles(ps.Quality) + " " + ps.WireGuard.Text()))
 		sb.WriteString("\n")
 	}
 

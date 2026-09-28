@@ -35,6 +35,9 @@ func (s *Store) EnableJitter(ctx context.Context) error {
 	if s.ReclamationEnabled() {
 		version = 9
 	}
+	if s.wgEnabled.Load() {
+		version += 10
+	}
 	if _, err = db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", version)); err != nil {
 		return err
 	}

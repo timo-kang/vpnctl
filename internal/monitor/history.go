@@ -5,6 +5,7 @@ package monitor
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -18,18 +19,21 @@ import (
 	"vpnctl/internal/observation"
 	"vpnctl/internal/peersource"
 	"vpnctl/internal/pki"
+	"vpnctl/internal/wgstats"
 )
 
 const historyBindingTTL = 15 * time.Second
 
 type HistoryStatus struct {
-	Enabled           bool              `json:"enabled"`
-	MappingReady      bool              `json:"mapping_ready"`
-	MappingObservedAt *time.Time        `json:"mapping_observed_at,omitempty"`
-	ErrorReason       string            `json:"error_reason,omitempty"`
-	MappingDropped    uint64            `json:"mapping_dropped"`
-	LastMappingDrop   string            `json:"last_mapping_drop,omitempty"`
-	Delivery          observation.Stats `json:"delivery"`
+	WireGuardDelivery        observation.Stats `json:"wireguard_delivery"`
+	WireGuardIntervalSeconds float64           `json:"wireguard_interval_seconds"`
+	Enabled                  bool              `json:"enabled"`
+	MappingReady             bool              `json:"mapping_ready"`
+	MappingObservedAt        *time.Time        `json:"mapping_observed_at,omitempty"`
+	ErrorReason              string            `json:"error_reason,omitempty"`
+	MappingDropped           uint64            `json:"mapping_dropped"`
+	LastMappingDrop          string            `json:"last_mapping_drop,omitempty"`
+	Delivery                 observation.Stats `json:"delivery"`
 }
 
 // HistoryReporter owns one bounded delivery queue and independent catalog and
@@ -38,6 +42,9 @@ type HistoryReporter struct {
 	client    *api.Client
 	node, dir string
 	queue     *observation.Queue
+	wgqueue   *observation.Queue
+	self      api.MonitorPeer
+	wgLast    time.Time
 	mu        sync.Mutex
 	peers     map[string]api.MonitorPeer
 	observed  time.Time
@@ -64,11 +71,15 @@ func NewHistoryReporter(controller, node, dir string) (*HistoryReporter, error) 
 	if err = creds.ValidateForInstall(node); err != nil {
 		return nil, err
 	}
-	return &HistoryReporter{client: api.NewCredentialClient(strings.TrimRight(controller, "/"), dir), node: node, dir: dir, queue: observation.New(), reason: "not_started"}, nil
+	return &HistoryReporter{client: api.NewCredentialClient(strings.TrimRight(controller, "/"), dir), node: node, dir: dir, queue: observation.New(), wgqueue: observation.NewWireGuard(), reason: "not_started"}, nil
 }
 func (h *HistoryReporter) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Add(2)
+	if h.wgqueue != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); h.wgqueue.Run(ctx, nil) }()
+	}
 	go func() { defer wg.Done(); h.client.MaintainCredentials(ctx, h.dir, h.node) }()
 	go func() {
 		defer wg.Done()
@@ -121,6 +132,7 @@ func (h *HistoryReporter) refresh(ctx context.Context) {
 		return
 	}
 	h.peers, h.observed, h.reason = peers, time.Now().UTC(), ""
+	h.self = catalog.Self
 }
 func (h *HistoryReporter) Status() HistoryStatus {
 	if h == nil {
@@ -129,6 +141,10 @@ func (h *HistoryReporter) Status() HistoryStatus {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s := HistoryStatus{Enabled: true, MappingReady: h.reason == "" && time.Since(h.observed) >= 0 && time.Since(h.observed) <= historyBindingTTL, ErrorReason: h.reason, MappingDropped: h.dropped, LastMappingDrop: h.lastDrop, Delivery: h.queue.Stats()}
+	s.WireGuardIntervalSeconds = wgstats.ReportInterval.Seconds()
+	if h.wgqueue != nil {
+		s.WireGuardDelivery = h.wgqueue.Stats()
+	}
 	if !h.observed.IsZero() {
 		s.MappingObservedAt = ptr(h.observed)
 	}
@@ -180,15 +196,89 @@ func (h *HistoryReporter) bind(peer peersource.Peer) func(time.Time, probeOutcom
 		})
 	}
 }
-func (m *Monitor) reportDiscoveryFailure(reason string) {
+func (m *Monitor) reportDiscoveryFailure(reason string, wgReason ...string) {
 	if m.cfg.History == nil {
 		return
 	}
 	// Use only previously discovered peers; no new identities or network attempts
 	// are invented during discovery failure. The server still revalidates them.
-	for _, p := range m.Latest().Peers {
+	known := m.Latest().Peers
+	peers := make([]peersource.Peer, 0, len(known))
+	at := time.Now().UTC()
+	for _, p := range known {
+		failure := reason
+		if len(wgReason) > 0 {
+			failure = wgReason[0]
+		}
+		p.Peer.WireGuard = wgstats.Unknown(at, failure)
+		peers = append(peers, p.Peer)
+	}
+	failure := reason
+	if len(wgReason) > 0 {
+		failure = wgReason[0]
+	}
+	m.cfg.History.reportWireGuard(peers, m.cfg.Source.InterfaceName(), failure)
+	for _, p := range known {
 		if send := m.cfg.History.bind(p.Peer); send != nil {
 			send(time.Now().UTC(), probeOutcome{unknown: true, reason: reason})
 		}
 	}
+}
+
+// reportWireGuard captures both bindings before enqueue, outside probe delivery.
+// Minute sampling bounds central storage; local observations retain loop cadence.
+func (h *HistoryReporter) reportWireGuard(peers []peersource.Peer, iface string, reason ...string) {
+	if h == nil || h.wgqueue == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := time.Now().UTC()
+	if !h.wgLast.IsZero() && now.Sub(h.wgLast) >= 0 && now.Sub(h.wgLast) < wgstats.ReportInterval {
+		return
+	}
+	if h.reason != "" || now.Before(h.observed) || now.Sub(h.observed) > historyBindingTTL || h.self.Validate() != nil {
+		h.dropped++
+		h.lastDrop = "wireguard_catalog_unavailable"
+		return
+	}
+	r := wgstats.Report{ID: wgstats.ID(), ObservedAt: now, Reporter: h.self, Interface: iface, Peers: []wgstats.Reading{}}
+	if len(reason) > 0 {
+		r.CollectionReason = reason[0]
+	}
+	for _, p := range peers {
+		if p.WireGuard.ObservedAt.IsZero() {
+			continue
+		}
+		r.ObservedAt = p.WireGuard.ObservedAt
+		break
+	}
+	for _, p := range peers {
+		if p.WireGuard.Validity == "observed" && p.LocalPublicKey != h.self.PublicKey {
+			h.dropped++
+			h.lastDrop = "wireguard_reporter_binding_mismatch"
+			return
+		}
+		b, ok := h.peers[p.PublicKey]
+		if !ok || b.VPNIP != p.VPNIP || !p.WireGuard.ObservedAt.Equal(r.ObservedAt) {
+			r.Unmapped++
+			continue
+		}
+		r.Peers = append(r.Peers, wgstats.Reading{Peer: b, Sample: p.WireGuard.Clone()})
+	}
+	if err := r.Validate(now); err != nil {
+		h.dropped++
+		h.lastDrop = "wireguard_invalid_report"
+		return
+	}
+	payload, e := json.Marshal(r)
+	if e != nil || len(payload) > wgstats.MaxReportBytes {
+		h.dropped++
+		h.lastDrop = "wireguard_report_too_large"
+		return
+	}
+	h.wgLast = now
+	h.wgqueue.Do(func(ctx context.Context, _ string) (bool, error) {
+		return api.HistoryDeliveryResult(h.client.SubmitWireGuard(ctx, r))
+	})
 }

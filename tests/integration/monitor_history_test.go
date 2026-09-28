@@ -15,6 +15,7 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
+	"vpnctl/internal/history"
 	"vpnctl/internal/monitor"
 )
 
@@ -58,13 +59,27 @@ func exerciseMonitorHistory(t *testing.T, bin string, namespaces, paths []string
 		if e != nil {
 			return e
 		}
-		if !r.History.MappingReady || r.History.Delivery.Delivered < 3 || r.History.LastMappingDrop != "peer_not_registered" {
+		if !r.History.MappingReady || r.History.Delivery.Delivered < 3 || r.History.WireGuardDelivery.Delivered < 1 || r.History.LastMappingDrop != "peer_not_registered" {
 			return fmt.Errorf("history not ready: %+v", r.History)
 		}
 		body, _ := json.MarshalIndent(r, "", "  ")
 		mustWrite(t, filepath.Join(results, "monitor-history-quality.json"), string(body))
 		return nil
 	})
+
+	readWG := func() (history.WireGuardHistory, string) {
+		body := netOutput(t, namespaces[1], bin, "fleet", "wireguard", "--config", paths[0], "--node", "node-0", "--json")
+		var r history.WireGuardHistory
+		if e := json.Unmarshal([]byte(body), &r); e != nil {
+			t.Fatal(e)
+		}
+		return r, body
+	}
+	wgInitial, wgBody := readWG()
+	if len(wgInitial.Snapshots) != 1 || len(wgInitial.Snapshots[0].Views) != 1 || wgInitial.Snapshots[0].Views[0].Peer.NodeID != "node-1" || wgInitial.Snapshots[0].Views[0].RX == nil {
+		t.Fatal("missing actual WG report", wgInitial)
+	}
+	mustWrite(t, filepath.Join(results, "wireguard-history-initial.json"), wgBody)
 	netOutput(t, namespaces[2], "nft", "add", "table", "inet", "monitor_reject")
 	netOutput(t, namespaces[2], "nft", "add", "chain", "inet", "monitor_reject", "input", "{ type filter hook input priority -10; policy accept; }")
 	netOutput(t, namespaces[2], "nft", "add", "rule", "inet", "monitor_reject", "input", "iifname", "wg0", "ip", "saddr", "10.77.0.2", "udp", "dport", "51900", "reject")
@@ -107,6 +122,11 @@ func exerciseMonitorHistory(t *testing.T, bin string, namespaces, paths []string
 	mustWrite(t, filepath.Join(results, "monitor-history-initial.json"), body)
 	return func(phase string) {
 		t.Helper()
+		wgNow, wgBody := readWG()
+		if len(wgNow.Snapshots) != len(wgInitial.Snapshots) || wgNow.Snapshots[0].ID != wgInitial.Snapshots[0].ID {
+			t.Fatal("WG history changed after restart", phase)
+		}
+		mustWrite(t, filepath.Join(results, "wireguard-history-"+phase+".json"), wgBody)
 		r, body := readHistory()
 		got, wins := count(r)
 		if got != attempts || wins != successes {
