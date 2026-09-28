@@ -133,7 +133,7 @@ func (s *Server) fleetSnapshot() api.FleetStatusResponse {
 		var ws *wgstats.Snapshot
 		if value, ok := wg[node.ID]; ok && value.Reporter == monitorPeer(node) {
 			// Retained history remains immutable; live output excludes old peer bindings.
-			value.Views = nil
+			value.Views = []wgstats.PeerView{}
 			for _, v := range wg[node.ID].Views {
 				if allowed[v.Peer.NodeID] == v.Peer {
 					if wgViews >= 2048 || len(value.Views) >= 256 {

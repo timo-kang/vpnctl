@@ -506,4 +506,9 @@ func TestWireGuardMultiplePeersWithoutAddressesRemainVisible(t *testing.T) {
 	}
 	// Each unknown probe series has a distinct key fallback instead of an empty-IP collision.
 	metricValues(t, m)
+	m.recordCycle(time.Now().UTC(), nil, nil, "", "")
+	body, e := json.Marshal(m.QualityResponse())
+	if e != nil || !strings.Contains(string(body), `"wireguard":[]`) {
+		t.Fatal(string(body), e)
+	}
 }

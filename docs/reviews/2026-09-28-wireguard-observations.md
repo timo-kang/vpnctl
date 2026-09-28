@@ -32,3 +32,24 @@ Verification results and CI links are recorded in the PR and issue #88. The
 operating contract is [wireguard-observations.md](../validation/wireguard-observations.md).
 Do not turn namespace/model success into a 24-hour soak, hardware reboot or
 multi-underlay transition claim. Those remain separately gated in #19 and M3.
+
+Local evidence before final CI:
+
+- Complete general race suite passed; controller 179.071s and history 486.846s
+  with the original per-ingest quota fixture. The fixture was then changed to
+  seed valid retained rows in one transaction while keeping real capacity-edge
+  ingests; the focused WG history race suite passed in 31.383s.
+- Final-head focused race covered history, controller, monitor, peer source,
+  CLI and HTML; history 30.198s, controller 4.868s. The later query admission
+  test (removal/revocation during a held query) passed under race in 5.021s.
+- Real compressed-payload budget: 334 large valid reports brought storage to
+  the 128 MiB boundary. A new report reclaimed one old report, leaving
+  134,217,430 bytes. Query/reopen/backup checks rejected an injected digest
+  corruption. The race run completed in 42.865s.
+- Real kernel monitor test passed in 13.74s including endpoint-less re-add,
+  interface recreation and collector restart. Three-node PKI/uplink lifecycle,
+  actual monitor delivery and controller history restart passed in 57.89s.
+- A real schema-15 database created by the new code passed validation; the
+  previous main binary (`c1f0443`) rejected it with `unsupported history database`.
+- Final CI is tracked by [PR #90](https://github.com/timo-kang/vpnctl/pull/90).
+  Only its final checked head is eligible for merge.

@@ -533,8 +533,9 @@ func checkWireGuard(ctx context.Context, db *sql.DB) error {
 		if e != nil {
 			return e
 		}
-		_, got, e := packWireGuard(r)
-		if e != nil || r.Validate(r.ObservedAt) != nil || r.Reporter.NodeID != node || r.ID != id || r.ObservedAt.UnixMicro() != ts || !bytes.Equal(got, digest) {
+		raw, e := json.Marshal(r)
+		got := sha256.Sum256(raw)
+		if e != nil || len(raw) > wgstats.MaxReportBytes || r.Validate(r.ObservedAt) != nil || r.Reporter.NodeID != node || r.ID != id || r.ObservedAt.UnixMicro() != ts || !bytes.Equal(got[:], digest) {
 			return fmt.Errorf("invalid WireGuard history record")
 		}
 	}

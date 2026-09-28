@@ -29,6 +29,7 @@ type QualityResponse struct {
 func (m *Monitor) QualityResponse() QualityResponse {
 	snap := m.Latest()
 	response := QualityResponse{
+		WireGuard:       make([]LocalWireGuard, 0, len(snap.Peers)),
 		History:         snap.History,
 		SchemaVersion:   1,
 		Window:          m.cfg.Quality.Window.Seconds(),

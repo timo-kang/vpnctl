@@ -291,3 +291,122 @@ func TestWireGuardLargeHistoryResponseIsExplicitlyTruncated(t *testing.T) {
 	}
 	t.Logf("max-size peer reports=24 returned=%d response_bytes=%d", len(q.Snapshots), len(b))
 }
+
+func TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption(t *testing.T) {
+	s, now := newStore(t)
+	ctx := context.Background()
+	r := wgReport(now.Add(-time.Hour), 0, 1)
+	r.Peers = nil
+	for p := 1; p <= wgstats.MaxPeers; p++ {
+		v := wgReport(r.ObservedAt, 0, 1).Peers[0]
+		v.Peer = wgBinding(p)
+		r.Peers = append(r.Peers, v)
+	}
+	putWG(t, s, r, now)
+	db, e := connect(s.path, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	tx, e := db.Begin()
+	if e != nil {
+		t.Fatal(e)
+	}
+	var used int
+	if e = tx.QueryRow("SELECT bytes FROM wireguard_metadata").Scan(&used); e != nil {
+		t.Fatal(e)
+	}
+	// Valid gzip with no compression exercises the actual byte budget without
+	// forging accounting metadata or inventing hundreds of thousands of rows.
+	encode := func(r wgstats.Report) ([]byte, []byte) {
+		raw, e := json.Marshal(r)
+		if e != nil {
+			t.Fatal(e)
+		}
+		sum := sha256.Sum256(raw)
+		var b bytes.Buffer
+		z, e := gzip.NewWriterLevel(&b, gzip.NoCompression)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = z.Write(raw); e != nil {
+			t.Fatal(e)
+		}
+		if e = z.Close(); e != nil {
+			t.Fatal(e)
+		}
+		return b.Bytes(), sum[:]
+	}
+	insert := func(r wgstats.Report, b, digest []byte) {
+		if _, e = tx.Exec("INSERT INTO wireguard_reports VALUES(?,?,?,?,?)", r.Reporter.NodeID, r.ID, r.ObservedAt.UnixMicro(), b, digest); e != nil {
+			t.Fatal(e)
+		}
+		used += len(b)
+	}
+	count := 0
+	for {
+		r.ID = wgstats.ID()
+		r.ObservedAt = r.ObservedAt.Add(time.Second)
+		for i := range r.Peers {
+			r.Peers[i].Sample.ObservedAt = r.ObservedAt
+		}
+		b, digest := encode(r)
+		if used+len(b) > MaxWireGuardBytes {
+			break
+		}
+		insert(r, b, digest)
+		count++
+	}
+	low, high := 0, len(r.Peers)
+	for low < high {
+		mid := (low + high + 1) / 2
+		part := r
+		part.Peers = part.Peers[:mid]
+		b, _ := encode(part)
+		if used+len(b) <= MaxWireGuardBytes {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	if low > 0 {
+		part := r
+		part.Peers = part.Peers[:low]
+		b, digest := encode(part)
+		insert(part, b, digest)
+	}
+	if e = tx.Commit(); e != nil {
+		t.Fatal(e)
+	}
+	r.ID = wgstats.ID()
+	r.ObservedAt = r.ObservedAt.Add(time.Second)
+	for i := range r.Peers {
+		r.Peers[i].Sample.ObservedAt = r.ObservedAt
+	}
+	payload, _, e := packWireGuard(r)
+	if e != nil || used+len(payload) <= MaxWireGuardBytes {
+		t.Fatal("fixture did not reach byte budget", used, len(payload), e)
+	}
+	putWG(t, s, r, now)
+	meta, e := wireGuardStorage(ctx, db)
+	if e != nil || meta.Bytes > MaxWireGuardBytes || meta.Evicted == 0 || meta.LossStart == nil {
+		t.Fatal(meta, e)
+	}
+	if e = Check(ctx, s.path); e != nil {
+		t.Fatal(e)
+	}
+	t.Logf("seeded_reports=%d retained_bytes=%d evicted=%d", count, meta.Bytes, meta.Evicted)
+	// Reads and reopen reject corruption before it becomes a live measurement.
+	if _, e = db.Exec("UPDATE wireguard_reports SET digest=zeroblob(32) WHERE node=? AND id=?", r.Reporter.NodeID, r.ID); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.QueryWireGuard(ctx, r.Reporter.NodeID, now, time.Hour, 1); e == nil {
+		t.Fatal("query ignored checksum")
+	}
+	if _, e = Open(s.path, now); e == nil {
+		t.Fatal("reopen ignored checksum")
+	}
+	if e = Check(ctx, s.path); e == nil {
+		t.Fatal("backup check ignored checksum")
+	}
+}

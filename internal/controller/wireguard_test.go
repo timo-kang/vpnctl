@@ -41,6 +41,13 @@ func TestWireGuardMTLSBindingRemovalRevocation(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
+	wrong := req.Clone()
+	wrong.Peers[0].Peer.VPNIP = "10.7.0.254"
+	expectMonitorCode(t, reporter.SubmitWireGuard(ctx, wrong), 409)
+	wrong = req.Clone()
+	wrong.Peers[0].Peer.Epoch = wgstats.ID()
+	expectMonitorCode(t, reporter.SubmitWireGuard(ctx, wrong), 409)
+
 	result, e := reporter.FleetWireGuard(ctx, "robot", "1h", 10)
 	if e != nil || result.Storage.Rows != 1 || len(result.Snapshots) != 1 {
 		t.Fatal(result, e)
@@ -227,5 +234,74 @@ func TestWireGuardRealReporterResponseLossKeepsLocalCollection(t *testing.T) {
 	}
 	if _, e = c.Register(ctx, api.RegisterRequest{Name: "robot", PubKey: wireGuardTestKey(1), DirectMode: "off"}); e != nil {
 		t.Fatal("delivery affected registration", e)
+	}
+}
+
+type wireGuardBlockedQuery struct {
+	*history.Store
+	entered, release chan struct{}
+}
+
+func (s *wireGuardBlockedQuery) QueryWireGuard(ctx context.Context, node string, now time.Time, window time.Duration, limit int) (history.WireGuardHistory, error) {
+	close(s.entered)
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return history.WireGuardHistory{}, ctx.Err()
+	}
+	return s.Store.QueryWireGuard(ctx, node, now, window, limit)
+}
+func TestWireGuardHistoryRechecksRemovalAndRevocationAfterQuery(t *testing.T) {
+	for _, mode := range []string{"subject_removed", "caller_revoked"} {
+		t.Run(mode, func(t *testing.T) {
+			s, h := lifecycleServer(t, "10m", "30m")
+			robot, _ := lifecycleNode(t, s, h, "robot")
+			viewer, dir := lifecycleNode(t, s, h, "viewer")
+			monitorRegister(t, robot, "robot", wireGuardTestKey(1))
+			monitorRegister(t, viewer, "viewer", wireGuardTestKey(2))
+			block := &wireGuardBlockedQuery{Store: s.history.(*history.Store), entered: make(chan struct{}), release: make(chan struct{})}
+			s.history = block
+			var once sync.Once
+			release := func() { once.Do(func() { close(block.release) }) }
+			defer release()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { _, e := viewer.FleetWireGuard(ctx, "robot", "1h", 1); result <- e }()
+			select {
+			case <-block.entered:
+			case <-ctx.Done():
+				t.Fatal("query did not start")
+			}
+			if mode == "subject_removed" {
+				if _, e := api.Admin(ctx, s.cfg.DataDir, api.AdminRequest{Operation: "node.remove", NodeID: "robot"}); e != nil {
+					t.Fatal("query blocked removal", e)
+				}
+			} else {
+				credentials, e := pki.LoadCredentials(dir)
+				if e != nil {
+					t.Fatal(e)
+				}
+				cert, e := pki.ParseCertificate(credentials.ClientCert)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = s.authority.Revoke(certificateFingerprint(cert)); e != nil {
+					t.Fatal(e)
+				}
+			}
+			release()
+			select {
+			case e := <-result:
+				if e == nil {
+					t.Fatal("buffered history escaped revocation/removal")
+				}
+				if mode == "subject_removed" {
+					expectMonitorCode(t, e, 404)
+				}
+			case <-ctx.Done():
+				t.Fatal("read did not finish")
+			}
+		})
 	}
 }
