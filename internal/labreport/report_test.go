@@ -262,3 +262,23 @@ func TestObservationTimestampIsReadSequenceStart(t *testing.T) {
 		t.Fatal(r.Findings)
 	}
 }
+
+func TestCollectionCompletionIncludesReadOverhead(t *testing.T) {
+	f := newFixture(t)
+	v := f.trace[len(f.trace)-2]
+	at := v["at"].(time.Time)
+	v["observation_completed_at"] = at.Add(100 * time.Millisecond)
+	v["wireguard_observed_at"] = at.Add(50 * time.Millisecond)
+	f.save(t)
+	zero := 0
+	r := Analyze(f.dir, f.manifest, &zero)
+	if r.Status != "complete" {
+		t.Fatal(r.Findings)
+	}
+	v["observation_completed_at"] = at.Add(-time.Second)
+	f.save(t)
+	r = Analyze(f.dir, f.manifest, &zero)
+	if r.Status != "failed" || !finding(r, "invalid_collection_duration") {
+		t.Fatal(r.Findings)
+	}
+}

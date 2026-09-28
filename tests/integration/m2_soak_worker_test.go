@@ -23,6 +23,7 @@ type soakObservation struct {
 	WGPeerNodes            []string              `json:"wireguard_peer_nodes"`
 	HeartbeatUnknown       int                   `json:"heartbeat_unknown"`
 	RecentEvents           []history.Event       `json:"recent_events"`
+	CompletedAt            time.Time             `json:"observation_completed_at"`
 	At                     time.Time             `json:"at"`
 	Phase                  string                `json:"phase"`
 	Node                   string                `json:"node"`
@@ -177,6 +178,7 @@ func readSoakObservation() error {
 	if e := collect(); e != nil {
 		v.Error = e.Error()
 	}
+	v.CompletedAt = time.Now().UTC()
 	return json.NewEncoder(os.Stdout).Encode(v)
 }
 

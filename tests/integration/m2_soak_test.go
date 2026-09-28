@@ -74,12 +74,13 @@ func TestNetns_M2Soak(t *testing.T) {
 		}
 	}
 	start := time.Time{}
+	workloadEnd := time.Time{}
 	completed := false
 	phases := map[string]int{}
 	// Write an explicit incomplete verdict even on assertion failure. Process
 	// kill/host loss can leave no verdict; consumers must also treat that as incomplete.
 	defer func() {
-		verdict := map[string]any{"schema_version": 1, "started_at": start, "finished_at": time.Now().UTC(), "requested_seconds": duration.Seconds(), "nodes": size, "completed": completed && !t.Failed(), "phases": phases, "m2_gate": "pending_review", "wall_clock_24h": !start.IsZero() && time.Since(start) >= 24*time.Hour}
+		verdict := map[string]any{"schema_version": 1, "started_at": start, "finished_at": time.Now().UTC(), "requested_seconds": duration.Seconds(), "nodes": size, "completed": completed && !t.Failed(), "phases": phases, "m2_gate": "pending_review", "wall_clock_24h": !start.IsZero() && !workloadEnd.IsZero() && workloadEnd.Sub(start) >= 24*time.Hour}
 		b, _ := json.MarshalIndent(verdict, "", "  ")
 		verdictPath := filepath.Join(results, "verdict.json")
 		if err := os.WriteFile(verdictPath, b, 0600); err != nil {
@@ -386,7 +387,8 @@ func TestNetns_M2Soak(t *testing.T) {
 			t.Fatal("final producer readiness", n, e)
 		}
 	}
-	emit(map[string]any{"kind": "workload_end", "at": time.Now().UTC(), "elapsed_seconds": time.Since(start).Seconds()})
+	workloadEnd = time.Now().UTC()
+	emit(map[string]any{"kind": "workload_end", "at": workloadEnd, "elapsed_seconds": workloadEnd.Sub(start).Seconds()})
 	for n := 0; n < size; n++ {
 		monitors[n].terminate(t)
 		agents[n].terminate(t)

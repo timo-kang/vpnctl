@@ -94,6 +94,7 @@ type Report struct {
 type observation struct {
 	Kind             string             `json:"kind"`
 	At               time.Time          `json:"at"`
+	CompletedAt      *time.Time         `json:"observation_completed_at"`
 	Phase            string             `json:"phase"`
 	Node             string             `json:"node"`
 	Error            string             `json:"error"`
@@ -443,6 +444,12 @@ func (a *analyzer) sample(v observation) error {
 			}
 		}
 		collectionSeconds := collectionMS / 1000
+		if v.CompletedAt != nil {
+			collectionSeconds = v.CompletedAt.Sub(v.At).Seconds()
+			if collectionSeconds < 0 || collectionSeconds > 15 {
+				a.finding("failed", "invalid_collection_duration")
+			}
+		}
 		h := v.Storage
 		if h.Validity != "observed" || h.Stale || h.At == nil || h.Values == nil {
 			a.finding("failed", "normal_storage_unknown")
