@@ -1459,7 +1459,7 @@ func (s *Server) statusPageData() statuspage.Data {
 				wg = append(wg, "Additional peers omitted; use fleet wireguard for this node")
 			}
 			for _, p := range n.WireGuard.Views {
-				wg = append(wg, p.Peer.NodeID+" "+p.View.Text())
+				wg = append(wg, p.Peer.Label()+" "+p.View.Text())
 			}
 		}
 		data.Nodes = append(data.Nodes, statuspage.NodeStatus{

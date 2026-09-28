@@ -30,6 +30,14 @@ that target's availability or identify the actual relay/underlay.
   controller revalidates both bindings; removed, rebound and revoked reporters
   cannot silently relabel queued reports. Deleted peers disappear from live
   status; immutable history may still reference their previous identity.
+- A WG peer absent from the node registry (commonly the controller/relay server)
+  is retained by its full public key, with empty node ID/epoch/registry VPN IP
+  and an explicit `unmapped_peers` count. It is never fabricated as a registered
+  robot. A native report cannot bypass the binding guard for a currently
+  registered key. Registered WG counters bind by full public key; their VPN IP
+  is registry metadata. Kernel AllowedIPs can name a routed uplink destination
+  and must not be interpreted as that WG peer's own address. Probe destination
+  binding remains separate and still requires the expected IP.
 
 Polling cannot prove the absence of an unobserved remove/re-add or reset between
 two samples if the new counters have already overtaken the old values. Rate
@@ -95,7 +103,8 @@ deleted. Rate/counter continuity does not imply delivery completeness.
   `history.wireguard_delivery` shows delivered/pending/dropped/quota drops and
   `wireguard_interval_seconds` describes central sampling.
 - `POST /monitor/wireguard`: mTLS report submission; no route/relay claim fields.
-- `GET /fleet/status`: current, registered bindings only, under `wireguard`.
+- `GET /fleet/status`: current registered bindings plus explicitly unregistered
+  native WG keys, under `wireguard`.
   The WG overview limits 256 peers per node and 2,048 peers per response and
   explicitly sets `views_truncated`. Per-node history supplies detailed reports.
 - `GET /fleet/wireguard?node_id=robot&window=24h&limit=20`: 1..100 newest reports,
@@ -126,7 +135,8 @@ acknowledgement loss through the real monitor reporter.
 
 `./scripts/test-netns.sh` exercises the shipped CLI in isolated namespaces:
 independent kernel transfer checks, real traffic/handshake, endpoint-less peer
-re-add, interface removal, local JSON/Prometheus, real monitor→mTLS→SQLite→fleet
+re-add, interface removal, local JSON/Prometheus, native controller peer plus registered
+robot peer identity, real monitor→mTLS→SQLite→fleet
 CLI and controller restart recovery. The existing PKI suite runs 1/3/8/32 nodes.
 It emits only public observations; `wg dump` is never a result artifact.
 

@@ -38,14 +38,20 @@ func (s *Server) handleWireGuard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bindings := map[string]wgstats.Binding{}
+	keys := map[string]bool{}
 	for _, n := range s.fleetNodes() {
+		keys[n.PubKey] = true
 		if !n.EnrollmentPending {
 			bindings[n.ID] = monitorPeer(n)
 		}
 	}
 	matched := bindings[req.Reporter.NodeID] == req.Reporter
 	for _, p := range req.Peers {
-		matched = matched && bindings[p.Peer.NodeID] == p.Peer
+		if p.Peer.NodeID == "" {
+			matched = matched && !keys[p.Peer.PublicKey]
+		} else {
+			matched = matched && bindings[p.Peer.NodeID] == p.Peer
+		}
 	}
 	if !matched {
 		writeJSON(w, 409, api.ErrorResponse{Code: "monitor_binding_changed", Error: "reporter or peer binding changed"})

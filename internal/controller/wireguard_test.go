@@ -305,3 +305,56 @@ func TestWireGuardHistoryRechecksRemovalAndRevocationAfterQuery(t *testing.T) {
 		})
 	}
 }
+
+func TestWireGuardUnregisteredPeerPreservesKernelIdentity(t *testing.T) {
+	s, h := lifecycleServer(t, "10m", "30m")
+	reporter, _ := lifecycleNode(t, s, h, "robot")
+	monitorRegister(t, reporter, "robot", wireGuardTestKey(1))
+	ctx := context.Background()
+	catalog, e := reporter.MonitorPeers(ctx, "robot")
+	if e != nil {
+		t.Fatal(e)
+	}
+	at := time.Now().UTC().Add(-time.Second)
+	rx := wgstats.Counter(1234)
+	r := wgstats.Report{ID: wgstats.ID(), ObservedAt: at, Reporter: catalog.Self, Interface: "wg0", Unmapped: 2, Peers: []wgstats.Reading{}}
+	for _, key := range []byte{2, 3} {
+		r.Peers = append(r.Peers, wgstats.Reading{Peer: wgstats.Binding{PublicKey: wireGuardTestKey(key)}, Sample: wgstats.Sample{ObservedAt: at, Generation: wgstats.ID(), Validity: "observed", RX: &rx, TX: &rx}})
+	}
+	if e = reporter.SubmitWireGuard(ctx, r); e != nil {
+		t.Fatal(e)
+	}
+	fleet, e := reporter.FleetStatus(ctx)
+	if e != nil || len(fleet.Nodes) != 1 || fleet.Nodes[0].WireGuard == nil || len(fleet.Nodes[0].WireGuard.Views) != 2 {
+		t.Fatal(fleet, e)
+	}
+	for _, v := range fleet.Nodes[0].WireGuard.Views {
+		if v.Peer.NodeID != "" || v.Peer.Epoch != "" || *v.RX != 1234 || !strings.HasPrefix(v.Peer.Label(), "unregistered:") {
+			t.Fatal(v)
+		}
+	}
+	// Once that key acquires a registered identity, stale unnamed submissions
+	// cannot bypass the binding guard; old live unnamed entries disappear.
+	peer, _ := lifecycleNode(t, s, h, "peer")
+	monitorRegister(t, peer, "peer", wireGuardTestKey(2))
+	expectMonitorCode(t, reporter.SubmitWireGuard(ctx, r), 409)
+	fleet, e = reporter.FleetStatus(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, n := range fleet.Nodes {
+		if n.WireGuard != nil {
+			for _, v := range n.WireGuard.Views {
+				if v.Peer.PublicKey == wireGuardTestKey(2) {
+					t.Fatal("stale unnamed key was retagged", v)
+				}
+			}
+		}
+	}
+	wrong := r.Clone()
+	wrong.Peers[0].Peer.NodeID = "invented-controller"
+	wrong.Peers[0].Peer.Epoch = wgstats.ID()
+	wrong.Peers[0].Peer.VPNIP = "10.7.0.1"
+	wrong.Unmapped = 1
+	expectMonitorCode(t, reporter.SubmitWireGuard(ctx, wrong), 409)
+}

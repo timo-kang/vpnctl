@@ -341,12 +341,13 @@ func TestWireGuardReporterRejectsWrongLocalKeyAndCapturesBinding(t *testing.T) {
 	defer server.Close()
 	h.client = api.NewClient(server.URL)
 	peer.LocalPublicKey = key
+	peer.VPNIP = "198.18.0.2" // Routed uplink destination is not the WG peer registry IP.
 	h.reportWireGuard([]peersource.Peer{peer}, "wg0")
 	if h.Status().WireGuardDelivery.Pending != 1 {
 		t.Fatal(h.Status())
 	}
 	// Mutation of source data and a catalog refresh cannot retag pending work.
-	peer.WireGuard.RX = ptr(wgstats.Counter(999))
+	*peer.WireGuard.RX = 999
 	h.self.Epoch = strings.Repeat("c", 32)
 	delete(h.peers, remote)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -356,7 +357,7 @@ func TestWireGuardReporterRejectsWrongLocalKeyAndCapturesBinding(t *testing.T) {
 	cancel()
 	<-done
 	received := <-reports
-	if received.Reporter.Epoch != strings.Repeat("a", 32) || len(received.Peers) != 1 || received.Peers[0].Peer.PublicKey != remote || *received.Peers[0].Sample.RX != 5 {
+	if received.Reporter.Epoch != strings.Repeat("a", 32) || len(received.Peers) != 1 || received.Peers[0].Peer.PublicKey != remote || received.Peers[0].Peer.VPNIP != "10.7.0.2" || *received.Peers[0].Sample.RX != 5 {
 		t.Fatal(received)
 	}
 }

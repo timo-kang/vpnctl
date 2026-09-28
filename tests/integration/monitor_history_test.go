@@ -76,8 +76,23 @@ func exerciseMonitorHistory(t *testing.T, bin string, namespaces, paths []string
 		return r, body
 	}
 	wgInitial, wgBody := readWG()
-	if len(wgInitial.Snapshots) != 1 || len(wgInitial.Snapshots[0].Views) != 1 || wgInitial.Snapshots[0].Views[0].Peer.NodeID != "node-1" || wgInitial.Snapshots[0].Views[0].RX == nil {
-		t.Fatal("missing actual WG report", wgInitial)
+	if len(wgInitial.Snapshots) != 1 || len(wgInitial.Snapshots[0].Views) != 2 || wgInitial.Snapshots[0].Unmapped != 1 {
+		t.Fatal("missing controller or registered WG peer", wgInitial)
+	}
+	registered, native := false, false
+	for _, v := range wgInitial.Snapshots[0].Views {
+		if v.RX == nil {
+			t.Fatal("missing real kernel counter", v)
+		}
+		if v.Peer.NodeID == "node-1" && v.Peer.PublicKey == b.Node.WGPublicKey {
+			registered = true
+		}
+		if v.Peer.NodeID == "" && v.Peer.Epoch == "" && v.Peer.PublicKey == a.Node.ServerPublicKey && v.Peer.VPNIP == "" && v.HandshakeState == "observed" && *v.RX > 0 && v.TX != nil && *v.TX > 0 {
+			native = true
+		}
+	}
+	if !registered || !native {
+		t.Fatal("native controller peer identity was dropped or fabricated", wgInitial)
 	}
 	mustWrite(t, filepath.Join(results, "wireguard-history-initial.json"), wgBody)
 	netOutput(t, namespaces[2], "nft", "add", "table", "inet", "monitor_reject")

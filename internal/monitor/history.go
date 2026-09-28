@@ -259,10 +259,20 @@ func (h *HistoryReporter) reportWireGuard(peers []peersource.Peer, iface string,
 			h.lastDrop = "wireguard_reporter_binding_mismatch"
 			return
 		}
+
+		// WG counters belong to a public key. AllowedIPs select destinations
+		// (possibly an uplink server behind this peer), not its registry VPN IP.
 		b, ok := h.peers[p.PublicKey]
-		if !ok || b.VPNIP != p.VPNIP || !p.WireGuard.ObservedAt.Equal(r.ObservedAt) {
+		if !p.WireGuard.ObservedAt.Equal(r.ObservedAt) {
+			h.dropped++
+			h.lastDrop = "wireguard_collection_mismatch"
+			return
+		}
+		if !ok {
+			// The controller WG peer need not be a registered robot. Retain
+			// its real key, without assigning a registry identity/address.
+			b = api.MonitorPeer{PublicKey: p.PublicKey}
 			r.Unmapped++
-			continue
 		}
 		r.Peers = append(r.Peers, wgstats.Reading{Peer: b, Sample: p.WireGuard.Clone()})
 	}

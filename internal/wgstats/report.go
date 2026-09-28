@@ -40,6 +40,30 @@ func (b Binding) Validate() error {
 	return nil
 }
 
+// ValidatePeer allows a native WG identity without inventing a registry node.
+// Such observations still belong to an authenticated, registered reporter.
+func (b Binding) ValidatePeer() error {
+	if b.NodeID != "" {
+		return b.Validate()
+	}
+	key, e := base64.StdEncoding.DecodeString(b.PublicKey)
+	if e != nil || len(key) != 32 || b.Epoch != "" {
+		return fmt.Errorf("invalid native WireGuard identity")
+	}
+	// AllowedIPs can name a routed application server, not this WG peer's
+	// address. An unregistered peer has no authoritative registry VPN address.
+	if b.VPNIP != "" {
+		return fmt.Errorf("unregistered peer cannot claim a registry address")
+	}
+	return nil
+}
+func (b Binding) Label() string {
+	if b.NodeID != "" {
+		return b.NodeID
+	}
+	return "unregistered:" + b.PublicKey
+}
+
 type Reading struct {
 	Peer   Binding `json:"peer"`
 	Sample Sample  `json:"sample"`
@@ -70,13 +94,20 @@ func (r Report) Validate(now time.Time) error {
 	seen := map[string]bool{}
 	keys := map[string]bool{}
 	ips := map[string]bool{}
+	unmapped := 0
 	for _, p := range r.Peers {
-		if (r.CollectionReason != "" && p.Sample.Reason != r.CollectionReason) || p.Peer.Validate() != nil || p.Peer.NodeID == r.Reporter.NodeID || seen[p.Peer.NodeID] || keys[p.Peer.PublicKey] || ips[p.Peer.VPNIP] || !p.Sample.ObservedAt.Equal(r.ObservedAt) || p.Sample.Validate() != nil {
+		if (r.CollectionReason != "" && p.Sample.Reason != r.CollectionReason) || p.Peer.ValidatePeer() != nil || p.Peer.NodeID == r.Reporter.NodeID || (p.Peer.NodeID != "" && seen[p.Peer.NodeID]) || keys[p.Peer.PublicKey] || (p.Peer.VPNIP != "" && ips[p.Peer.VPNIP]) || !p.Sample.ObservedAt.Equal(r.ObservedAt) || p.Sample.Validate() != nil {
 			return fmt.Errorf("invalid WireGuard reading")
+		}
+		if p.Peer.NodeID == "" {
+			unmapped++
 		}
 		seen[p.Peer.NodeID] = true
 		keys[p.Peer.PublicKey] = true
 		ips[p.Peer.VPNIP] = true
+	}
+	if unmapped != r.Unmapped {
+		return fmt.Errorf("invalid unmapped peer count")
 	}
 	return nil
 }

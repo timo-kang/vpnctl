@@ -28,6 +28,14 @@ Findings fixed during implementation:
    within the unchanged one-second total budget; a blocked reader still fails.
    This changes the assertion, not the production direct protocol.
 
+7. Scenario review found that a controller WG peer can be absent from the robot
+   registry, and its AllowedIPs can name the routed uplink server rather than
+   its own VPN address. Native peers now retain their full WG key without an
+   invented node ID/address. Registered WG counters bind by public key and
+   captured registry epoch/IP, independently of probe destination binding.
+   Real uplink-only integration asserts both the native controller key and the
+   registered robot key are retained.
+
 Verification results and CI links are recorded in the PR and issue #88. The
 operating contract is [wireguard-observations.md](../validation/wireguard-observations.md).
 Do not turn namespace/model success into a 24-hour soak, hardware reboot or
@@ -53,3 +61,11 @@ Local evidence before final CI:
   previous main binary (`c1f0443`) rejected it with `unsupported history database`.
 - Final CI is tracked by [PR #90](https://github.com/timo-kang/vpnctl/pull/90).
   Only its final checked head is eligible for merge.
+
+The final scenario correction was rerun in the real three-node uplink-only suite
+(57.69s). The native controller WG key retained RX=251,068 / TX=120,900 bytes and
+an observed handshake with empty registry node/address fields; the registered
+robot peer retained its own node ID and 204 / 260 bytes. AllowedIPs in this setup
+include the separate application server (198.18.0.2), demonstrating why that
+route destination must not be attributed as the WG peer's VPN identity. Focused
+race after this change passed (controller 5.075s, history 4.267s, monitor 1.021s).

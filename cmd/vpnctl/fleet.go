@@ -33,7 +33,7 @@ func printFleetStatus(w io.Writer, resp api.FleetStatusResponse, asJSON bool) er
 				fmt.Fprintln(output, "  WireGuard view truncated; use fleet wireguard --node for complete reports")
 			}
 			for _, p := range n.WireGuard.Views {
-				fmt.Fprintf(output, "  WG peer=%s %s\n", p.Peer.NodeID, p.View.Text())
+				fmt.Fprintf(output, "  WG peer=%s %s\n", p.Peer.Label(), p.View.Text())
 			}
 		}
 	}
@@ -303,7 +303,7 @@ func printFleetWireGuard(w io.Writer, r history.WireGuardHistory, asJSON bool) e
 	for _, s := range r.Snapshots {
 		fmt.Fprintf(w, "%s unmapped=%d collection=%s\n", s.ObservedAt.Format(time.RFC3339), s.Unmapped, s.CollectionReason)
 		for _, p := range s.Views {
-			fmt.Fprintf(w, "  peer=%s %s\n", p.Peer.NodeID, p.View.Text())
+			fmt.Fprintf(w, "  peer=%s %s\n", p.Peer.Label(), p.View.Text())
 		}
 	}
 	return nil

@@ -108,7 +108,9 @@ func (s *Server) fleetSnapshot() api.FleetStatusResponse {
 	now := time.Now()
 	wgViews := 0
 	allowed := map[string]wgstats.Binding{}
+	knownKeys := map[string]bool{}
 	for _, n := range nodes {
+		knownKeys[n.PubKey] = true
 		if !n.EnrollmentPending {
 			allowed[n.ID] = monitorPeer(n)
 		}
@@ -135,7 +137,7 @@ func (s *Server) fleetSnapshot() api.FleetStatusResponse {
 			// Retained history remains immutable; live output excludes old peer bindings.
 			value.Views = []wgstats.PeerView{}
 			for _, v := range wg[node.ID].Views {
-				if allowed[v.Peer.NodeID] == v.Peer {
+				if v.Peer.NodeID == "" && !knownKeys[v.Peer.PublicKey] || v.Peer.NodeID != "" && allowed[v.Peer.NodeID] == v.Peer {
 					if wgViews >= 2048 || len(value.Views) >= 256 {
 						value.ViewsTruncated = true
 						continue
