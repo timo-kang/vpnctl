@@ -27,10 +27,6 @@ jobs:
       # Concurrent SQLite race packages on two CPUs can starve live producers
       # past their unchanged 45s convergence budget. Every test still runs.
       - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$'
-      - name: Fleet history 32-node seven-day query and storage budget
-        env:
-          VPNCTL_HISTORY_SCALE: '1'
-        run: go test ./internal/history -run '^TestHistoryScale$' -count=1 -v
       - run: go vet ./...
       - run: go build ./cmd/vpnctl
 
@@ -111,6 +107,14 @@ jobs:
           VPNCTL_HISTORY_TRANSITION_SCALE: '1'
           TMPDIR: ${{ runner.temp }}/vpnctl-history
         run: /usr/bin/time -v go test ./internal/history -run '^TestTieredStorageTransitionScale$' -count=1 -timeout 30m -v
+      # The legacy 3.87M-probe / 322K-uplink fixture also compresses seven days
+      # into minutes. Keep its 8s query / 60s cleanup budgets on the same bounded
+      # filesystem. Ordinary race/crash tests above still use the runner disk.
+      - name: Legacy 32-node seven-day query, WAL pressure and retention budget
+        env:
+          VPNCTL_HISTORY_SCALE: '1'
+          TMPDIR: ${{ runner.temp }}/vpnctl-history
+        run: /usr/bin/time -v go test ./internal/history -run '^TestHistoryScale$' -count=1 -timeout 5m -v
       - name: Release capacity test filesystem
         if: always()
         run: |
