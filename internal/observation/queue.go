@@ -31,6 +31,7 @@ type Sender func(context.Context, history.Observation) (retry bool, err error)
 
 type delivery struct {
 	e        history.Observation
+	send     Sender
 	attempts int
 	ready    time.Time
 }
@@ -38,6 +39,7 @@ type delivery struct {
 type Queue struct {
 	dropped      atomic.Uint64
 	quotaDropped atomic.Uint64
+	delivered    atomic.Uint64
 	mu           sync.Mutex
 	pending      []delivery
 	outstanding  int // includes the single in-flight attempt and delayed retries
@@ -49,15 +51,22 @@ func New() *Queue { return &Queue{wake: make(chan struct{}, 1)} }
 
 // Emit copies a completed operation's outcome; it never waits for delivery.
 func (q *Queue) Emit(e history.Observation) {
+	q.EmitTo(e, nil)
+}
+
+// EmitTo fixes the transport binding at observation time. Retries use the same
+// captured binding and generated ID, even if the producer's discovery changes.
+// send must honor cancellation, like Run's default sender.
+func (q *Queue) EmitTo(e history.Observation, send Sender) {
 	if q == nil {
 		return
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.emitLocked(e)
+	q.emitLocked(e, send)
 }
 
-func (q *Queue) emitLocked(e history.Observation) {
+func (q *Queue) emitLocked(e history.Observation, send Sender) {
 	if q.closed {
 		q.count("stopped_dropped")
 		return
@@ -82,7 +91,7 @@ func (q *Queue) emitLocked(e history.Observation) {
 		e.Timestamp = time.Now().UTC()
 	}
 	e = e.Canonicalize()
-	q.pending = append(q.pending, delivery{e: e})
+	q.pending = append(q.pending, delivery{e: e, send: send})
 	q.outstanding++
 	q.count("queued")
 	select {
@@ -92,6 +101,9 @@ func (q *Queue) emitLocked(e history.Observation) {
 }
 
 func (q *Queue) count(result string) {
+	if result == "delivered" {
+		q.delivered.Add(1)
+	}
 	if strings.HasSuffix(result, "_dropped") {
 		q.dropped.Add(1)
 	}
@@ -183,6 +195,9 @@ func (q *Queue) takeReady(now time.Time) (delivery, time.Duration, bool) {
 }
 
 func (q *Queue) attempt(ctx context.Context, job delivery, send Sender) {
+	if job.send != nil {
+		send = job.send
+	}
 	var retry bool
 	err := ctx.Err()
 	if err == nil {
@@ -211,6 +226,19 @@ func (q *Queue) attempt(ctx context.Context, job delivery, send Sender) {
 		return
 	}
 	q.outstanding--
+}
+
+type Stats struct {
+	Pending      int    `json:"pending"`
+	Delivered    uint64 `json:"delivered"`
+	Dropped      uint64 `json:"dropped"`
+	QuotaDropped uint64 `json:"quota_dropped"`
+}
+
+func (q *Queue) Stats() Stats {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return Stats{q.outstanding, q.delivered.Load(), q.dropped.Load(), q.quotaDropped.Load()}
 }
 
 type contextKey struct{}

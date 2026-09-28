@@ -11,6 +11,7 @@ import (
 
 // QualityResponse version 1 replaces the unversioned, per-probe array.
 type QualityResponse struct {
+	History         HistoryStatus `json:"history"`
 	SchemaVersion   int           `json:"schema_version"`
 	ObservedAt      *time.Time    `json:"observed_at"`
 	Window          float64       `json:"window"`
@@ -26,6 +27,7 @@ type QualityResponse struct {
 func (m *Monitor) QualityResponse() QualityResponse {
 	snap := m.Latest()
 	response := QualityResponse{
+		History:         snap.History,
 		SchemaVersion:   1,
 		Window:          m.cfg.Quality.Window.Seconds(),
 		StaleAfter:      m.cfg.Quality.StaleAfter.Seconds(),

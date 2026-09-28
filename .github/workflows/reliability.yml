@@ -23,10 +23,10 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      # The churn suite has its own runner so the accumulated SQLite race
-      # instrumentation cost does not exhaust one package's 10-minute limit.
-      # Together these complementary filters still execute every test.
-      - run: go test -race ./... -skip '^TestPathChurn'
+      # Churn and the real full-mesh producers run on dedicated jobs below.
+      # Concurrent SQLite race packages on two CPUs can starve live producers
+      # past their unchanged 45s convergence budget. Every test still runs.
+      - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$'
       - name: Fleet history 32-node seven-day query and storage budget
         env:
           VPNCTL_HISTORY_SCALE: '1'
@@ -86,6 +86,8 @@ jobs:
         env:
           VPNCTL_HISTORY_CHURN_SCALE: '1'
         run: go test ./internal/history -run '^TestPathChurnVariableMesh$' -count=1 -timeout 5m -v
+      - name: Actual direct and monitor producers over mTLS (race, 1/3/8/32 nodes)
+        run: go test -race ./internal/controller -run '^TestMonitorAndDirectRealProducersVariableScale$' -count=1 -timeout 5m -v
 
   history-transition:
     name: Production raw to tiered history transition

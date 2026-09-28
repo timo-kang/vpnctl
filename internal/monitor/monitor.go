@@ -23,6 +23,7 @@ import (
 
 // Config holds configuration for a Monitor instance.
 type Config struct {
+	History   *HistoryReporter
 	Source    peersource.PeerSource
 	Store     *Store
 	Interval  time.Duration // default 5s if zero
@@ -33,6 +34,7 @@ type Config struct {
 
 // Snapshot is the result of a single probe cycle.
 type Snapshot struct {
+	History      HistoryStatus
 	Time         time.Time
 	Peers        []PeerState
 	Stale        bool
@@ -101,6 +103,11 @@ func (m *Monitor) Subscribe() <-chan Snapshot {
 // Run blocks until ctx is cancelled. It calls probeAll immediately and then
 // again on each tick of cfg.Interval.
 func (m *Monitor) Run(ctx context.Context) {
+	if m.cfg.History != nil {
+		done := make(chan struct{})
+		go func() { defer close(done); m.cfg.History.Run(ctx) }()
+		defer func() { <-done }()
+	}
 	maintenanceDone := make(chan struct{})
 	if m.cfg.Store != nil {
 		go func() {
@@ -157,6 +164,7 @@ func (m *Monitor) probeAll(ctx context.Context) {
 		return
 	}
 	if err != nil {
+		m.reportDiscoveryFailure("discovery_failed")
 		m.recordCycle(time.Now().UTC(), nil, nil, "discovery_failed", "")
 		return
 	}
@@ -164,30 +172,43 @@ func (m *Monitor) probeAll(ctx context.Context) {
 	seen := make(map[string]bool)
 	for _, p := range peers {
 		if seen[p.VPNIP] {
+			m.reportDiscoveryFailure("discovery_conflict")
 			m.recordCycle(time.Now().UTC(), nil, nil, "discovery_conflict", "")
 			return
 		}
 		seen[p.VPNIP] = true
 	}
 	outcomes := make([]probeOutcome, len(peers))
+	senders := make([]func(time.Time, probeOutcome), len(peers))
 	var wg sync.WaitGroup
 	for i, peer := range peers {
+		senders[i] = m.cfg.History.bind(peer)
 		wg.Add(1)
-		go func(i int, peer peersource.Peer) { defer wg.Done(); outcomes[i] = probePeer(ctx, peer) }(i, peer)
+		go func(i int, peer peersource.Peer) {
+			defer wg.Done()
+			outcomes[i] = probePeer(ctx, peer)
+			outcomes[i].at = time.Now().UTC()
+		}(i, peer)
 	}
 	wg.Wait()
 	if ctx.Err() != nil {
 		return
 	} // Shutdown is not a network failure sample.
 	now := time.Now().UTC()
+	// Queue every result before any local SQLite write can block or fail.
+	for i, send := range senders {
+		if send != nil {
+			send(outcomes[i].at, outcomes[i])
+		}
+	}
 	storageError := ""
 	for i, p := range peers {
 		result := outcomes[i]
-		if result.reason == "invalid_probe_target" {
+		if result.unknown || result.reason == "invalid_probe_target" {
 			continue
 		} // No network attempt was made.
 		if m.cfg.Store != nil {
-			if err := m.cfg.Store.InsertContext(ctx, ProbeResult{Timestamp: now, PeerKey: p.PublicKey, PeerIP: p.VPNIP, RTTus: result.rtt, Success: result.success}); err != nil {
+			if err := m.cfg.Store.InsertContext(ctx, ProbeResult{Timestamp: result.at, PeerKey: p.PublicKey, PeerIP: p.VPNIP, RTTus: result.rtt, Success: result.success}); err != nil {
 				if storageError == "" {
 					slog.Warn("monitor history write failed", "error", err)
 				}
@@ -269,6 +290,8 @@ func (m *Monitor) publishLocked(snap Snapshot) {
 }
 
 type probeOutcome struct {
+	at      time.Time
+	unknown bool
 	rtt     int64
 	success bool
 	reason  string
@@ -283,10 +306,7 @@ func probePeer(ctx context.Context, peer peersource.Peer) probeOutcome {
 	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	failure := func(err error) probeOutcome {
-		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
-			return probeOutcome{reason: "probe_timeout"}
-		}
-		return probeOutcome{reason: probeError(err)}
+		return probeFailure(probeCtx, err)
 	}
 	conn, err := (&net.Dialer{}).DialContext(probeCtx, "udp", net.JoinHostPort(peer.VPNIP, strconv.Itoa(peer.ProbePort)))
 	if err != nil {
@@ -315,6 +335,18 @@ func probePeer(ctx context.Context, peer peersource.Peer) probeOutcome {
 	return probeOutcome{rtt: time.Since(start).Microseconds(), success: true}
 }
 
+func probeFailure(ctx context.Context, err error) probeOutcome {
+	for _, local := range []error{syscall.EACCES, syscall.EPERM, syscall.EMFILE, syscall.ENFILE, syscall.EADDRNOTAVAIL, syscall.ENODEV, syscall.ENOBUFS, syscall.ENOMEM, syscall.EAFNOSUPPORT} {
+		if errors.Is(err, local) {
+			return probeOutcome{unknown: true, reason: "collector_unavailable"}
+		}
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return probeOutcome{reason: "probe_timeout"}
+	}
+	return probeOutcome{reason: probeError(err)}
+}
+
 func probeError(err error) string {
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		return "responder_unavailable"
@@ -330,7 +362,11 @@ func probeError(err error) string {
 }
 
 // Latest applies freshness at read time, even if discovery or storage is stuck.
-func (m *Monitor) Latest() Snapshot { return m.latestAt(time.Time{}) }
+func (m *Monitor) Latest() Snapshot {
+	s := m.latestAt(time.Time{})
+	s.History = m.cfg.History.Status()
+	return s
+}
 func (m *Monitor) latestAt(now time.Time) Snapshot {
 	m.mu.RLock()
 	snap := cloneSnapshot(m.latest)

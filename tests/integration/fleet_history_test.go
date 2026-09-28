@@ -103,6 +103,9 @@ func exerciseFleetHistory(t *testing.T, bin string, namespaces, configs []string
 		sum := 0.0
 		for _, n := range resp.Nodes {
 			for _, b := range n.Buckets {
+				if b.Source != "cli-ping" {
+					continue
+				}
 				count += b.Count
 				if b.AvgRTTMs != nil {
 					sum += *b.AvgRTTMs * float64(b.Successes)

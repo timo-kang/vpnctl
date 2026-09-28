@@ -13,6 +13,11 @@ var ProbeHistoryDeliveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "Best-effort raw probe history delivery by fixed result; resets at restart",
 }, []string{"result"})
 
+var MonitorHistoryMappingDroppedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "vpnctl_monitor_history_mapping_dropped_total",
+	Help: "Overlay observations not queued because their controller identity binding is unavailable; resets at restart",
+}, []string{"reason"})
+
 var ProbeHistoryQuotaRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "vpnctl_probe_history_quota_rejected_total",
 	Help: "Probe history batches rejected by logical stream, row, density, space or reclamation quota; resets at restart",

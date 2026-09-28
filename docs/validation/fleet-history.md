@@ -4,7 +4,8 @@
 `data_dir/history.db`에 실제 개별 probe를 저장한다. `ping --config node.yaml`은
 기본 `--submit=true`이고, `node serve`의 자동 direct 후보 탐색도 기존 probe 결과를
 중앙에 전송한다. direct 후보의 public UDP 응답은 설치된 VPN 경로의 품질 증거가 아니다.
-독립 `monitor`의 로컬 DB는 아직 자동 업로드하지 않는다(#70 후속).
+`monitor --history-config node.yaml`은 실제 개별 관측을 별도 인증·binding endpoint로
+전송한다. [monitor 계약](monitor-history.md)을 참고한다. 과거 로컬 DB를 업로드하지 않는다.
 
 ```sh
 vpnctl ping --config node.yaml --peer robot-b --path relay --count 12 --interval 5s
@@ -54,8 +55,8 @@ underlay 사이의 실제 경로 선택·전환 검증은 M3의 범위다.
   허용한다. 순서가 뒤바뀐 정상 표본은 수용하며 최신 시각 기준으로 품질을 재계산한다.
   생산자와 controller 시계가 동기화되어야 한다. 미래 표본은 400으로 거절한다.
 - `source`는 `legacy-probe|cli-ping|agent-direct|monitor-overlay`다. 생략한 구형 요청은
-  `legacy-probe`로 저장한다. `monitor-overlay`는 후속 생산자를 위한 허용값이며 현재 자동
-  생산자가 아니다. source 역시 인증된 노드의 보고값으로 별도 원격 검증을 뜻하지 않는다.
+  `legacy-probe`로 저장한다. `monitor-overlay`는 명시적으로 활성화한 monitor의 자동
+  생산자다. source 역시 인증된 노드의 보고값으로 별도 원격 검증을 뜻하지 않는다.
 - 완료된 probe는 `success: true|false`, `validity: observed`다(구형 요청은 validity 생략 가능).
   성공은 유한한 RTT `[0,60000]` ms가 필수이고 실패는 RTT가 `null`이어야 한다.
   미실행/수집 불가는 `success: null`, `rtt_ms: null`, `validity: unknown`과 비어 있지 않은

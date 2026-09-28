@@ -109,6 +109,9 @@ func (m TUIModel) View() string {
 	if m.snap.ErrorReason != "" || m.snap.StorageError != "" {
 		sb.WriteString(fmt.Sprintf("collection=%s stale=%t storage=%s\n", m.snap.ErrorReason, m.snap.Stale, m.snap.StorageError))
 	}
+	if h := m.snap.History; h.Enabled {
+		sb.WriteString(fmt.Sprintf("history mapping=%t delivered=%d pending=%d dropped=%d quota=%d unmapped=%d reason=%s last-drop=%s\n", h.MappingReady, h.Delivery.Delivered, h.Delivery.Pending, h.Delivery.Dropped, h.Delivery.QuotaDropped, h.MappingDropped, h.ErrorReason, h.LastMappingDrop))
+	}
 
 	// Column headers
 	colHeader := fmt.Sprintf("  %-14s %-16s %6s  %5s  %-8s  %s", "PEER", "VPN IP", "RTT", "LOSS", "QUALITY", "HANDSHAKE")
