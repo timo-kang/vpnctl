@@ -144,3 +144,7 @@ job에서 계속 실행한다. 위 로컬 명령은 기본 임시 디렉터리�
 commit 직전/직후 실제 프로세스 종료, 원본+부분 집계 혼합, 정각/unknown/빈 구간, 시계 역행,
 live snapshot, v1~v5 업그레이드, preflight 거절, 백업 손상, pinned WAL과 취소도 회귀 시험에 포함한다.
 이 결과를 실물 무선망의 다중 relay/underlay 전환(M3) 완료나 monitor 자동 수집(#70) 완료로 해석하지 않는다.
+
+## 후속 jitter 저장 형식
+
+개별 probe jitter를 압축 후에도 보존하려면 [jitter 활성화와 복구](probe-jitter.md)의 `enable-jitter` 명령으로 v6→v8 또는 v7→v9를 명시적으로 전환한다. v6/v7의 기존 압축 형식은 변경되지 않는다.

@@ -77,6 +77,9 @@ func TestWindowedQualitySharedByHTTPMetricsAndTerminal(t *testing.T) {
 		t.Fatal(response)
 	}
 	q := response.Peers[0]
+	if q.JitterMs == nil || *q.JitterMs != 0 || q.JitterPairs == nil || *q.JitterPairs != 7 {
+		t.Fatal("HTTP jitter", q)
+	}
 	if q.P50RTTMs == nil || q.P95RTTMs == nil || q.P99RTTMs == nil || *q.P50RTTMs != 12.5 || *q.P95RTTMs != 12.5 || *q.P99RTTMs != 12.5 {
 		t.Fatal("HTTP success percentiles", q)
 	}
@@ -84,6 +87,9 @@ func TestWindowedQualitySharedByHTTPMetricsAndTerminal(t *testing.T) {
 		t.Fatalf("wrong window: %+v", q)
 	}
 	metrics := metricValues(t, m)
+	if metrics["vpnctl_quality_jitter_seconds"] != 0 || metrics["vpnctl_quality_jitter_pair_count"] != 7 || metrics["vpnctl_quality_jitter_order_available"] != 1 {
+		t.Fatal("jitter metrics", metrics)
+	}
 	for _, name := range []string{"vpnctl_quality_rtt_p50_seconds", "vpnctl_quality_rtt_p95_seconds", "vpnctl_quality_rtt_p99_seconds"} {
 		if metrics[name] != .0125 {
 			t.Fatal("metric percentile units", name, metrics[name])
@@ -97,7 +103,7 @@ func TestWindowedQualitySharedByHTTPMetricsAndTerminal(t *testing.T) {
 	tui := NewTUIModel("wg0", m)
 	tui.snap = m.Latest()
 	for _, output := range []string{watch.String(), tui.View()} {
-		for _, want := range []string{"20.0%", "12.50ms", "poor", "probe_timeout", "p50/p95/p99(ms)=12.50/12.50/12.50"} {
+		for _, want := range []string{"20.0%", "12.50ms", "poor", "probe_timeout", "p50/p95/p99(ms)=12.50/12.50/12.50", "jitter(ms)=0.00 pairs=7 known=10 complete"} {
 			if !strings.Contains(output, want) {
 				t.Fatalf("missing %q: %s", want, output)
 			}
@@ -439,5 +445,18 @@ func TestSilentResponderIsTimeoutAndCancellationIsNotLoss(t *testing.T) {
 	}
 	if snap := m.Latest(); !snap.Time.IsZero() || len(snap.Peers) != 0 {
 		t.Fatal("shutdown counted as network loss", snap)
+	}
+}
+
+func TestJitterPrometheusSecondsAndNoPairs(t *testing.T) {
+	m := newTestMonitor(t, Config{})
+	now := time.Now().UTC()
+	observeOne(m, now.Add(-time.Second), true, 12500)
+	if got := metricValues(t, m); !math.IsNaN(got["vpnctl_quality_jitter_seconds"]) || got["vpnctl_quality_jitter_pair_count"] != 0 {
+		t.Fatal(got)
+	}
+	observeOne(m, now, true, 15500)
+	if got := metricValues(t, m); got["vpnctl_quality_jitter_seconds"] != .003 || got["vpnctl_quality_jitter_pair_count"] != 1 {
+		t.Fatal(got)
 	}
 }

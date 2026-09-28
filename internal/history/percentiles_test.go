@@ -64,6 +64,9 @@ func TestPercentilesAcrossReplayTieringAndRestore(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if err := s.EnableJitter(ctx); err != nil {
+					t.Fatal(err)
+				}
 				if err := s.Maintain(ctx, now.Add(7*time.Hour)); err != nil {
 					t.Fatal(err)
 				}
@@ -115,7 +118,7 @@ func TestLegacyArchivedLivePercentilesRemainUnavailable(t *testing.T) {
 	if err := json.Unmarshal(payload, &old); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"p50_rtt_ms", "p95_rtt_ms", "p99_rtt_ms"} {
+	for _, key := range []string{"p50_rtt_ms", "p95_rtt_ms", "p99_rtt_ms", "jitter_ms", "jitter_pair_count", "jitter_known_samples", "jitter_status"} {
 		delete(old, key)
 	}
 	payload, err = json.Marshal(old)
@@ -135,6 +138,9 @@ func TestLegacyArchivedLivePercentilesRemainUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := reopened.Latest(now.Add(7 * time.Hour))["robot"][0]
+	if q.JitterMs != nil || q.JitterPairs != nil || q.JitterStatus != "unavailable_order" {
+		t.Fatal("legacy jitter invented", q)
+	}
 	if q.SampleCount == 0 || !q.Stale || q.P50RTTMs != nil || q.P95RTTMs != nil || q.P99RTTMs != nil {
 		t.Fatal("legacy live snapshot invented percentiles", q)
 	}

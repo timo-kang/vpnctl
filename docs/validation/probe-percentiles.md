@@ -54,3 +54,5 @@ RTT 분포는 순서를 저장하지 않으므로 연속 표본 차이인 jitter
 연속 성공/실패/unknown, 시간창·경로 변경 경계를 정하고 순서 요약 및 이전 자료의 unavailable
 처리를 포함해야 한다. WG counter는 reset과 관측 시각을 포함해야 한다. #19의 장기 soak와
 M3 다중 relay/underlay 전환 판정도 별도로 유지한다.
+
+후속 개별 probe RTT jitter의 순서·저장 이관·계산 불가 계약은 [probe-jitter.md](probe-jitter.md)에 정리한다.

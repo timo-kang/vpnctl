@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"vpnctl/internal/quality"
 )
 
 // This fixture stages EVERY observation as a raw row in the production schema,
@@ -33,6 +35,9 @@ func TestTieredStorageTransitionScale(t *testing.T) {
 	start := end.Add(-time.Duration(hours) * time.Hour)
 	ctx := context.Background()
 	if err := s.EnableTiering(ctx, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnableJitter(ctx); err != nil {
 		t.Fatal(err)
 	}
 	db, err := connect(s.path, false)
@@ -224,24 +229,42 @@ SELECT ?,lower(hex(randomblob(16))),?+i*?,CASE WHEN i%10 IN (0,1) THEN NULL ELSE
 					t.Fatal("query invented stream", b.Stream)
 				}
 				hour := int(b.Time.Sub(start) / time.Hour)
-				want := Bucket{Stream: b.Stream, Time: b.Time}
+				want := Bucket{Stream: b.Stream, Time: b.Time, JitterStats: quality.JitterStats{JitterStatus: "complete", JitterPairs: pointer(int64(0))}}
+				var previous, jitterSum int64
+				var previousOK bool
 				var rtts []int64
 				var sum int64
 				if key[3] == hour%4 {
 					seed := int64(key[0]*1000003 + key[1]*10007 + key[2]*1009 + hour*97)
 					for i := 1; i <= samples; i++ {
+						want.JitterKnownSamples++
 						if i%10 == 0 {
 							want.UnknownCount++
+							previousOK = false
 							continue
 						}
 						want.Count++
 						if i%10 != 1 {
 							rtt := (seed + int64(i)*104729) % 60000001
+							if previousOK {
+								d := rtt - previous
+								if d < 0 {
+									d = -d
+								}
+								jitterSum += d
+								*want.JitterPairs++
+							}
+							previous, previousOK = rtt, true
 							rtts = append(rtts, rtt)
 							sum += rtt
 							want.Successes++
+						} else {
+							previousOK = false
 						}
 					}
+				}
+				if *want.JitterPairs > 0 {
+					want.JitterMs = pointer(float64(jitterSum) / float64(*want.JitterPairs) / 1000)
 				}
 				// Independent raw-sample oracle: no aggregate Add/Merge/Bucket.
 				if want.Count > 0 {

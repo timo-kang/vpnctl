@@ -47,20 +47,21 @@ PRAGMA user_version=1;
 // Status reads use only published snapshots, never SQLite locks.
 // Writers and expensive history queries are separately bounded and cancellable.
 type Store struct {
-	path         string
-	writer       chan struct{}
-	query        chan struct{}
-	mu           sync.RWMutex
-	latest       map[int64]Measurement
-	uplinks      map[string]uplink.Snapshot
-	uplinkRecent map[string][]uplink.Snapshot
-	lastCleanup  time.Time   // writer-owned
-	tiered       atomic.Bool // enabled only by the offline migration or Open
-	tierSeal     atomic.Int64
-	reclamation  atomic.Bool
-	uploadMu     sync.Mutex
-	uploadDB     *sql.DB
-	uploadUsers  int
+	path          string
+	writer        chan struct{}
+	query         chan struct{}
+	mu            sync.RWMutex
+	latest        map[int64]Measurement
+	uplinks       map[string]uplink.Snapshot
+	uplinkRecent  map[string][]uplink.Snapshot
+	lastCleanup   time.Time   // writer-owned
+	tiered        atomic.Bool // enabled only by the offline migration or Open
+	tierSeal      atomic.Int64
+	reclamation   atomic.Bool
+	jitterEnabled atomic.Bool
+	uploadMu      sync.Mutex
+	uploadDB      *sql.DB
+	uploadUsers   int
 }
 
 // Pin before waiting for the writer slot. A burst of single-observation uploads
@@ -185,7 +186,7 @@ func Open(path string, now time.Time) (*Store, error) {
 		if e = tx.Commit(); e != nil {
 			return nil, e
 		}
-	} else if (version < 1 || version > 7) || app != applicationID {
+	} else if (version < 1 || version > 9) || app != applicationID {
 		return nil, fmt.Errorf("unsupported history schema: version=%d application=%d", version, app)
 	}
 	if version < 2 {
@@ -235,7 +236,8 @@ func Open(path string, now time.Time) (*Store, error) {
 	}
 	s := &Store{path: path, writer: make(chan struct{}, 1), query: make(chan struct{}, 1), latest: make(map[int64]Measurement), uplinks: make(map[string]uplink.Snapshot), uplinkRecent: make(map[string][]uplink.Snapshot)}
 	s.tiered.Store(version >= 6)
-	s.reclamation.Store(version == 7)
+	s.reclamation.Store(version == 7 || version == 9)
+	s.jitterEnabled.Store(version >= 8)
 	// A fresh process replays retained observations; never restores a stale 'good'
 	// flag. Empty/old history remains explicitly unknown at read time.
 	if !s.Tiered() {

@@ -80,6 +80,7 @@ type Measurement struct {
 }
 
 type Bucket struct {
+	quality.JitterStats
 	Stream
 	Time            time.Time `json:"time"` // lower, exclusive edge; upper edge is time + width
 	Count           int       `json:"sample_count"`

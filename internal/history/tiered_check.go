@@ -11,6 +11,10 @@ import (
 // checkTiered validates the committed format, including partially completed
 // compaction. Neither opening nor restoring assumes a maintenance run finished.
 func checkTiered(ctx context.Context, db reader) error {
+	var version int
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
 	var seal, expired, rowCount, byteCount, compacted, last int64
 	if err := db.QueryRowContext(ctx, `SELECT sealed_until,expired_until,rollup_rows,rollup_bytes,compacted_samples,last_compaction FROM tier_metadata WHERE id=1`).Scan(&seal, &expired, &rowCount, &byteCount, &compacted, &last); err != nil {
 		return err
@@ -26,19 +30,28 @@ func checkTiered(ctx context.Context, db reader) error {
 	if invalid != 0 {
 		return fmt.Errorf("invalid aggregate reference or interval")
 	}
-	rows, err := db.QueryContext(ctx, "SELECT payload FROM rollups LIMIT ?", MaxRollupRows+1)
+	rows, err := db.QueryContext(ctx, "SELECT end_ts,payload FROM rollups LIMIT ?", MaxRollupRows+1)
 	if err != nil {
 		return err
 	}
 	var n, size, population int64
 	for rows.Next() {
 		var payload []byte
-		if err = rows.Scan(&payload); err != nil {
+		var end int64
+		if err = rows.Scan(&end, &payload); err != nil {
 			break
 		}
 		var a *ProbeAggregate
 		a, err = DecodeProbeAggregate(payload)
 		if err != nil {
+			break
+		}
+		if a.orderedEncoding && version < 8 {
+			err = fmt.Errorf("ordered aggregate requires schema 8 or 9")
+			break
+		}
+		if a.jitter.Samples > 0 && (a.jitter.First.At <= end-hour || a.jitter.Last.At > end) {
+			err = fmt.Errorf("jitter boundary outside aggregate interval")
 			break
 		}
 		if a.attempts+a.unknown == 0 {

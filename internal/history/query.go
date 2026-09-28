@@ -83,10 +83,11 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 		buckets := make([]Bucket, n)
 		rtts := make([][]int64, n)
 		sums := make([]int64, n)
+		jitters := make([]quality.JitterSummary, n)
 		for i := range buckets {
 			buckets[i] = Bucket{Stream: st.Stream, Time: start.Add(time.Duration(i) * width).UTC()}
 		}
-		rows, e := tx.QueryContext(ctx, "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=?", st.id, start.UnixMicro(), end.UnixMicro())
+		rows, e := tx.QueryContext(ctx, "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=? ORDER BY ts,id", st.id, start.UnixMicro(), end.UnixMicro())
 		if e != nil {
 			return nil, e
 		}
@@ -105,6 +106,7 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 			}
 			i := int((ts - start.UnixMicro() - 1) / width.Microseconds())
 			b := &buckets[i]
+			jitters[i].Add(ts, rtt.Int64, rtt.Valid && !unknown)
 			if unknown {
 				b.UnknownCount++
 				continue
@@ -126,6 +128,7 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 				return nil, err
 			}
 			b := &buckets[i]
+			b.JitterStats = jitters[i].Stats()
 			if b.Count > 0 {
 				b.AvailabilityPct = pointer(100 * float64(b.Successes) / float64(b.Count))
 				b.LossPct = pointer(100 - *b.AvailabilityPct)

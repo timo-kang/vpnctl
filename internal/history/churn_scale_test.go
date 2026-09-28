@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"vpnctl/internal/quality"
 )
 
 // Actual Ingest/Maintain/QueryPage calls, without raw or aggregate SQL staging.
@@ -32,6 +34,9 @@ func TestPathChurnVariableMesh(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := s.EnableReclamation(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.EnableJitter(ctx); err != nil {
 				t.Fatal(err)
 			}
 			original := map[Stream]Observation{}
@@ -105,8 +110,9 @@ func TestPathChurnVariableMesh(t *testing.T) {
 						if !exists {
 							t.Fatal("invented path", b.Stream)
 						}
-						want := Bucket{Stream: b.Stream, Time: b.Time}
+						want := Bucket{Stream: b.Stream, Time: b.Time, JitterStats: quality.JitterStats{JitterStatus: "complete", JitterPairs: pointer(int64(0))}}
 						if o.Timestamp.After(b.Time) && !o.Timestamp.After(b.Time.Add(time.Hour)) {
+							want.JitterKnownSamples = 1
 							if o.Success == nil {
 								want.UnknownCount = 1
 							} else {

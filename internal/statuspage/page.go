@@ -35,6 +35,7 @@ type NodeStatus struct {
 	LastSeen                                  string
 	Online                                    bool
 	Quality                                   string // good, degraded, poor, offline
+	Jitter                                    string
 	RTTMs                                     string
 	P50RTTMs, P95RTTMs, P99RTTMs              string
 	LossPct                                   string

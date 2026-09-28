@@ -130,7 +130,7 @@ func Check(ctx context.Context, path string) error {
 	if err = db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app); err != nil {
 		return err
 	}
-	if (version < 1 || version > 7) || app != applicationID {
+	if (version < 1 || version > 9) || app != applicationID {
 		return fmt.Errorf("unsupported history backup schema %d", version)
 	}
 	if err = db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil {
@@ -155,7 +155,7 @@ func Check(ctx context.Context, path string) error {
 		if err = checkTiered(ctx, db); err != nil {
 			return err
 		}
-		if version == 7 {
+		if version == 7 || version == 9 {
 			if err = checkReclamation(ctx, db); err != nil {
 				return err
 			}
