@@ -13,8 +13,9 @@ func ReplayQuality(samples []Sample) PeerQuality {
 	w := NewWindow()
 	q := PeerQuality{Quality: "unknown", Level: QualityUnknown, Window: cfg.Window.Seconds(), Stale: true, ErrorReason: "no_samples"}
 	for _, s := range samples {
-		q = w.Observe(s.Timestamp, Outcome{RTTus: s.RTTus, Success: s.Success, Unknown: s.Unknown, Reason: s.Reason}, cfg)
+		q = w.observe(s.Timestamp, Outcome{RTTus: s.RTTus, Success: s.Success, Unknown: s.Unknown, Reason: s.Reason}, cfg)
 	}
+	w.percentiles(&q)
 	return q
 }
 

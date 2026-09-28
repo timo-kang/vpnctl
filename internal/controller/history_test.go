@@ -62,6 +62,9 @@ func TestFleetMeasurementAPIPageAndHistory(t *testing.T) {
 		t.Fatal(resp)
 	}
 	m := resp.Nodes[0]
+	if m.P50RTTMs == nil || m.P95RTTMs == nil || m.P99RTTMs == nil || *m.P50RTTMs != 10 || *m.P95RTTMs != 20 || *m.P99RTTMs != 20 {
+		t.Fatal("fleet status percentiles", m)
+	}
 	if m.Quality != "good" || *m.RTTMs != 10 || *m.LossPct != 0 || m.Path != "relay" || m.Uplink != "wlan0" || m.SampleCount != 3 {
 		t.Fatal(m)
 	}
@@ -71,7 +74,7 @@ func TestFleetMeasurementAPIPageAndHistory(t *testing.T) {
 	}
 	html := httptest.NewRecorder()
 	statuspage.Handler(s.statusPageData)(html, httptest.NewRequest("GET", "/status", nil))
-	for _, text := range []string{"10.00", "0.00", "wlan0", "unknown", "Reported peer"} {
+	for _, text := range []string{"10.00", "0.00", "wlan0", "unknown", "Reported peer", "p50 / p95 / p99 (ms)", "10.00 / 20.00 / 20.00", "- / - / -"} {
 		if !strings.Contains(html.Body.String(), text) {
 			t.Fatal("page missing", text)
 		}
@@ -89,6 +92,9 @@ func TestFleetMeasurementAPIPageAndHistory(t *testing.T) {
 		t.Fatal(hist)
 	}
 	b := hist.Nodes[0].Buckets[95]
+	if b.P50RTTMs == nil || b.P99RTTMs == nil || *b.P50RTTMs != 10 || *b.P99RTTMs != 20 {
+		t.Fatal("fleet history percentiles", b)
+	}
 	if b.Count != 3 || *b.AvgRTTMs != 10 || *b.P95RTTMs != 20 || *b.AvailabilityPct != 100 {
 		t.Fatal(b)
 	}

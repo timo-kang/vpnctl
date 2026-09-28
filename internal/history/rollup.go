@@ -10,6 +10,8 @@ import (
 	"math"
 	"sort"
 	"time"
+
+	"vpnctl/internal/quality"
 )
 
 // These are budgets for the tiered-retention candidate, not enabled retention
@@ -102,7 +104,7 @@ func (a *ProbeAggregate) Merge(b *ProbeAggregate) error {
 	return nil
 }
 
-// Bucket produces the raw API's exact average and nearest-rank p95. Its caller
+// Bucket produces the raw API's exact average and nearest-rank p50/p95/p99. Its caller
 // owns stream identity and interval boundaries; only whole aggregate intervals
 // may be included in the population.
 func (a *ProbeAggregate) Bucket(stream Stream, start time.Time) Bucket {
@@ -113,12 +115,17 @@ func (a *ProbeAggregate) Bucket(stream Stream, start time.Time) Bucket {
 	}
 	if a.successes > 0 {
 		b.AvgRTTMs = pointer(float64(a.sumUS) / float64(a.successes) / 1000)
-		rank := (95*a.successes + 99) / 100
+		percentiles := []int{50, 95, 99}
+		values := []**float64{&b.P50RTTMs, &b.P95RTTMs, &b.P99RTTMs}
+		next := 0
 		var count int64
 		for _, us := range a.sortedRTTs() {
 			count += a.rtts[us]
-			if count >= rank {
-				b.P95RTTMs = pointer(float64(us) / 1000)
+			for next < len(percentiles) && count >= int64(quality.PercentileRank(int(a.successes), percentiles[next])) {
+				*values[next] = pointer(float64(us) / 1000)
+				next++
+			}
+			if next == len(percentiles) {
 				break
 			}
 		}

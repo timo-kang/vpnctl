@@ -39,8 +39,8 @@ func (ww *WatchWriter) Write(snap Snapshot) {
 
 		hs := formatHandshake(ps.Peer.LastHandshake)
 
-		fmt.Fprintf(ww.w, "[%s] %-12s %-15s %6s %5s  %-8s %s\n",
-			ts, name, ip, rtt, loss, ps.Quality.Quality, hs+" "+ps.Quality.ErrorReason)
+		fmt.Fprintf(ww.w, "[%s] %-12s %-15s %6s %5s  %-8s %s %s\n",
+			ts, name, ip, rtt, loss, ps.Quality.Quality, hs+" "+ps.Quality.ErrorReason, formatPercentiles(ps.Quality))
 	}
 }
 
@@ -82,4 +82,14 @@ func formatQuality(q PeerQuality) (string, string) {
 		loss = fmt.Sprintf("%.1f%%", *q.LossPct)
 	}
 	return rtt, loss
+}
+
+func formatPercentiles(q PeerQuality) string {
+	value := func(v *float64) string {
+		if v == nil {
+			return "-"
+		}
+		return fmt.Sprintf("%.2f", *v)
+	}
+	return fmt.Sprintf("p50/p95/p99(ms)=%s/%s/%s", value(q.P50RTTMs), value(q.P95RTTMs), value(q.P99RTTMs))
 }

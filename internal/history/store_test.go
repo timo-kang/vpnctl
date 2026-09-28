@@ -267,6 +267,12 @@ func TestDimensionsAndStreamCapacity(t *testing.T) {
 	if len(s.Latest(now)["robot"]) != MaxNodeStreams {
 		t.Fatal("streams merged")
 	}
+	for _, m := range s.Latest(now)["robot"] {
+		want := fmt.Sprint(int(*m.P50RTTMs))
+		if m.Uplink != want || *m.P50RTTMs != *m.P95RTTMs || *m.P50RTTMs != *m.P99RTTMs {
+			t.Fatal("uplink percentiles mixed", m)
+		}
+	}
 }
 
 func TestRepeatedConflictsDensityAndCancelledBackup(t *testing.T) {

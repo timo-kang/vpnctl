@@ -95,7 +95,7 @@ func TestAggregateUnknownEmptyAndAtomicFailure(t *testing.T) {
 		}
 	}
 	b := a.Bucket(Stream{}, time.Time{})
-	if b.Count != 0 || b.UnknownCount != 3 || b.AvgRTTMs != nil || b.P95RTTMs != nil || b.AvailabilityPct != nil || b.LossPct != nil {
+	if b.Count != 0 || b.UnknownCount != 3 || b.AvgRTTMs != nil || b.P50RTTMs != nil || b.P95RTTMs != nil || b.P99RTTMs != nil || b.AvailabilityPct != nil || b.LossPct != nil {
 		t.Fatal("unknown interpreted as a completed probe", b)
 	}
 	before := encodedAggregate(t, &a)

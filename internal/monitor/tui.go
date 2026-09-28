@@ -136,6 +136,8 @@ func (m TUIModel) View() string {
 
 		sb.WriteString(qualityStyle(ps.Quality.Level).Render(prefix + qualityStyle(ps.Quality.Level).Render(qualStr) + suffix))
 		sb.WriteString("\n")
+		sb.WriteString(dimStyle.Render("    " + formatPercentiles(ps.Quality)))
+		sb.WriteString("\n")
 	}
 
 	sb.WriteString("\n")
