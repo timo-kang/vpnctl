@@ -5,6 +5,10 @@
 #70의 monitor 생산자 연결과 M2 전체 완료 판정은 별도다. 두 source를 제출하는 통합 시험은
 실제 monitor가 자동 생산하고 있다는 증거가 아니다.
 
+경로 교체로 과거 stream이 한도를 점유하는 문제에는 별도의
+[schema v7 경로 회수 정책](history-path-reclamation.md)을 명시적으로 활성화할 수 있다.
+이 경우 과거 이력 일부를 회수하고 API v4로 손실 범위와 표본 수를 표시한다.
+
 ## 활성화와 복구
 
 controller를 중지하고, 같은 사용자/볼륨에서 실행한다. 명령은 controller 소유권 잠금을

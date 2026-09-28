@@ -165,11 +165,14 @@ func (c *Client) FleetHistoryPage(ctx context.Context, window, nodeID, bucket, s
 	if err := c.getJSON(ctx, "/fleet/history?"+values.Encode(), &resp); err != nil {
 		return resp, err
 	}
-	if resp.SchemaVersion != 2 && resp.SchemaVersion != 3 {
-		return resp, fmt.Errorf("unsupported fleet history schema %d; supported: v2, v3", resp.SchemaVersion)
+	if resp.SchemaVersion != 2 && resp.SchemaVersion != 3 && resp.SchemaVersion != 4 {
+		return resp, fmt.Errorf("unsupported fleet history schema %d; supported: v2, v3, v4", resp.SchemaVersion)
 	}
-	if resp.SchemaVersion == 3 && (resp.Tiering == nil || resp.Storage == nil) {
+	if resp.SchemaVersion >= 3 && (resp.Tiering == nil || resp.Storage == nil) {
 		return resp, fmt.Errorf("incomplete fleet history v3: tiering and storage metadata required")
+	}
+	if resp.SchemaVersion == 4 && (resp.Tiering.Coverage == nil || !resp.Storage.ReclamationEnabled || !resp.Tiering.Coverage.Valid(resp.Start, resp.End)) {
+		return resp, fmt.Errorf("v4 history requires reclamation coverage metadata")
 	}
 	return resp, nil
 }

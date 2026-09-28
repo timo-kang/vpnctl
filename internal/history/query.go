@@ -43,6 +43,9 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 		if page.NextCursor != "" {
 			return nil, fmt.Errorf("%w: use paginated history", ErrCapacity)
 		}
+		if page.Coverage != nil && page.Coverage.Partial {
+			return nil, fmt.Errorf("%w: reclaimed history requires coverage-aware paginated queries", ErrCapacity)
+		}
 		return page.Buckets, nil
 	}
 	if err := ValidateQuery(window, width); err != nil {

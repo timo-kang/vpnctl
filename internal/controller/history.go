@@ -254,6 +254,9 @@ func (s *Server) handleTieredHistory(w http.ResponseWriter, r *http.Request, sto
 		byNode[b.NodeID] = append(byNode[b.NodeID], b)
 	}
 	resp := api.FleetHistoryResponse{SchemaVersion: 3, Start: page.Start, End: page.End, BucketSeconds: page.Width.Seconds(), RetentionSeconds: history.Retention.Seconds(), Tiering: &page.PageInfo, Storage: &stats, Nodes: []api.FleetNodeHistory{}}
+	if page.Coverage != nil {
+		resp.SchemaVersion = 4
+	}
 	for _, n := range nodes {
 		if nodeID != "" && nodeID != n.ID {
 			continue

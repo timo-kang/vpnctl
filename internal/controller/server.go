@@ -1437,6 +1437,9 @@ func (s *Server) statusPageData() statuspage.Data {
 	if st, ok := s.history.(interface{ Tiered() bool }); ok {
 		data.HistoryTiered = st.Tiered()
 	}
+	if st, ok := s.history.(interface{ ReclamationEnabled() bool }); ok {
+		data.HistoryReclamation = st.ReclamationEnabled()
+	}
 	for _, n := range snapshot.Nodes {
 		online := n.Status == "online"
 		data.Nodes = append(data.Nodes, statuspage.NodeStatus{

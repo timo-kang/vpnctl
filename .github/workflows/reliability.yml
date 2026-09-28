@@ -23,13 +23,27 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - run: go test -race ./...
+      # The churn suite has its own runner so the accumulated SQLite race
+      # instrumentation cost does not exhaust one package's 10-minute limit.
+      # Together these complementary filters still execute every test.
+      - run: go test -race ./... -skip '^TestPathChurn'
       - name: Fleet history 32-node seven-day query and storage budget
         env:
           VPNCTL_HISTORY_SCALE: '1'
         run: go test ./internal/history -run '^TestHistoryScale$' -count=1 -v
       - run: go vet ./...
       - run: go build ./cmd/vpnctl
+
+  history-churn:
+    name: History path churn race and fault recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./internal/history ./internal/controller -run '^TestPathChurn' -count=1 -timeout 10m -v
 
   wireguard:
     name: Kernel WireGuard and PKI lifecycle
@@ -68,6 +82,10 @@ jobs:
         run: go test ./internal/history -run '^TestTieredHistoryCandidate$' -count=1 -v
       - name: Corrupt and adversarial aggregate encodings
         run: go test ./internal/history -run '^$' -fuzz '^FuzzProbeAggregateDecode$' -fuzztime=10s -parallel=2
+      - name: Variable mesh, 24 path generations, exact retained and discarded population
+        env:
+          VPNCTL_HISTORY_CHURN_SCALE: '1'
+        run: go test ./internal/history -run '^TestPathChurnVariableMesh$' -count=1 -timeout 5m -v
 
   history-transition:
     name: Production raw to tiered history transition

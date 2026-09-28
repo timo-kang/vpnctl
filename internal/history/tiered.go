@@ -317,6 +317,12 @@ func (s *Store) compactStep(ctx context.Context, db *sql.DB, now time.Time) (boo
 	if err = tx.QueryRowContext(ctx, "SELECT sealed_until,expired_until FROM tier_metadata WHERE id=1").Scan(&seal, &expired); err != nil {
 		return false, err
 	}
+	var expiredLoss int64
+	if s.ReclamationEnabled() {
+		if expiredLoss, err = expireReclamation(ctx, tx, expired); err != nil {
+			return false, err
+		}
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM probes WHERE (stream,id) IN (SELECT stream,id FROM probes WHERE ts<=? ORDER BY ts LIMIT ?)`, expired, expireBatch)
 	if err != nil {
 		return false, err
@@ -345,7 +351,7 @@ func (s *Store) compactStep(ctx context.Context, db *sql.DB, now time.Time) (boo
 		if err == nil {
 			s.tierSeal.Store(seal)
 		}
-		return removed == expireBatch || expiredRows == expireBatch, err
+		return removed == expireBatch || expiredRows == expireBatch || expiredLoss == expireBatch, err
 	}
 	if err != nil {
 		return false, err
@@ -458,18 +464,22 @@ func (s *Store) compactStep(ctx context.Context, db *sql.DB, now time.Time) (boo
 }
 
 type TieredStats struct {
-	SealedUntil      time.Time `json:"sealed_until"`
-	ExpiredUntil     time.Time `json:"expired_until"`
-	RawRows          int64     `json:"raw_rows"`
-	RollupRows       int64     `json:"rollup_rows"`
-	RollupBytes      int64     `json:"rollup_bytes"`
-	CompactedSamples int64     `json:"compacted_samples"`
-	PendingSamples   int64     `json:"pending_samples"`
-	LastCompaction   time.Time `json:"last_compaction"`
-	DatabaseBytes    int64     `json:"database_bytes"`
-	UsedBytes        int64     `json:"used_bytes"`
-	FreeBytes        int64     `json:"free_bytes"`
-	WALBytes         int64     `json:"wal_bytes"`
+	SealedUntil        time.Time `json:"sealed_until"`
+	ExpiredUntil       time.Time `json:"expired_until"`
+	RawRows            int64     `json:"raw_rows"`
+	RollupRows         int64     `json:"rollup_rows"`
+	RollupBytes        int64     `json:"rollup_bytes"`
+	CompactedSamples   int64     `json:"compacted_samples"`
+	PendingSamples     int64     `json:"pending_samples"`
+	LastCompaction     time.Time `json:"last_compaction"`
+	DatabaseBytes      int64     `json:"database_bytes"`
+	UsedBytes          int64     `json:"used_bytes"`
+	FreeBytes          int64     `json:"free_bytes"`
+	WALBytes           int64     `json:"wal_bytes"`
+	ReclamationEnabled bool      `json:"reclamation_enabled"`
+	ReclaimedStreams   int64     `json:"reclaimed_streams"`
+	ReclaimedSamples   int64     `json:"reclaimed_samples"`
+	ReclamationRows    int64     `json:"reclamation_rows"`
 }
 
 type StorageInspection struct {
@@ -493,12 +503,13 @@ func Inspect(ctx context.Context, path string) (StorageInspection, error) {
 	if err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&out.SchemaVersion); err != nil {
 		return out, err
 	}
-	if app != applicationID || out.SchemaVersion < 1 || out.SchemaVersion > 6 {
+	if app != applicationID || out.SchemaVersion < 1 || out.SchemaVersion > 7 {
 		return out, fmt.Errorf("unsupported history database")
 	}
-	if out.SchemaVersion == 6 {
+	if out.SchemaVersion >= 6 {
 		s := &Store{path: path}
 		s.tiered.Store(true)
+		s.reclamation.Store(out.SchemaVersion == 7)
 		stats, e := s.TieredStats(ctx)
 		if e != nil {
 			return out, e
@@ -542,6 +553,12 @@ func (s *Store) TieredStats(ctx context.Context) (TieredStats, error) {
 	v.DatabaseBytes = pages * 4096
 	v.FreeBytes = free * 4096
 	v.UsedBytes = v.DatabaseBytes - v.FreeBytes
+	if s.ReclamationEnabled() {
+		v.ReclamationEnabled = true
+		if err = tx.QueryRowContext(ctx, "SELECT evicted_streams,evicted_samples,loss_rows FROM reclamation_metadata WHERE id=1").Scan(&v.ReclaimedStreams, &v.ReclaimedSamples, &v.ReclamationRows); err != nil {
+			return v, err
+		}
+	}
 	if info, e := os.Stat(s.path + "-wal"); e == nil {
 		v.WALBytes = info.Size()
 	} else if !os.IsNotExist(e) {

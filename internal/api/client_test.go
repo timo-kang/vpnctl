@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"vpnctl/internal/history"
 )
@@ -73,7 +74,7 @@ func TestFleetHistoryV3RequiresMetadataAndPreservesPageFilters(t *testing.T) {
 }
 
 func TestFleetClientRejectsUnversionedAndUnsupportedQuality(t *testing.T) {
-	for _, version := range []int{0, 1, 2, 3} {
+	for _, version := range []int{0, 1, 2, 3, 4, 5} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(w, `{"schema_version":%d,"nodes":[]}`, version)
@@ -88,6 +89,38 @@ func TestFleetClientRejectsUnversionedAndUnsupportedQuality(t *testing.T) {
 				}
 			} else if statusErr == nil || historyErr == nil {
 				t.Fatal("unsupported fleet values accepted", version)
+			}
+		})
+	}
+}
+
+func TestFleetHistoryV4RequiresConsistentCoverage(t *testing.T) {
+	for _, corrupt := range []string{"", "missing", "partial_flag", "missing_bound", "out_of_window", "disabled_policy"} {
+		t.Run(corrupt, func(t *testing.T) {
+			end := time.Now().UTC().Truncate(time.Hour)
+			first, last := end.Add(-12*time.Hour), end.Add(-11*time.Hour)
+			c := &history.HistoryCoverage{Partial: true, DiscardedSamples: 7, FirstAffected: &first, LastAffected: &last, ResolutionSeconds: 3600}
+			resp := FleetHistoryResponse{SchemaVersion: 4, Start: end.Add(-24 * time.Hour), End: end, Tiering: &history.PageInfo{Coverage: c}, Storage: &history.TieredStats{ReclamationEnabled: true}}
+			switch corrupt {
+			case "missing":
+				resp.Tiering.Coverage = nil
+			case "partial_flag":
+				c.Partial = false
+			case "missing_bound":
+				c.FirstAffected = nil
+			case "out_of_window":
+				last = end.Add(time.Hour)
+			case "disabled_policy":
+				resp.Storage.ReclamationEnabled = false
+			}
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { json.NewEncoder(w).Encode(resp) }))
+			defer s.Close()
+			got, err := NewClient(s.URL).FleetHistory(context.Background(), "24h")
+			if (err != nil) != (corrupt != "") {
+				t.Fatal("coverage contract", corrupt, err)
+			}
+			if err == nil && got.Tiering.Coverage.DiscardedSamples != 7 {
+				t.Fatal(got)
 			}
 		})
 	}
