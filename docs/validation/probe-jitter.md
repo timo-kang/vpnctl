@@ -20,12 +20,12 @@
 | --- | --- |
 | `jitter_ms` | 유효 쌍의 평균 RTT 변화량(ms), 쌍 없음/순서 유실은 null |
 | `jitter_pair_count` | 유효 쌍 수, 순서 유실은 null |
-| `jitter_known_samples` | 순서 요약이 보존된 관측 수, 실패/unknown 포함 |
+| `jitter_known_samples` | timestamp 순서가 있는 입력으로 집계한 관측 수, 실패/unknown 포함 |
 | `jitter_status` | `complete` 또는 `unavailable_order` |
 
 `complete`는 반환된 모집단의 순서 정보가 있다는 뜻이다. 손실 없는 전송이나 회수되지 않은 전체 과거 이력을 보증하지 않는다. 회수된 경로는 기존 `coverage.partial`, 삭제 표본 수와 영향을 받은 시간 범위로 표시한다. 남은 경로의 jitter를 회수된 경로에 연결하지 않는다.
 
-구형 aggregate가 조금이라도 포함된 bucket은 전체 jitter와 쌍 수를 null로 한다. 새 관측만의 평균을 전체 구간의 값처럼 제시하지 않는다. `jitter_known_samples`는 그 중 순서 정보가 있는 관측 수를 표시한다. 구형 archived live snapshot도 값/쌍 수 null과 `unavailable_order`로 읽는다. 좁은 구간을 다시 조회하면 새 데이터만의 jitter를 볼 수 있다.
+구형 aggregate가 조금이라도 포함된 bucket은 전체 jitter와 쌍 수를 null로 한다. 새 관측만의 평균을 전체 구간의 값처럼 제시하지 않는다. `jitter_known_samples`는 그 중 ordered 입력에 해당하는 수를 표시하며, 혼합 bucket에서 그 표본만의 jitter를 복원할 수 있다는 뜻은 아니다. 구형 archived live snapshot도 값/쌍 수 null과 `unavailable_order`로 읽는다. 구형 aggregate가 없는 전체 시간 구간을 조회하면 새 데이터만의 jitter를 볼 수 있다. 활성화 시점에 이미 부분 압축된 시간 구간은 남은 raw를 압축한 뒤에도 계산 불가로 유지한다.
 
 monitor HTTP, fleet status/history API, fleet CLI, monitor watch/TUI, controller HTML에서 같은 필드를 사용한다. Prometheus는 `vpnctl_quality_jitter_seconds`(ms/1000), `vpnctl_quality_jitter_pair_count`, `vpnctl_quality_jitter_known_samples`, `vpnctl_quality_jitter_order_available` gauge를 제공한다. 값 없음은 NaN이다. 기존 freshness gauge와 같이 사용한다. legacy CSV batch stats의 jitter는 이 개별 probe 계약과 다른 모집단이다.
 

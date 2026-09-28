@@ -10,11 +10,17 @@
 4. 기존 스키마 그대로 v2를 쓰면 구형 binary가 지원하지 않는 데이터에 접근할 수 있었다. 백업/ownership을 요구하는 명시적 v8/v9 전환을 추가하고 v6/v7은 기존 저장 형식을 유지한다.
 5. 원시 RTT 순서를 사용하지 않던 조회를 명시적으로 정렬하고, 구형 live snapshot의 누락 필드가 정상 0처럼 표시되지 않도록 정규화했다.
 
+6. 최초 full-mesh CI의 기존 용량 후보가 한 노드의 모든 stream을 한 응답에 담아 7일 JSON이 약 17.76 MB로 16 MiB 한도를 넘었다. 운영 API의 16-stream 페이지 계약을 후보 검증에도 적용했다. 페이지를 만들기 전에 stream 수를 제한하고, 모든 페이지의 합산 표본 및 노드 전체 8초 기준은 유지한다.
+
 ## 검증 증거
 
 - 전체 일반 회귀 테스트 통과. jitter 고정 사례, 무작위 모든 분할/결합, 부분 압축·rollback·재시작·복원, legacy 혼합, CLI migration, HTTP/CLI/HTML/Prometheus 계약 통과.
 - `go vet ./...`, build, `git diff --check` 통과.
-- race, 실제 생산자 matrix, 가변 mesh/경로 회수, 전체 CI 결과는 실행 완료 후 이 문서와 PR에 기록한다.
+- 2 CPU 일반 전체 race 통과(controller 188.397초, history 167.487초). 추가 jitter/CLI/monitor 계약 race 통과.
+- schema 5/6/7/8/9 × 1/3/8/32 실제 생산자 20조합 race 통과(161.613초). 새 v8/v9의 32노드는 23.34/24.73초로 기존 45초 기준 안에 수렴했다. v5의 32노드는 full-mesh 수용 판정이 아닌 기존 quota 검증이다.
+- 이전 main `6995978`을 별도로 빌드해 v8/v9 DB의 inspect/backup 거절을 확인했다. 새 binary는 jitter/reclamation 설정을 올바르게 인식한다.
+- 수정한 legacy 용량 후보의 32노드 star/full-mesh 전체 통과(68.367초). full-mesh 7일 약 2천만 표본 합계가 일치하고 최대 페이지 JSON은 1,146,645 bytes, 노드 전체 조회·JSON은 최대 210.091ms였다. 이 fixture는 기존 aggregate를 직접 seed하며 실제 v2 저장 전환 증거와 구분한다.
+- 최종 규모·경로 회수·kernel 및 CI 실행 증거는 [PR #89](https://github.com/timo-kang/vpnctl/pull/89)에서 확인한다. 최초 실패 실행은 [36384773307](https://github.com/timo-kang/vpnctl/actions/runs/36384773307)이며 원인은 위 6번에 기록했다.
 
 ## 판정 범위
 

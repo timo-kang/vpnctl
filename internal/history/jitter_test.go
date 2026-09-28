@@ -348,3 +348,34 @@ func TestJitterMigrationCancelledAndFutureSchema(t *testing.T) {
 		t.Fatal("future backup accepted")
 	}
 }
+
+func TestJitterReportedStreamAndQueryWindowIsolation(t *testing.T) {
+	s, now := newStore(t)
+	now = now.Truncate(time.Minute)
+	for sourceIndex, source := range []string{"agent-direct", "monitor-overlay"} {
+		for pathIndex, path := range []string{"first", "second"} {
+			var batch []Observation
+			for i, rtt := range []float64{1000, 1, 4, 99} {
+				offset := []time.Duration{-61 * time.Second, -3 * time.Second, -2 * time.Second, 0}[i]
+				o := obs(fmt.Sprintf("%d", i), now.Add(offset), pointer(rtt+float64(sourceIndex*100+pathIndex*200)))
+				o.Source, o.Path, o.RelayID, o.Uplink = source, "direct", "", path
+				batch = append(batch, o)
+			}
+			ingest(t, s, "robot", batch, now)
+		}
+	}
+	// Lower edge excludes the 1000ms sample; upper edge excludes the final 99ms.
+	got, err := s.Query(context.Background(), "robot", now.Add(-time.Second), time.Minute, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// All four streams independently retain 1,4 here; no cross-stream edges.
+	for _, b := range got {
+		if b.Count != 2 || b.JitterPairs == nil || *b.JitterPairs != 1 || b.JitterMs == nil || *b.JitterMs != 3 {
+			t.Fatal(b)
+		}
+	}
+	if len(got) != 4 {
+		t.Fatal("source/path populations mixed", got)
+	}
+}

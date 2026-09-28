@@ -290,29 +290,43 @@ func candidateCapacity(t *testing.T, nodes int, mesh, full bool) {
 		for node := 0; node < nodes; node++ {
 			start := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), QueryTimeout)
-			buckets, err := queryCandidate(ctx, db, fmt.Sprintf("robot-%02d", node), end, window)
-			cancel()
-			if err != nil {
-				t.Fatal("candidate query failed", node, window, err)
-			}
-			encoded, err := json.Marshal(buckets)
-			if err != nil || len(encoded) > 16<<20 || time.Since(start) > QueryTimeout {
-				t.Fatal("candidate response budget exceeded", node, len(encoded), time.Since(start), err)
-			}
-			maxQuery = max(maxQuery, time.Since(start))
-			maxResponse = max(maxResponse, len(encoded))
 			actual := make(map[Stream]candidateCounts)
-			for _, b := range buckets {
-				c := actual[b.Stream]
-				c.attempted += b.Count
-				c.unknown += b.UnknownCount
-				c.successes += b.Successes
-				actual[b.Stream] = c
-				readSamples += b.Count + b.UnknownCount
-				if b.Count == 0 && (b.AvailabilityPct != nil || b.LossPct != nil || b.AvgRTTMs != nil) {
-					t.Fatal("empty/unknown bucket declared reachable", b)
+			cursor := int64(0)
+			for {
+				buckets, next, err := queryCandidate(ctx, db, fmt.Sprintf("robot-%02d", node), end, window, cursor)
+				if err != nil {
+					cancel()
+					t.Fatal("candidate query failed", node, window, err)
 				}
+				encoded, err := json.Marshal(buckets)
+				if err != nil || len(encoded) > MaxHistoryResponseBytes || time.Since(start) > QueryTimeout {
+					cancel()
+					t.Fatal("candidate response budget exceeded", node, len(encoded), time.Since(start), err)
+				}
+				maxResponse = max(maxResponse, len(encoded))
+				for _, b := range buckets {
+					c := actual[b.Stream]
+					c.attempted += b.Count
+					c.unknown += b.UnknownCount
+					c.successes += b.Successes
+					actual[b.Stream] = c
+					readSamples += b.Count + b.UnknownCount
+					if b.Count == 0 && (b.AvailabilityPct != nil || b.LossPct != nil || b.AvgRTTMs != nil) {
+						cancel()
+						t.Fatal("empty/unknown bucket declared reachable", b)
+					}
+				}
+				if next == 0 {
+					break
+				}
+				if next <= cursor {
+					cancel()
+					t.Fatal("pagination did not advance")
+				}
+				cursor = next
 			}
+			cancel()
+			maxQuery = max(maxQuery, time.Since(start))
 			if window == horizon {
 				for st, want := range expected {
 					if st.NodeID == fmt.Sprintf("robot-%02d", node) && actual[st] != want {
@@ -325,39 +339,44 @@ func candidateCapacity(t *testing.T, nodes int, mesh, full bool) {
 		if readSamples != want {
 			t.Fatal("incomplete window", window, readSamples, want)
 		}
-		t.Logf("window=%s max_node_query_and_json=%s max_node_json_bytes=%d all_nodes_serial=%s population=%d", window, maxQuery, maxResponse, time.Since(allStart), readSamples)
+		t.Logf("window=%s max_node_query_and_json=%s max_page_json_bytes=%d all_nodes_serial=%s population=%d", window, maxQuery, maxResponse, time.Since(allStart), readSamples)
 	}
 }
 
-// Prototype only: queries one reporter and whole UTC hours, including empty
-// buckets. Production activation additionally needs API paging, partial-boundary
-// handling, authorization rechecks and a durable deduplication cutoff.
-func queryCandidate(ctx context.Context, db *sql.DB, node string, end time.Time, window time.Duration) ([]Bucket, error) {
+// Original format capacity fixture, now using the production stream-page
+// budget. Actual production ingestion/compaction/query is exercised separately
+// by TestTieredStorageTransitionScale; this fixture seeds aggregate payloads.
+func queryCandidate(ctx context.Context, db *sql.DB, node string, end time.Time, window time.Duration, after int64) ([]Bucket, int64, error) {
 	if window%time.Hour != 0 || !end.Equal(end.Truncate(time.Hour)) {
-		return nil, fmt.Errorf("candidate query requires whole UTC hours")
+		return nil, 0, fmt.Errorf("candidate query requires whole UTC hours")
 	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, "SELECT id,node,peer,path,relay,uplink,source FROM streams WHERE node=? ORDER BY id", node)
+	rows, err := tx.QueryContext(ctx, "SELECT id,node,peer,path,relay,uplink,source FROM streams WHERE node=? AND id>? ORDER BY id LIMIT ?", node, after, MaxPageStreams+1)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var streams []candidateStream
 	for rows.Next() {
 		var st candidateStream
 		if err := rows.Scan(&st.id, &st.NodeID, &st.PeerID, &st.Path, &st.RelayID, &st.Uplink, &st.Source); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, 0, err
 		}
 		streams = append(streams, st)
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	var next int64
+	if len(streams) > MaxPageStreams {
+		streams = streams[:MaxPageStreams]
+		next = streams[len(streams)-1].id
 	}
 	start := end.Add(-window)
 	var out []Bucket
@@ -365,7 +384,7 @@ func queryCandidate(ctx context.Context, db *sql.DB, node string, end time.Time,
 		buckets := make([]ProbeAggregate, int(window/time.Hour))
 		rows, err := tx.QueryContext(ctx, "SELECT end_ts,payload FROM candidate_rollups WHERE stream=? AND end_ts>? AND end_ts<=?", st.id, start.UnixMicro(), end.UnixMicro())
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for rows.Next() {
 			var ts int64
@@ -379,17 +398,17 @@ func queryCandidate(ctx context.Context, db *sql.DB, node string, end time.Time,
 			}
 			if err != nil {
 				rows.Close()
-				return nil, err
+				return nil, 0, err
 			}
 		}
 		err = rows.Err()
 		rows.Close()
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		rows, err = tx.QueryContext(ctx, "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=?", st.id, start.UnixMicro(), end.UnixMicro())
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for rows.Next() {
 			var ts int64
@@ -397,7 +416,7 @@ func queryCandidate(ctx context.Context, db *sql.DB, node string, end time.Time,
 			var unknown bool
 			if err = rows.Scan(&ts, &rtt, &unknown); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, 0, err
 			}
 			var success *bool
 			var ms *float64
@@ -409,20 +428,20 @@ func queryCandidate(ctx context.Context, db *sql.DB, node string, end time.Time,
 			}
 			if err = buckets[(ts-start.UnixMicro()-1)/time.Hour.Microseconds()].Add(success, ms); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, 0, err
 			}
 		}
 		err = rows.Err()
 		rows.Close()
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for i := range buckets {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			out = append(out, buckets[i].Bucket(st.Stream, start.Add(time.Duration(i)*time.Hour)))
 		}
 	}
-	return out, ctx.Err()
+	return out, next, ctx.Err()
 }
