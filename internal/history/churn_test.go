@@ -410,3 +410,61 @@ INSERT INTO history_loss SELECT 'retired-'||n,'agent-direct',?,1 FROM seq`, MaxR
 		t.Fatal(err)
 	}
 }
+
+func TestPathChurnByteWorkBudget(t *testing.T) {
+	s, now, old := fullArchivedPaths(t)
+	ctx := context.Background()
+	if err := s.EnableReclamation(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var aggregate ProbeAggregate
+	for i := 0; i < MaxAggregateRTTValues; i++ {
+		if err := aggregate.Add(pointer(true), pointer(float64(i)*.9)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload, err := aggregate.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	within := maxReclaimBytes / len(payload)
+	if within < 1 || within >= 255 {
+		t.Fatal("fixture cannot cross byte boundary", len(payload))
+	}
+	// Stage high-density but valid archived distributions. Production upload and
+	// reclamation must enforce the byte bound even below the row work bound.
+	db, err := connect(s.path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec("UPDATE rollups SET payload=? WHERE stream<=?", payload, within+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec("UPDATE tier_metadata SET rollup_bytes=(SELECT sum(length(payload)) FROM rollups),compacted_samples=compacted_samples+?", (within+1)*(MaxAggregateRTTValues-1)); err != nil {
+		t.Fatal(err)
+	}
+	if err = Check(ctx, s.path); err != nil {
+		t.Fatal(err)
+	}
+	var batch []Observation
+	for i := 0; i <= within; i++ {
+		o := old[0]
+		o.Timestamp, o.ID, o.Uplink = now, "new", fmt.Sprintf("new-%d", i)
+		batch = append(batch, o)
+	}
+	assertProbeQuota(t, s.Ingest(ctx, "robot", batch, now), "reclamation_work_bytes", maxReclaimBytes)
+	stats, err := s.TieredStats(ctx)
+	if err != nil || stats.RawRows != 0 || stats.ReclaimedSamples != 0 || stats.RollupRows != 256 {
+		t.Fatal("byte cap committed partial batch", stats, err)
+	}
+	ingest(t, s, "robot", batch[:within], now)
+	ingest(t, s, "robot", batch[within:], now)
+	stats, err = s.TieredStats(ctx)
+	if err != nil || stats.RawRows != int64(within+1) || stats.ReclaimedSamples != int64((within+1)*MaxAggregateRTTValues) {
+		t.Fatal("split byte-bounded batches lost population", stats, err)
+	}
+	if err = Check(ctx, s.path); err != nil {
+		t.Fatal(err)
+	}
+}

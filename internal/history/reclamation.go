@@ -140,8 +140,11 @@ ORDER BY (s.node=?) DESC,l.observed,s.id LIMIT ?`
 		return "", false, nil
 	}
 	c := r.candidates[0]
-	if r.rows+c.rows > maxReclaimRows || r.bytes+c.bytes > maxReclaimBytes {
+	if r.rows+c.rows > maxReclaimRows {
 		return "", false, &QuotaError{Resource: "reclamation_work", Limit: maxReclaimRows}
+	}
+	if r.bytes+c.bytes > maxReclaimBytes {
+		return "", false, &QuotaError{Resource: "reclamation_work_bytes", Limit: maxReclaimBytes}
 	}
 	r.candidates = r.candidates[1:]
 	rows, err := tx.QueryContext(ctx, "SELECT end_ts,payload FROM rollups WHERE stream=? ORDER BY end_ts", c.id)
