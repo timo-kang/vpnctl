@@ -65,3 +65,15 @@
   controller backup과 구형 복귀 시 일관된 restore 절차를 배포 문서에 명시했다.
 - #70의 p50/p99/jitter·handshake/transfer 공통 schema, #71/#74의 결합 장시간 soak,
   M3 다중 relay/underlay 전환 및 그 최종 판정은 별도다.
+
+## CI 자원 경합 조치
+
+첫 최종 CI의 일반 race 작업에서 schema 6/7의 32노드 생산자 수렴이 45초를 초과했다.
+커널·경로 회수 race·용량/fuzz는 통과했다. 같은 생산자 시험을 `GOMAXPROCS=2`로
+단독 실행하면 각각 29.94초·32.20초에 통과했다. 대용량 history 패키지와 같은
+runner에서 동시에 실행하던 작업을 기존 full-mesh 전용 job의 순차 race step으로
+이동했다. 1초 생산 cadence, 45초 수렴 제한, 1,984개 관계 확인은 유지한다.
+일반 job의 제외식과 전용 job의 포함식은 서로 보완하며 테스트를 생략하지 않는다.
+수렴 실패 때 노드별 source 관계 수와 monitor의 mapping/queue 상태도 로그에 남긴다.
+전체 12개 조합을 동일한 2스레드 조건으로 다시 실행해 102.92초에 통과했고,
+schema 6/7의 32노드 조합은 각각 29.68초·32.05초였다.

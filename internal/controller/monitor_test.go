@@ -351,6 +351,22 @@ func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
 					wg.Add(1)
 					go func() { defer wg.Done(); m.Run(ctx) }()
 				}
+				t.Cleanup(func() {
+					if !t.Failed() {
+						return
+					}
+					latest := st.Latest(time.Time{})
+					for i, uploader := range uploaders {
+						id := fmt.Sprintf("node-%02d", i)
+						sources := map[string]int{}
+						for _, m := range latest[id] {
+							if m.SampleCount > 0 {
+								sources[m.Source]++
+							}
+						}
+						t.Logf("convergence diagnostic %s: streams=%v monitor=%+v", id, sources, uploader.Status())
+					}
+				})
 				waitPKI(t, 45*time.Second, func() bool {
 					if size == 1 {
 						return uploaders[0].Status().MappingReady
