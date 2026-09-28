@@ -48,6 +48,8 @@ PRAGMA user_version=1;
 // Status reads use only published snapshots, never SQLite locks.
 // Writers and expensive history queries are separately bounded and cancellable.
 type Store struct {
+	healthBusy    atomic.Bool
+	health        atomic.Pointer[StorageHealth]
 	wgEnabled     atomic.Bool
 	wgRecent      map[string][]wgstats.Report
 	path          string

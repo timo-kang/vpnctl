@@ -7,6 +7,7 @@ import (
 	"embed"
 	"html/template"
 	"net/http"
+	"vpnctl/internal/history"
 )
 
 //go:embed index.html
@@ -16,6 +17,7 @@ var tmpl = template.Must(template.ParseFS(content, "index.html"))
 
 // Data is passed to the status page template.
 type Data struct {
+	Storage            history.StorageHealth
 	Title              string
 	Nodes              []NodeStatus
 	OnlineCount        int

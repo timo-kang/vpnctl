@@ -14,6 +14,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  m2-smoke:
+    name: M2 persistent mixed producer smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Real producers across repeated faults (short validation, not 24h qualification)
+        env:
+          VPNCTL_SOAK_DURATION: 8m
+          VPNCTL_SOAK_NODES: '3'
+          VPNCTL_SOAK_PHASE_INTERVAL: 30s
+          VPNCTL_TEST_WORK_ROOT: ${{ runner.temp }}
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-m2-results
+        run: ./scripts/test-m2-soak.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: m2-mixed-smoke
+          path: ${{ runner.temp }}/vpnctl-m2-results
+          if-no-files-found: warn
+          retention-days: 14
   go:
     name: Go race, vet and build
     runs-on: ubuntu-24.04

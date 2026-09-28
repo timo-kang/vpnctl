@@ -361,3 +361,30 @@ func TestWireGuardReporterRejectsWrongLocalKeyAndCapturesBinding(t *testing.T) {
 		t.Fatal(received)
 	}
 }
+
+// A one-minute monitor can finish successive collections slightly less than
+// sixty seconds apart. Rejecting the whole second sample makes central data
+// older than its 90-second freshness budget despite a healthy producer.
+func TestWireGuardMinuteSamplingWithSchedulerJitter(t *testing.T) {
+	key := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	at := time.Date(2026, 9, 28, 10, 0, 10, 0, time.UTC)
+	h := &HistoryReporter{node: "robot", queue: observation.New(), wgqueue: observation.NewWireGuard(), self: api.MonitorPeer{NodeID: "robot", PublicKey: key, VPNIP: "10.7.0.1", Epoch: strings.Repeat("a", 32)}}
+	for _, step := range []struct {
+		offset time.Duration
+		want   int
+	}{
+		{time.Millisecond, 1},
+		{time.Minute, 2},               // 59.999s after the previous collection
+		{time.Minute + time.Second, 2}, // same minute, no duplicate
+		{2*time.Minute - time.Millisecond, 3},
+		{time.Second, 3}, // regressed clock cannot reopen a sampled minute
+		{3 * time.Minute, 4},
+	} {
+		now := at.Add(step.offset)
+		h.observed = now
+		h.reportWireGuardAt(now, nil, "wg0")
+		if got := h.wgqueue.Stats().Pending; got != step.want {
+			t.Fatalf("offset %s: queued %d, want %d", step.offset, got, step.want)
+		}
+	}
+}

@@ -47,6 +47,8 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "soak-read":
+		err = readSoakObservation()
 	case "peer-probe":
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

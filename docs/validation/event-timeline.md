@@ -4,11 +4,11 @@ controller의 `history.db`는 peer probe, uplink snapshot, 상태 전환 이벤�
 
 ## 공통 측정 봉투
 
-공통 `metrics.Envelope`/`Measurement` 타입은 현재 설계용이며 producer와 영속 저장 경로에 연결되지 않았다. 실제 계약은 peer `history.Observation`, uplink `uplink.Snapshot`, 진단 `history.Event`다. #17은 아직 완료되지 않았다.
+공통 `metrics.Envelope`/`Measurement` 타입은 현재 설계용이며 producer와 영속 저장 경로에 연결되지 않았다. 실제 계약은 peer `history.Observation`, uplink `uplink.Snapshot`, 진단 `history.Event`, WG `wgstats.Report`다. #17은 아직 완료되지 않았다.
 
-- fleet peer history는 평균/p95/loss/availability를 제공한다. p50/p99는 legacy CSV summary에만 있다.
+- fleet peer history는 개별 성공 표본의 평균/p50/p95/p99와 loss/availability, 연속 성공 쌍의 jitter를 제공한다. raw와 순서 보존 aggregate 및 live/운영 출력이 같은 계약을 사용한다.
 - uplink history는 target별 평균 RTT와 availability, 성공/실패/unknown 건수를 제공한다.
-- handshake age·transfer counter의 공통 이력 저장, jitter·percentile 통합, downsampling, DB size/health metric 및 전체 producer를 포함한 장기 soak은 후속 구현 대상이다.
+- handshake age·RX/TX와 reset 처리는 별도 분당 WG 보고로 저장한다. raw/시간 집계·경로 회수는 명시적으로 활성화하는 schema 기능이다. [실행 중 저장 상태](storage-health.md)와 [M2 복합 검증](m2-gate.md)을 별도 운영 근거로 사용한다. 전체 생산자 24시간 soak의 최종 판정은 아직 남아 있다.
 - `unknown`은 성공/실패 분모에 포함하지 않는다. `source`는 제출자가 적는 진단 메타데이터이며 신뢰된 producer임을 증명하지 않는다.
 
 ## 이벤트 스트림
@@ -127,4 +127,4 @@ groups:
 - `internal/history`: v3→v4 전환, 전역 이벤트 backup/check/restore, 재시작 중복 제거, 늦게 도착한 과거 및 미래 clock skew 검증
 - `tests/integration/renewal_retry_test.go`: 초기 등록 실패 중 8초 인증서 만료를 넘어 갱신하고 실제 WG 경로의 CLI로 전역 갱신 성공·로봇 설치·등록 복구 이벤트 확인
 
-공통 measurement envelope 생산자, 통계/handshake/transfer 통합, downsampling, DB 상태 지표와 이벤트를 포함한 24시간 soak은 #17에 남는다. 이 변경만으로 M2 또는 다중 릴레이 전환을 완료 판정하지 않는다.
+실제 생산자·percentile/jitter·handshake/RX/TX·시간 집계는 구현됐다. DB 상태 지표와 이벤트·PKI·가변 mesh를 함께 실행하는 24시간 soak 및 최종 판정은 #17/#19/#91에 남는다. 이 변경만으로 M2 또는 다중 릴레이 전환을 완료 판정하지 않는다.

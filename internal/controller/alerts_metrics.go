@@ -55,6 +55,7 @@ func (c *alertCollector) Collect(ch chan<- prometheus.Metric) {
 }
 func (s *Server) metricsHandler() http.Handler {
 	registry := prometheus.NewRegistry()
+	registry.MustRegister(newStorageHealthCollector(func() history.StorageHealth { return s.storageHealth(time.Now()) }))
 	registry.MustRegister(newAlertCollector(s), wgstats.Collector(func() []wgstats.MetricPeer {
 		var out []wgstats.MetricPeer
 		for _, n := range s.fleetSnapshot().Nodes {

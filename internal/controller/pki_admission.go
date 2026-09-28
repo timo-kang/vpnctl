@@ -125,7 +125,7 @@ func (s *Server) requestMayWritePKI(r *http.Request) bool {
 // writer, so drain them separately without closing admission for cheap reads.
 func requestNeedsMutationDrain(r *http.Request) bool {
 	switch r.URL.Path {
-	case "/fleet/status", "/pki/trust", "/fleet/history", "/fleet/uplinks", "/fleet/wireguard", "/fleet/events", "/fleet/alerts", "/monitor/peers":
+	case "/fleet/status", "/fleet/storage", "/pki/trust", "/fleet/history", "/fleet/uplinks", "/fleet/wireguard", "/fleet/events", "/fleet/alerts", "/monitor/peers":
 		return false
 	default:
 		return true
