@@ -36,6 +36,7 @@ type NodeStatus struct {
 	Online                                    bool
 	Quality                                   string // good, degraded, poor, offline
 	RTTMs                                     string
+	P50RTTMs, P95RTTMs, P99RTTMs              string
 	LossPct                                   string
 }
 

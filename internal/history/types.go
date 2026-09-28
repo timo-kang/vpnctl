@@ -87,7 +87,9 @@ type Bucket struct {
 	Successes       int       `json:"success_count"`
 	AvailabilityPct *float64  `json:"availability_pct"` // successes / attempts, not wall-time uptime
 	AvgRTTMs        *float64  `json:"avg_rtt_ms"`
+	P50RTTMs        *float64  `json:"p50_rtt_ms"`
 	P95RTTMs        *float64  `json:"p95_rtt_ms"` // exact nearest-rank percentile of successful probes
+	P99RTTMs        *float64  `json:"p99_rtt_ms"`
 	LossPct         *float64  `json:"loss_pct"`
 }
 

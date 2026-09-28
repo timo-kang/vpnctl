@@ -77,10 +77,18 @@ func TestWindowedQualitySharedByHTTPMetricsAndTerminal(t *testing.T) {
 		t.Fatal(response)
 	}
 	q := response.Peers[0]
+	if q.P50RTTMs == nil || q.P95RTTMs == nil || q.P99RTTMs == nil || *q.P50RTTMs != 12.5 || *q.P95RTTMs != 12.5 || *q.P99RTTMs != 12.5 {
+		t.Fatal("HTTP success percentiles", q)
+	}
 	if q.Quality != "poor" || q.SampleCount != 10 || q.Stale || *q.LossPct != 20 || *q.RTTMs != 12.5 || !q.LastSuccessAt.Equal(start.Add(35*time.Second)) {
 		t.Fatalf("wrong window: %+v", q)
 	}
 	metrics := metricValues(t, m)
+	for _, name := range []string{"vpnctl_quality_rtt_p50_seconds", "vpnctl_quality_rtt_p95_seconds", "vpnctl_quality_rtt_p99_seconds"} {
+		if metrics[name] != .0125 {
+			t.Fatal("metric percentile units", name, metrics[name])
+		}
+	}
 	if metrics["vpnctl_link_quality"] != 1 || metrics["vpnctl_probe_loss_ratio"] != .2 || metrics["vpnctl_quality_rtt_seconds"] != .0125 || metrics["vpnctl_quality_sample_count"] != 10 {
 		t.Fatal(metrics)
 	}
@@ -89,7 +97,7 @@ func TestWindowedQualitySharedByHTTPMetricsAndTerminal(t *testing.T) {
 	tui := NewTUIModel("wg0", m)
 	tui.snap = m.Latest()
 	for _, output := range []string{watch.String(), tui.View()} {
-		for _, want := range []string{"20.0%", "12.50ms", "poor", "probe_timeout"} {
+		for _, want := range []string{"20.0%", "12.50ms", "poor", "probe_timeout", "p50/p95/p99(ms)=12.50/12.50/12.50"} {
 			if !strings.Contains(output, want) {
 				t.Fatalf("missing %q: %s", want, output)
 			}
@@ -102,8 +110,12 @@ func TestWindowedQualitySharedByHTTPMetricsAndTerminal(t *testing.T) {
 	a, b := <-subA, <-subB
 	*a.Peers[0].Quality.LossPct = 99
 	*a.Peers[0].Quality.ObservedAt = time.Time{}
+	*a.Peers[0].Quality.P50RTTMs, *a.Peers[0].Quality.P95RTTMs, *a.Peers[0].Quality.P99RTTMs = 99, 99, 99
 	if *b.Peers[0].Quality.LossPct == 99 || m.Latest().Peers[0].Quality.ObservedAt.IsZero() {
 		t.Fatal("aliased quality pointers")
+	}
+	if *b.Peers[0].Quality.P50RTTMs != 12.5 || *b.Peers[0].Quality.P95RTTMs != 12.5 || *b.Peers[0].Quality.P99RTTMs != 12.5 {
+		t.Fatal("aliased percentile pointers")
 	}
 }
 

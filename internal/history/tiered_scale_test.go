@@ -251,7 +251,9 @@ SELECT ?,lower(hex(randomblob(16))),?+i*?,CASE WHEN i%10 IN (0,1) THEN NULL ELSE
 				if len(rtts) > 0 {
 					sort.Slice(rtts, func(i, j int) bool { return rtts[i] < rtts[j] })
 					want.AvgRTTMs = pointer(float64(sum) / float64(len(rtts)) / 1000)
+					want.P50RTTMs = pointer(float64(rtts[(50*len(rtts)+99)/100-1]) / 1000)
 					want.P95RTTMs = pointer(float64(rtts[(95*len(rtts)+99)/100-1]) / 1000)
+					want.P99RTTMs = pointer(float64(rtts[(99*len(rtts)+99)/100-1]) / 1000)
 				}
 				if !reflect.DeepEqual(want, b) {
 					t.Fatalf("population/statistics differ for %+v at %s", b.Stream, b.Time)

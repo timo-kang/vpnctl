@@ -98,6 +98,9 @@ type PeerQuality struct {
 	PeerIP        string      `json:"peer"`
 	Quality       string      `json:"quality"`
 	RTTMs         *float64    `json:"rtt_ms"`
+	P50RTTMs      *float64    `json:"p50_rtt_ms"`
+	P95RTTMs      *float64    `json:"p95_rtt_ms"`
+	P99RTTMs      *float64    `json:"p99_rtt_ms"`
 	LossPct       *float64    `json:"loss_pct"`
 	ObservedAt    *time.Time  `json:"observed_at"`
 	Window        float64     `json:"window"` // seconds, ending at ObservedAt
@@ -120,6 +123,9 @@ func copyPtr[T any](v *T) *T {
 
 func (q PeerQuality) Clone() PeerQuality {
 	q.RTTMs = copyPtr(q.RTTMs)
+	q.P50RTTMs = copyPtr(q.P50RTTMs)
+	q.P95RTTMs = copyPtr(q.P95RTTMs)
+	q.P99RTTMs = copyPtr(q.P99RTTMs)
 	q.LossPct = copyPtr(q.LossPct)
 	q.ObservedAt = copyPtr(q.ObservedAt)
 	q.LastSuccessAt = copyPtr(q.LastSuccessAt)
@@ -140,6 +146,14 @@ type Window struct {
 }
 
 func (w *Window) Observe(now time.Time, p Outcome, cfg QualityConfig) PeerQuality {
+	q := w.observe(now, p, cfg)
+	w.percentiles(&q)
+	return q
+}
+
+// Replays advance hysteresis for every sample, but only their final snapshot
+// needs percentiles. Keep sorting out of the intermediate state transitions.
+func (w *Window) observe(now time.Time, p Outcome, cfg QualityConfig) PeerQuality {
 	if p.Unknown || p.Reason == "invalid_probe_target" {
 		w.samples, w.level, w.recovery = nil, QualityUnknown, 0
 		q := PeerQuality{ObservedAt: ptr(now), Window: cfg.Window.Seconds(), LastSuccessAt: copyPtr(w.lastSuccess), ErrorReason: p.Reason}

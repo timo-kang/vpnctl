@@ -47,6 +47,7 @@
         <th>VPN IP</th>
         <th>Quality</th>
         <th>RTT</th>
+        <th>p50 / p95 / p99 (ms)</th>
         <th>Loss</th>
         <th>Reported peer / path / relay / uplink / source</th>
         <th>NAT</th>
@@ -61,6 +62,7 @@
         <td class="mono">{{.VPNIP}}</td>
         <td><span class="quality {{.Quality}}">{{.Quality}}</span>{{if .Stale}} (stale){{end}}<br><small>{{.Reason}}</small></td>
         <td class="mono">{{.RTTMs}}</td>
+        <td class="mono">{{.P50RTTMs}} / {{.P95RTTMs}} / {{.P99RTTMs}}</td>
         <td class="mono">{{.LossPct}}</td>
         <td>{{.Peer}} / {{.Path}} / {{.Relay}} / {{.Uplink}} / {{.Source}}</td>
         <td>{{.NATType}}</td>

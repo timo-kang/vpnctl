@@ -119,6 +119,8 @@ func TestPathChurnVariableMesh(t *testing.T) {
 									want.LossPct = pointer(0.)
 									want.AvgRTTMs = o.RTTMs
 									want.P95RTTMs = o.RTTMs
+									want.P50RTTMs = o.RTTMs
+									want.P99RTTMs = o.RTTMs
 								}
 							}
 						}

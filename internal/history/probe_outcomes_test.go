@@ -65,7 +65,7 @@ func TestAllUnknownAndAllFailureHaveDifferentNullSemantics(t *testing.T) {
 			ingest(t, s, "robot", []Observation{o}, now)
 			bs := query(t, s, now)
 			b := bs[3]
-			if b.AvgRTTMs != nil || b.P95RTTMs != nil || b.Successes != 0 {
+			if b.AvgRTTMs != nil || b.P50RTTMs != nil || b.P95RTTMs != nil || b.P99RTTMs != nil || b.Successes != 0 {
 				t.Fatal(b)
 			}
 			if unknown && (b.Count != 0 || b.UnknownCount != 1 || b.AvailabilityPct != nil || b.LossPct != nil) {

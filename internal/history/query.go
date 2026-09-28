@@ -8,8 +8,9 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
-	"sort"
 	"time"
+
+	"vpnctl/internal/quality"
 )
 
 func DefaultWidth(window time.Duration) time.Duration {
@@ -131,9 +132,7 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 			}
 			if b.Successes > 0 {
 				b.AvgRTTMs = pointer(float64(sums[i]) / float64(b.Successes) / 1000)
-				sort.Slice(rtts[i], func(a, b int) bool { return rtts[i][a] < rtts[i][b] })
-				rank := (95*b.Successes + 99) / 100
-				b.P95RTTMs = pointer(float64(rtts[i][rank-1]) / 1000)
+				b.P50RTTMs, b.P95RTTMs, b.P99RTTMs = quality.RTTPercentiles(rtts[i])
 			}
 		}
 		out = append(out, buckets...)

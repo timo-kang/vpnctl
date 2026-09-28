@@ -84,6 +84,8 @@ underlay 사이의 실제 경로 선택·전환 검증은 M3의 범위다.
 
 ## 현재 상태와 시간 이력
 
+[p50/p95/p99 계산·표시 및 이전 자료 호환 계약](probe-percentiles.md)을 참고한다.
+
 품질의 계산 코드는 독립 `internal/quality`에 두고 monitor와 중앙 history가 함께 사용한다.
 기본값은 60초 window, 최소 3개, stale 17초, 개선 3개 연속 확인이다. RTT 평균에는 성공
 표본만, loss에는 성공과 실패 모두를 사용한다. window는 마지막 관측 시각에 끝나며
@@ -107,8 +109,8 @@ history는 controller가 잡은 `(start,end]` snapshot을 조회한다. 기본 w
 `node_id`로 보고 노드를 제한할 수 있고 미등록 노드는 404다.
 
 - 각 bucket의 `time`은 열린 하한이며 상한은 `min(time + bucket_seconds, end)`이다.
-- `sample_count`(실제 시도), `success_count`, `unknown_count`(미실행/수집 불가), 성공 RTT 평균, 성공 RTT의 **정확한 nearest-rank p95**,
-  `loss_pct`, `availability_pct`를 반환한다. p95는 batch 평균의 percentile이 아니다.
+- `sample_count`(실제 시도), `success_count`, `unknown_count`(미실행/수집 불가), 성공 RTT 평균, 성공 RTT의 **정확한 nearest-rank p50/p95/p99**,
+  `loss_pct`, `availability_pct`를 반환한다. percentile은 batch 평균이 아닌 개별 성공 표본 기준이다.
 - availability는 `성공 probe / 실제 시도 probe × 100`이다. unknown과 표본 공백은 분모에서 제외한다. 시간 가동률이나 수집 공백의
   도달 가능성을 추정하지 않는다. 모든 빈 bucket의 측정값은 null이다.
 - 보존된 stream에는 빈 시간 bucket도 반환한다. 표본이 전혀 없는 노드는 `buckets: []`다.

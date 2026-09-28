@@ -29,9 +29,9 @@ import (
 func fleetPtr[T any](v T) *T { return &v }
 func TestFleetCLIUsesAPIValuesAndNulls(t *testing.T) {
 	now := time.Now().UTC()
-	m := history.Measurement{Stream: history.Stream{Source: "cli-ping", NodeID: "node-a", PeerID: "node-b", Path: "relay", RelayID: "controller", Uplink: "wlan0"}, PeerQuality: quality.PeerQuality{Quality: "good", RTTMs: fleetPtr(10.0), LossPct: fleetPtr(0.0), SampleCount: 3, ObservedAt: &now}}
+	m := history.Measurement{Stream: history.Stream{Source: "cli-ping", NodeID: "node-a", PeerID: "node-b", Path: "relay", RelayID: "controller", Uplink: "wlan0"}, PeerQuality: quality.PeerQuality{Quality: "good", RTTMs: fleetPtr(10.0), P50RTTMs: fleetPtr(7.25), P95RTTMs: fleetPtr(20.0), P99RTTMs: fleetPtr(25.75), LossPct: fleetPtr(0.0), SampleCount: 3, ObservedAt: &now}}
 	status := api.FleetStatusResponse{SchemaVersion: 2, Nodes: []api.FleetNodeStatus{{Measurement: m, Name: "node-a", Status: "online"}, {Name: "node-b", Measurement: history.Measurement{PeerQuality: quality.ReplayQuality(nil)}}}}
-	hist := api.FleetHistoryResponse{SchemaVersion: 2, Nodes: []api.FleetNodeHistory{{NodeID: "node-a", Name: "node-a", Buckets: []history.Bucket{{Stream: m.Stream, Time: now, Count: 3, AvgRTTMs: fleetPtr(10.0), P95RTTMs: fleetPtr(20.0), AvailabilityPct: fleetPtr(100.0), LossPct: fleetPtr(0.0)}}}}}
+	hist := api.FleetHistoryResponse{SchemaVersion: 2, Nodes: []api.FleetNodeHistory{{NodeID: "node-a", Name: "node-a", Buckets: []history.Bucket{{Stream: m.Stream, Time: now, Count: 3, AvgRTTMs: fleetPtr(10.0), P50RTTMs: fleetPtr(7.25), P95RTTMs: fleetPtr(20.0), P99RTTMs: fleetPtr(25.75), AvailabilityPct: fleetPtr(100.0), LossPct: fleetPtr(0.0)}}}}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/fleet/status":
@@ -52,9 +52,9 @@ func TestFleetCLIUsesAPIValuesAndNulls(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{[]string{"fleet", "status", "--config", cfg}, []string{"SOURCE", "cli-ping", "good", "10.00", "0.00", "wlan0", "unknown", "-"}},
-		{[]string{"fleet", "status", "--config", cfg, "--json"}, []string{`"schema_version":2`, `"rtt_ms":10`, `"loss_pct":0`, `"rtt_ms":null`}},
-		{[]string{"fleet", "history", "--config", cfg, "--window", "24h", "--node", "node-a", "--bucket", "15m"}, []string{"SOURCE", "UNKNOWN", "cli-ping", "10.00", "20.00", "100.00", "wlan0"}},
+		{[]string{"fleet", "status", "--config", cfg}, []string{"P50_RTT_MS", "P99_RTT_MS", "7.25", "25.75", "SOURCE", "cli-ping", "good", "10.00", "0.00", "wlan0", "unknown", "-"}},
+		{[]string{"fleet", "status", "--config", cfg, "--json"}, []string{`"schema_version":2`, `"rtt_ms":10`, `"loss_pct":0`, `"rtt_ms":null`, `"p50_rtt_ms":7.25`, `"p99_rtt_ms":25.75`, `"p50_rtt_ms":null`, `"p95_rtt_ms":null`, `"p99_rtt_ms":null`}},
+		{[]string{"fleet", "history", "--config", cfg, "--window", "24h", "--node", "node-a", "--bucket", "15m"}, []string{"P50_RTT_MS", "P99_RTT_MS", "7.25", "25.75", "SOURCE", "UNKNOWN", "cli-ping", "10.00", "20.00", "100.00", "wlan0"}},
 	} {
 		out, e := cliProcess(t, test.args...).CombinedOutput()
 		if e != nil {
