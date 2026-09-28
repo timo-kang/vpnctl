@@ -130,9 +130,15 @@ func Check(ctx context.Context, path string) error {
 	if err = db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app); err != nil {
 		return err
 	}
-	if (version < 1 || version > 9) || app != applicationID {
+	if !supportedHistoryVersion(version) || app != applicationID {
 		return fmt.Errorf("unsupported history backup schema %d", version)
 	}
+	if version >= 15 {
+		if err = checkWireGuard(ctx, db); err != nil {
+			return err
+		}
+	}
+	version = probeSchemaVersion(version)
 	if err = db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil {
 		return err
 	}

@@ -7,26 +7,29 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+	"vpnctl/internal/wgstats"
 )
 
 // QualityResponse version 1 replaces the unversioned, per-probe array.
 type QualityResponse struct {
-	History         HistoryStatus `json:"history"`
-	SchemaVersion   int           `json:"schema_version"`
-	ObservedAt      *time.Time    `json:"observed_at"`
-	Window          float64       `json:"window"`
-	StaleAfter      float64       `json:"stale_after"`
-	MinSamples      int           `json:"min_samples"`
-	RecoverySamples int           `json:"recovery_samples"`
-	Stale           bool          `json:"stale"`
-	ErrorReason     string        `json:"error_reason"`
-	StorageError    string        `json:"storage_error"`
-	Peers           []PeerQuality `json:"peers"`
+	WireGuard       []LocalWireGuard `json:"wireguard"`
+	History         HistoryStatus    `json:"history"`
+	SchemaVersion   int              `json:"schema_version"`
+	ObservedAt      *time.Time       `json:"observed_at"`
+	Window          float64          `json:"window"`
+	StaleAfter      float64          `json:"stale_after"`
+	MinSamples      int              `json:"min_samples"`
+	RecoverySamples int              `json:"recovery_samples"`
+	Stale           bool             `json:"stale"`
+	ErrorReason     string           `json:"error_reason"`
+	StorageError    string           `json:"storage_error"`
+	Peers           []PeerQuality    `json:"peers"`
 }
 
 func (m *Monitor) QualityResponse() QualityResponse {
 	snap := m.Latest()
 	response := QualityResponse{
+		WireGuard:       make([]LocalWireGuard, 0, len(snap.Peers)),
 		History:         snap.History,
 		SchemaVersion:   1,
 		Window:          m.cfg.Quality.Window.Seconds(),
@@ -43,6 +46,7 @@ func (m *Monitor) QualityResponse() QualityResponse {
 	}
 	for _, p := range snap.Peers {
 		response.Peers = append(response.Peers, p.Quality)
+		response.WireGuard = append(response.WireGuard, LocalWireGuard{p.Peer.PublicKey, p.Peer.VPNIP, p.WireGuard})
 	}
 	return response
 }
@@ -56,4 +60,10 @@ func (m *Monitor) QualityHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(m.QualityResponse())
+}
+
+type LocalWireGuard struct {
+	PublicKey string `json:"public_key"`
+	VPNIP     string `json:"vpn_ip"`
+	wgstats.View
 }

@@ -22,6 +22,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"vpnctl/internal/peersource"
+	"vpnctl/internal/wgstats"
 )
 
 var qualityPeer = peersource.Peer{PublicKey: "quality-peer", VPNIP: "10.7.0.2", ProbePort: 51900}
@@ -458,5 +459,56 @@ func TestJitterPrometheusSecondsAndNoPairs(t *testing.T) {
 	observeOne(m, now, true, 15500)
 	if got := metricValues(t, m); got["vpnctl_quality_jitter_seconds"] != .003 || got["vpnctl_quality_jitter_pair_count"] != 1 {
 		t.Fatal(got)
+	}
+}
+
+func TestWireGuardOutputsUnknownAndNoEndpoint(t *testing.T) {
+	m := newTestMonitor(t, Config{})
+	at := time.Now().UTC().Add(-time.Second)
+	p := qualityPeer
+	p.PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	n := wgstats.Counter(9007199254740993)
+	p.WireGuard = wgstats.Sample{ObservedAt: at, Generation: wgstats.ID(), Validity: "observed", RX: &n, TX: &n}
+	out := probePeer(context.Background(), p)
+	if !out.unknown || out.reason != "no_endpoint" {
+		t.Fatal(out)
+	}
+	m.recordCycle(at, []peersource.Peer{p}, []probeOutcome{out}, "", "")
+	got := httpQuality(t, m)
+	if len(got.WireGuard) != 1 || got.WireGuard[0].HandshakeState != "never" || got.WireGuard[0].RX == nil || *got.WireGuard[0].RX != n || got.Peers[0].SampleCount != 0 {
+		t.Fatal(got)
+	}
+	values := metricValues(t, m)
+	if values["vpnctl_wireguard_collection_valid"] != 1 || !math.IsNaN(values["vpnctl_wireguard_rx_bytes_per_second"]) || !math.IsNaN(values["vpnctl_wireguard_handshake_age_seconds"]) {
+		t.Fatal(values)
+	}
+	var watch bytes.Buffer
+	NewWatchWriter(&watch).Write(m.Latest())
+	if !strings.Contains(watch.String(), "9007199254740993/9007199254740993") {
+		t.Fatal(watch.String())
+	}
+	m.recordCycle(at.Add(time.Second), nil, nil, "discovery_failed", "", "permission_denied")
+	got = httpQuality(t, m)
+	if got.WireGuard[0].Validity != "unknown" || got.WireGuard[0].Reason != "permission_denied" || got.WireGuard[0].RX != nil {
+		t.Fatal(got)
+	}
+	if !math.IsNaN(metricValues(t, m)["vpnctl_wireguard_rx_bytes"]) {
+		t.Fatal("failure became zero")
+	}
+}
+
+func TestWireGuardMultiplePeersWithoutAddressesRemainVisible(t *testing.T) {
+	m := newTestMonitor(t, Config{Source: &fakePeerSource{peers: []peersource.Peer{{PublicKey: "a"}, {PublicKey: "b"}}}})
+	m.probeAll(context.Background())
+	r := httpQuality(t, m)
+	if len(r.Peers) != 2 || len(r.WireGuard) != 2 || r.ErrorReason != "" {
+		t.Fatal(r)
+	}
+	// Each unknown probe series has a distinct key fallback instead of an empty-IP collision.
+	metricValues(t, m)
+	m.recordCycle(time.Now().UTC(), nil, nil, "", "")
+	body, e := json.Marshal(m.QualityResponse())
+	if e != nil || !strings.Contains(string(body), `"wireguard":[]`) {
+		t.Fatal(string(body), e)
 	}
 }

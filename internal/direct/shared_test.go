@@ -312,9 +312,20 @@ func TestSharedSTUNSlowConsumerDoesNotBlockReader(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		server.WriteToUDP(reply, remote)
 	}
-	if _, err := ProbePeer(context.Background(), "127.0.0.1:0", shared.LocalAddr(), time.Second); err != nil {
-		t.Fatalf("slow STUN consumer blocked direct traffic: %v", err)
+	// A UDP flood can drop the first echo at the kernel receive buffer. Keep
+	// the same one-second reader-progress budget, but allow retransmission so
+	// the assertion distinguishes packet loss from a blocked STUN consumer.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for {
+		if _, err := ProbePeer(ctx, "127.0.0.1:0", shared.LocalAddr(), 50*time.Millisecond); err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("slow STUN consumer blocked direct traffic: %v", ctx.Err())
+		}
 	}
+
 	if n := len(adapter.packets); n != 1 {
 		t.Fatalf("bounded STUN queue has %d packets", n)
 	}

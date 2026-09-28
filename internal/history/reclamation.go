@@ -65,10 +65,12 @@ func (s *Store) EnableReclamation(ctx context.Context) error {
 	if _, err = tx.ExecContext(ctx, reclamationSchema); err != nil {
 		return err
 	}
+	version := 7
 	if s.JitterEnabled() {
-		if _, err = tx.ExecContext(ctx, "PRAGMA user_version=9"); err != nil {
-			return err
-		}
+		version = 9
+	}
+	if err = preserveWireGuardVersion(ctx, tx, s.wgEnabled.Load(), version); err != nil {
+		return err
 	}
 	if err = checkProbeSpace(ctx, tx); err != nil {
 		return err

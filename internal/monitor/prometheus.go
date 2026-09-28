@@ -6,11 +6,13 @@ package monitor
 import (
 	"math"
 	"time"
+	"vpnctl/internal/wgstats"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 type qualityCollector struct {
+	wg      prometheus.Collector
 	monitor *Monitor
 	peers   map[string]*prometheus.Desc
 	global  map[string]*prometheus.Desc
@@ -48,10 +50,18 @@ func (m *Monitor) Collector() prometheus.Collector {
 	} {
 		c.global[name] = prometheus.NewDesc(name, help, nil, nil)
 	}
+	c.wg = wgstats.Collector(func() []wgstats.MetricPeer {
+		var out []wgstats.MetricPeer
+		for _, p := range m.Latest().Peers {
+			out = append(out, wgstats.MetricPeer{Peer: p.Peer.VPNIP, Key: p.Peer.PublicKey, View: p.WireGuard})
+		}
+		return out
+	})
 	return c
 }
 
 func (c *qualityCollector) Describe(ch chan<- *prometheus.Desc) {
+	c.wg.Describe(ch)
 	for _, desc := range c.peers {
 		ch <- desc
 	}
@@ -78,6 +88,7 @@ func truth(v bool) float64 {
 	return 0
 }
 func (c *qualityCollector) Collect(ch chan<- prometheus.Metric) {
+	c.wg.Collect(ch)
 	snap := c.monitor.Latest()
 	for name, value := range map[string]float64{
 		"vpnctl_quality_window_seconds":      c.monitor.cfg.Quality.Window.Seconds(),
@@ -89,6 +100,10 @@ func (c *qualityCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, p := range snap.Peers {
 		q := p.Quality
+		peerLabel := q.PeerIP
+		if peerLabel == "" {
+			peerLabel = "key:" + p.Peer.PublicKey
+		}
 		jitterPairs := math.NaN()
 		if q.JitterPairs != nil {
 			jitterPairs = float64(*q.JitterPairs)
@@ -118,7 +133,7 @@ func (c *qualityCollector) Collect(ch chan<- prometheus.Metric) {
 			"vpnctl_probe_rtt_seconds":                      latestRTT,
 			"vpnctl_probe_success":                          latestSuccess,
 		} {
-			ch <- prometheus.MustNewConstMetric(c.peers[name], prometheus.GaugeValue, value, q.PeerIP)
+			ch <- prometheus.MustNewConstMetric(c.peers[name], prometheus.GaugeValue, value, peerLabel)
 		}
 	}
 }

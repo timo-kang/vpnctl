@@ -19,6 +19,7 @@ import (
 	"vpnctl/internal/quality"
 	"vpnctl/internal/store"
 	"vpnctl/internal/uplink"
+	"vpnctl/internal/wgstats"
 )
 
 func (s *Server) handleObservations(w http.ResponseWriter, r *http.Request, req api.MetricsRequest) {
@@ -99,8 +100,21 @@ func (s *Server) fleetSnapshot() api.FleetStatusResponse {
 	if store, ok := s.history.(uplinkStorage); ok {
 		uplinks = store.LatestUplinks(time.Time{})
 	}
+	wg := map[string]wgstats.Snapshot{}
+	if store, ok := s.history.(wireGuardStorage); ok {
+		wg = store.LatestWireGuard(time.Time{})
+	}
 	resp := api.FleetStatusResponse{SchemaVersion: 2, Nodes: []api.FleetNodeStatus{}}
 	now := time.Now()
+	wgViews := 0
+	allowed := map[string]wgstats.Binding{}
+	knownKeys := map[string]bool{}
+	for _, n := range nodes {
+		knownKeys[n.PubKey] = true
+		if !n.EnrollmentPending {
+			allowed[n.ID] = monitorPeer(n)
+		}
+	}
 	for _, node := range nodes {
 		m := history.Measurement{Stream: history.Stream{NodeID: node.ID}, PeerQuality: quality.ReplayQuality(nil), Validity: "unknown", Reason: "no_samples"}
 		measurements := latest[node.ID]
@@ -118,7 +132,24 @@ func (s *Server) fleetSnapshot() api.FleetStatusResponse {
 		if value, ok := uplinks[node.ID]; ok {
 			observation = &value
 		}
-		resp.Nodes = append(resp.Nodes, api.FleetNodeStatus{UplinkObservation: observation, Measurement: m, Name: node.Name, VPNIP: node.VPNIP, NATType: node.NATType, LastSeen: seen, Status: fleetNodeState(node, now), Measurements: measurements})
+		var ws *wgstats.Snapshot
+		if value, ok := wg[node.ID]; ok && value.Reporter == monitorPeer(node) {
+			// Retained history remains immutable; live output excludes old peer bindings.
+			value.Views = []wgstats.PeerView{}
+			for _, v := range wg[node.ID].Views {
+				if v.Peer.NodeID == "" && !knownKeys[v.Peer.PublicKey] || v.Peer.NodeID != "" && allowed[v.Peer.NodeID] == v.Peer {
+					if wgViews >= 2048 || len(value.Views) >= 256 {
+						value.ViewsTruncated = true
+						continue
+					}
+					value.Views = append(value.Views, v)
+					wgViews++
+				}
+			}
+			value.Peers = nil
+			ws = &value
+		}
+		resp.Nodes = append(resp.Nodes, api.FleetNodeStatus{WireGuard: ws, UplinkObservation: observation, Measurement: m, Name: node.Name, VPNIP: node.VPNIP, NATType: node.NATType, LastSeen: seen, Status: fleetNodeState(node, now), Measurements: measurements})
 	}
 	return resp
 }

@@ -108,3 +108,5 @@ var AdminAdmissionTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "vpnctl_admin_admission_total",
 	Help: "Administrative mutations accepted, rejected for overload or canceled before admission",
 }, []string{"result"})
+
+var WireGuardDeliveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{Name: "vpnctl_wireguard_delivery_total", Help: "Bounded WireGuard report delivery results."}, []string{"result"})

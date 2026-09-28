@@ -49,6 +49,7 @@
         <th>RTT</th>
         <th>p50 / p95 / p99 (ms)</th>
         <th>RTT jitter</th>
+ <th>WireGuard transport</th>
         <th>Loss</th>
         <th>Reported peer / path / relay / uplink / source</th>
         <th>NAT</th>
@@ -65,6 +66,7 @@
         <td class="mono">{{.RTTMs}}</td>
         <td class="mono">{{.P50RTTMs}} / {{.P95RTTMs}} / {{.P99RTTMs}}</td>
         <td class="mono">{{.Jitter}}</td>
+ <td>{{range .WireGuard}}<div class="mono">{{.}}</div>{{else}}unobserved{{end}}</td>
         <td class="mono">{{.LossPct}}</td>
         <td>{{.Peer}} / {{.Path}} / {{.Relay}} / {{.Uplink}} / {{.Source}}</td>
         <td>{{.NATType}}</td>
@@ -80,6 +82,7 @@
   <div class="footer">
     {{if .HistoryTiered}}History keeps recent raw probes and older hourly distributions. Long history queries use whole UTC hours and stream pages; current quality uses separate observations.<br>{{end}}
     {{if .HistoryReclamation}}Under stream pressure, older archived paths may be reclaimed to admit new observations. History queries report discarded sample counts and affected hours.<br>{{end}}
+    WireGuard counters and inferred rates do not establish server uplink reachability or a verified relay path.<br>
     Auto-refreshes every 5 seconds.
   </div>
 </body>

@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"vpnctl/internal/history"
+	"vpnctl/internal/wgstats"
 )
 
 type alertCollector struct {
@@ -54,6 +55,16 @@ func (c *alertCollector) Collect(ch chan<- prometheus.Metric) {
 }
 func (s *Server) metricsHandler() http.Handler {
 	registry := prometheus.NewRegistry()
-	registry.MustRegister(newAlertCollector(s))
+	registry.MustRegister(newAlertCollector(s), wgstats.Collector(func() []wgstats.MetricPeer {
+		var out []wgstats.MetricPeer
+		for _, n := range s.fleetSnapshot().Nodes {
+			if n.WireGuard != nil {
+				for _, p := range n.WireGuard.Views {
+					out = append(out, wgstats.MetricPeer{Node: n.WireGuard.Reporter.NodeID, Peer: p.Peer.Label(), Key: p.Peer.PublicKey, View: p.View})
+				}
+			}
+		}
+		return out
+	}))
 	return promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, registry}, promhttp.HandlerOpts{})
 }

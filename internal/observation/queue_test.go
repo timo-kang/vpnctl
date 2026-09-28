@@ -220,3 +220,42 @@ func TestPendingRetriesAndInflightShareCapacity(t *testing.T) {
 		}
 	})
 }
+
+func TestWireGuardQueueIndependentBoundRetryIdentity(t *testing.T) {
+	q := NewWireGuard()
+	calls := make(chan string, 4)
+	attempts := 0
+	q.Do(func(ctx context.Context, id string) (bool, error) {
+		attempts++
+		calls <- id
+		if attempts == 1 {
+			return true, errors.New("temporary")
+		}
+		return false, nil
+	})
+	for i := 1; i < 8; i++ {
+		q.Do(func(context.Context, string) (bool, error) { return false, nil })
+	}
+	q.Do(func(context.Context, string) (bool, error) { t.Error("overflow delivered"); return false, nil })
+	if got := q.Stats(); got.Pending != 8 || got.Dropped != 1 {
+		t.Fatal(got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); q.Run(ctx, nil) }()
+	defer func() { cancel(); <-done }()
+	var first, second string
+	select {
+	case first = <-calls:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first attempt")
+	}
+	select {
+	case second = <-calls:
+	case <-time.After(3 * time.Second):
+		t.Fatal("retry")
+	}
+	if first == "" || second != first {
+		t.Fatal("retry changed identity", first, second)
+	}
+}
