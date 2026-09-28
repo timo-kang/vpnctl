@@ -26,6 +26,7 @@ type Registry struct {
 
 // NodeInfo is a minimal snapshot for controller persistence.
 type NodeInfo struct {
+	ObservationEpoch  string    `yaml:"observation_epoch,omitempty"`
 	EnrollmentPending bool      `yaml:"enrollment_pending,omitempty"`
 	ID                string    `yaml:"id"`
 	Name              string    `yaml:"name"`

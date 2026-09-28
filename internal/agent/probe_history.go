@@ -5,8 +5,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"net/http"
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
@@ -41,16 +39,7 @@ func (s *ProbeHistorySupervisor) Configure(ctx context.Context, cfg config.NodeC
 			defer client.CloseIdleConnections()
 			q.Run(work, func(ctx context.Context, e history.Observation) (bool, error) {
 				err := client.SubmitMetrics(ctx, api.MetricsRequest{NodeID: cfg.Name, Observations: []history.Observation{e}})
-				var response *api.HTTPError
-				retry := true
-				if errors.As(err, &response) {
-					if response.StatusCode == http.StatusServiceUnavailable && response.Code == api.CodeHistoryQuota {
-						return false, errors.Join(observation.ErrQuotaRejected, err)
-					}
-					// 401/403 can recover after registration/trust sync; still bounded.
-					retry = response.StatusCode != http.StatusBadRequest && response.StatusCode != http.StatusConflict && response.StatusCode != http.StatusRequestEntityTooLarge && response.StatusCode != http.StatusNotFound
-				}
-				return retry, err
+				return api.HistoryDeliveryResult(err)
 			})
 		}()
 	}

@@ -411,6 +411,11 @@ YAML config file. See `configs/example.yaml`.
 
 Monitor stores probe history in SQLite at `~/.vpnctl/monitor.db` (configurable via `--data`). Default retention is 7 days.
 
+Add `--history-config /etc/vpnctl/node.yaml` to upload each completed probe through
+mTLS as `monitor-overlay`. This requires enrolled node credentials and a current
+controller. See [central monitor history](docs/validation/monitor-history.md) for
+peer identity, delivery gaps, storage limits, and a systemd drop-in.
+
 ## How it works
 
 ### Monitor mode

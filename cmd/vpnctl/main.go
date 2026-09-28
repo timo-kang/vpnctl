@@ -75,7 +75,7 @@ Usage:
  vpnctl down --config <path> [--wg-config <path>]
  vpnctl status --config <path> [--iface <name>]
  vpnctl doctor --config <path> [--iface <name>]
-  vpnctl monitor --interface <iface> [--watch] [--interval 5s] [--peers ip1,ip2]
+  vpnctl monitor --interface <iface> [--watch] [--interval 5s] [--peers ip1,ip2] [--history-config node.yaml]
   vpnctl fleet status --config <path> | --interface <iface>
   vpnctl fleet history --config <path> | --interface <iface> [--window 1h]
   vpnctl fleet uplinks --config <path> --node <id> [--window 7d] [--json]
@@ -2127,6 +2127,7 @@ func fleetHistory(args []string) {
 
 func handleMonitor(args []string) {
 	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
+	historyConfig := fs.String("history-config", "", "node config for authenticated central history (opt-in)")
 	iface := fs.String("interface", "", "WireGuard interface to monitor")
 	peersFlag := fs.String("peers", "", "comma-separated VPN IPs to filter")
 	interval := fs.Duration("interval", 5*time.Second, "probe interval")
@@ -2165,6 +2166,20 @@ func handleMonitor(args []string) {
 
 	ctx, cancel := signalContext()
 	defer cancel()
+	var reporter *monitor.HistoryReporter
+	if *historyConfig != "" {
+		cfg, err := config.Load(*historyConfig)
+		if err != nil {
+			fatal(err)
+		}
+		if cfg.Node == nil {
+			fatal(errors.New("monitor history requires node config"))
+		}
+		reporter, err = monitor.NewHistoryReporter(cfg.Node.Controller, cfg.Node.Name, cfg.Node.PKIDir)
+		if err != nil {
+			fatal(err)
+		}
+	}
 	src := peersource.NewWgSource(*iface, *probePort)
 	checkCtx, stopCheck := context.WithTimeout(ctx, 10*time.Second)
 	peers, err := src.CheckContext(checkCtx)
@@ -2189,6 +2204,7 @@ func handleMonitor(args []string) {
 	}
 
 	mon, err := monitor.New(monitor.Config{
+		History:   reporter,
 		Source:    src,
 		Store:     store,
 		Interval:  *interval,

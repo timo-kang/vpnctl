@@ -34,5 +34,8 @@ func (w *qualityWindow) observe(now time.Time, p probeOutcome, cfg QualityConfig
 	if w.state == nil {
 		w.state = quality.NewWindow()
 	}
-	return w.state.Observe(now, quality.Outcome{RTTus: p.rtt, Success: p.success, Reason: p.reason}, cfg)
+	if !p.at.IsZero() {
+		now = p.at
+	}
+	return w.state.Observe(now, quality.Outcome{RTTus: p.rtt, Success: p.success, Reason: p.reason, Unknown: p.unknown}, cfg)
 }

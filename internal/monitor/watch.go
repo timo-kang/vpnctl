@@ -25,6 +25,9 @@ func NewWatchWriter(w io.Writer) *WatchWriter {
 // Format: [HH:MM:SS] %-12s %-15s %6s %5s  %s
 func (ww *WatchWriter) Write(snap Snapshot) {
 	ts := snap.Time.Local().Format("15:04:05")
+	if h := snap.History; h.Enabled {
+		fmt.Fprintf(ww.w, "[%s] central history: mapping=%t delivered=%d pending=%d dropped=%d quota_dropped=%d mapping_dropped=%d reason=%s last_mapping_drop=%s\n", ts, h.MappingReady, h.Delivery.Delivered, h.Delivery.Pending, h.Delivery.Dropped, h.Delivery.QuotaDropped, h.MappingDropped, h.ErrorReason, h.LastMappingDrop)
+	}
 	if snap.ErrorReason != "" || snap.StorageError != "" {
 		fmt.Fprintf(ww.w, "[%s] collection=%s stale=%t storage=%s\n", ts, snap.ErrorReason, snap.Stale, snap.StorageError)
 	}

@@ -310,6 +310,8 @@ func (s *Server) httpHandler() http.Handler {
 	mux.HandleFunc("/register", s.requireClientCert(s.handleRegister))
 	mux.HandleFunc("/candidates", s.requireClientCert(s.handleCandidates))
 	mux.HandleFunc("/metrics", s.requireClientCert(s.handleMetrics))
+	mux.HandleFunc("/monitor/peers", s.requireClientCert(s.handleMonitorPeers))
+	mux.HandleFunc("/monitor/metrics", s.requireClientCert(s.handleMonitorMetrics))
 	mux.HandleFunc("/nat-probe", s.requireClientCert(s.handleNATProbe))
 	mux.HandleFunc("/direct-result", s.requireClientCert(s.handleDirectResult))
 	mux.HandleFunc("/wg-config", s.requireClientCert(s.handleWGConfig))
@@ -722,6 +724,9 @@ func validateRegistryNodeMetadata(reg *store.Registry) error {
 			return fmt.Errorf("node identity %q appears more than once (indexes %d and %d)", node.ID, previousIndex, index)
 		}
 		identities[node.ID] = index
+		if err := validateObservationEpoch(node.ObservationEpoch); err != nil {
+			return fmt.Errorf("node %q: %w", node.ID, err)
+		}
 		if node.Name != node.ID {
 			return fmt.Errorf("node %q name %q does not match its identity", node.ID, node.Name)
 		}
@@ -812,6 +817,9 @@ func (s *Server) registerWithIssuance(input nodeRegistration, autoApply bool, is
 			node.PubKey = input.PubKey
 		}
 		node.VPNIP = assignedVPNIP
+		if node.PubKey != s.reg.Nodes[existingIndex].PubKey || node.VPNIP != s.reg.Nodes[existingIndex].VPNIP {
+			node.ObservationEpoch = newObservationEpoch()
+		}
 		if input.Endpoint != "" {
 			node.Endpoint = input.Endpoint
 		}
@@ -829,16 +837,17 @@ func (s *Server) registerWithIssuance(input nodeRegistration, autoApply bool, is
 	} else {
 		nodeID = input.Name
 		next.Nodes = append(next.Nodes, store.NodeInfo{
-			ID:         nodeID,
-			Name:       input.Name,
-			PubKey:     input.PubKey,
-			VPNIP:      assignedVPNIP,
-			Endpoint:   input.Endpoint,
-			ProbePort:  input.ProbePort,
-			PublicAddr: input.PublicAddr,
-			NATType:    input.NATType,
-			LastSeenAt: now,
-			Status:     "online",
+			ObservationEpoch: newObservationEpoch(),
+			ID:               nodeID,
+			Name:             input.Name,
+			PubKey:           input.PubKey,
+			VPNIP:            assignedVPNIP,
+			Endpoint:         input.Endpoint,
+			ProbePort:        input.ProbePort,
+			PublicAddr:       input.PublicAddr,
+			NATType:          input.NATType,
+			LastSeenAt:       now,
+			Status:           "online",
 		})
 	}
 

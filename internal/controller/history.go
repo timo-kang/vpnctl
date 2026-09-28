@@ -52,6 +52,10 @@ func (s *Server) handleObservations(w http.ResponseWriter, r *http.Request, req 
 			return
 		}
 	}
+	s.ingestObservations(w, r, req)
+}
+
+func (s *Server) ingestObservations(w http.ResponseWriter, r *http.Request, req api.MetricsRequest) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	if err := s.history.Ingest(ctx, req.NodeID, req.Observations, time.Now()); err != nil {

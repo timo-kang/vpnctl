@@ -259,6 +259,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		"VPNCTL_WORKER=telemetry", "VPNCTL_PHASE=" + phaseFile, "VPNCTL_PKI=" + configs[0].Node.PKIDir, "VPNCTL_TELEMETRY=" + filepath.Join(results, "telemetry.jsonl"),
 	}, testBin, "-test.run=^TestNetworkWorker$")
 	checkFleetHistory := exerciseFleetHistory(t, bin, namespaces, paths, results)
+	checkMonitorHistory := exerciseMonitorHistory(t, bin, namespaces, paths, results)
 	time.Sleep(time.Second)
 	before := make([]kernelSnapshot, size)
 	for n := range before {
@@ -434,6 +435,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		eventually(t, 5*time.Second, "node after controller restart", func() error { return fleet(n) })
 	}
 	checkFleetHistory("after-restart")
+	checkMonitorHistory("after-restart")
 	time.Sleep(time.Second)
 	phase("network_loss")
 	// Drop encrypted underlay packets for one node; positive control proves the

@@ -1,0 +1,6 @@
+# Optional /etc/systemd/system/vpnctl-monitor.service.d/history.conf
+# Adjust paths/interface after enrolling the node. The controller must support
+# /monitor/peers and /monitor/metrics. See docs/validation/monitor-history.md.
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/vpnctl monitor --interface wg0 --watch --metrics-port 9090 --data /var/lib/vpnctl/monitor.db --history-config /etc/vpnctl/node.yaml
