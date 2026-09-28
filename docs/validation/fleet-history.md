@@ -119,6 +119,11 @@ history는 controller가 잡은 `(start,end]` snapshot을 조회한다. 기본 w
 
 ## 용량, retention, 배포와 복구
 
+CI의 대규모 가속 용량 시험은 2 GiB 제한 tmpfs의 실제 SQLite 파일에서 실행한다.
+FULL 동기화, WAL backpressure, 8초 조회와 60초 전체 만료 기준은 유지한다.
+일반 race/crash/restore 및 실제 생산자 시험은 runner disk를 사용한다. 운영 volume의
+I/O 지연과 지속 수용량은 배포 환경에서 별도 검증해야 한다.
+
 영속 schema v5 (v1~v4에서 자동 전환), application ID `0x76706368`, SQLite 4096-byte page, FULL 동기화의 WAL을
 사용한다. modernc SQLite v1.46.2 (SQLite 3.51.3)와 해당 릴리스의 libc v1.70.0을 사용한다.
 긴 read snapshot 동안에도 새 표본을 commit할 수 있다. 빈 v0 DB는 v1 초기화 후 v2로, 기존 v1 DB는 v2로 원자적 단계 이관한다. 알 수 없는 미래 버전이나 다른 제품의

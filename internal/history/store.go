@@ -42,8 +42,9 @@ PRAGMA application_id=1987076968;
 PRAGMA user_version=1;
 `
 
-// Store opens short-lived connections: it owns no background goroutines or
-// descriptors. Status reads use only published snapshots, never SQLite locks.
+// Store opens short-lived connections; overlapping probe uploads share one
+// writer connection until the last caller returns. No idle connection is kept.
+// Status reads use only published snapshots, never SQLite locks.
 // Writers and expensive history queries are separately bounded and cancellable.
 type Store struct {
 	path         string
@@ -57,6 +58,36 @@ type Store struct {
 	tiered       atomic.Bool // enabled only by the offline migration or Open
 	tierSeal     atomic.Int64
 	reclamation  atomic.Bool
+	uploadMu     sync.Mutex
+	uploadDB     *sql.DB
+	uploadUsers  int
+}
+
+// Pin before waiting for the writer slot. A burst of single-observation uploads
+// otherwise opens, parses the schema and checkpoints a connection for every
+// probe. Reference counting retains the connection only during active calls;
+// canceled waiters release their pin just like successful writers.
+func (s *Store) pinUploadDB() (*sql.DB, func(), error) {
+	s.uploadMu.Lock()
+	defer s.uploadMu.Unlock()
+	if s.uploadDB == nil {
+		db, err := connect(s.path, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		s.uploadDB = db
+	}
+	db := s.uploadDB
+	s.uploadUsers++
+	return db, func() {
+		s.uploadMu.Lock()
+		defer s.uploadMu.Unlock()
+		s.uploadUsers--
+		if s.uploadUsers == 0 {
+			db.Close()
+			s.uploadDB = nil
+		}
+	}, nil
 }
 
 func connect(path string, readOnly bool) (*sql.DB, error) {
@@ -295,15 +326,15 @@ func (s *Store) Ingest(ctx context.Context, node string, observations []Observat
 			return err
 		}
 	}
+	db, release, err := s.pinUploadDB()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := acquire(ctx, s.writer); err != nil {
 		return err
 	}
 	defer func() { <-s.writer }()
-	db, err := connect(s.path, false)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
 	if !s.Tiered() && now.Sub(s.lastCleanup) >= time.Minute {
 		if err = s.maintainDB(ctx, db, now); err != nil {
 			return err
