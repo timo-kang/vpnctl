@@ -28,3 +28,22 @@ Ingest의 입력 검증 뒤, writer 대기 전에 참조를 획득한다. 동시
 ## 잔여 범위
 
 1초 전노드 full mesh 생산의 장기 무손실 수용을 인증하지 않는다. 큐는 여전히 bounded best-effort이다. 종료 시 미전송 누락을 포함한 표시도 유지한다. 운영 cadence별 지속 처리량과 24시간 복합 soak는 #71/#19의 후속 gate이다. 인증서 갱신·다중 릴레이 경로 제어의 완료 판정을 대체하지 않는다.
+
+## 추가 CI 결함: 가속 용량 시험의 I/O 환경 (#86)
+
+PR #83의 최초 CI에서는 실제 생산자(32노드 30.41/32.40초), churn, kernel,
+20M 전환이 통과했지만 legacy 3,870,720개 probe + 322,560개 uplink snapshot의
+전체 만료 정리가 60초를 초과했다. 이 정리는 업로드 연결 공유 경로와 별개다.
+동일 코드를 포함한 PR #85에서는 정리 48.54초로 통과했다. 로컬 2 CPU 실제 파일은
+20.18초였다. 임의 저장 장치에서 항상 같은 지연을 보장하는 근거로 해석하지 않는다.
+
+legacy 가속 용량 시험도 기존 20M 전환과 같은 2 GiB 제한 tmpfs에서 순차 실행한다.
+FULL synchronous, 실제 SQLite 파일, WAL backpressure, 8초 query/60초 cleanup,
+전체 표본 수를 유지한다. 일반 race/crash/restore와 실제 생산자/kernel 시험은 계속
+runner disk에서 실행한다. 운영 volume의 지연·지속 부하는 배포/soak gate에 남긴다.
+
+삭제 순서 변경, 전체 삭제 및 캐시 확대는 개선이 입증되지 않아 포함하지 않았다.
+혼합 연령 30,015행의 두 번째 metadata 갱신에서 취소를 주입해 첫 10,000행 commit이
+남고, 재개 후 최근 표본 6개가 보존됨을 검증했다. 별도 metadata 실패에서 batch rollback,
+이후 수집 재개와 빈 legacy stream 정리도 검증한다. 제품 삭제 알고리즘과 10,000행
+commit 경계는 변경하지 않는다.
