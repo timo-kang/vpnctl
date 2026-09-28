@@ -70,3 +70,12 @@ func (c *Client) FleetWireGuard(ctx context.Context, node, window string, limit 
 	}
 	return out, err
 }
+
+func (c *Client) FleetStorage(ctx context.Context) (history.StorageHealth, error) {
+	var out history.StorageHealth
+	err := c.getJSON(ctx, "/fleet/storage", &out)
+	if err == nil && out.SchemaVersion != 1 {
+		err = fmt.Errorf("unsupported storage health schema")
+	}
+	return out, err
+}

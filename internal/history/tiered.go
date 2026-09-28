@@ -559,8 +559,13 @@ func (s *Store) TieredStats(ctx context.Context) (TieredStats, error) {
 		return v, err
 	}
 	defer tx.Rollback()
-	var seal, expired, last, pages, free int64
-	err = tx.QueryRowContext(ctx, `SELECT sealed_until,expired_until,rollup_rows,rollup_bytes,compacted_samples,last_compaction,(SELECT row_count FROM metadata WHERE id=1),(SELECT count(*) FROM probes WHERE ts<=sealed_until) FROM tier_metadata WHERE id=1`).Scan(&seal, &expired, &v.RollupRows, &v.RollupBytes, &v.CompactedSamples, &last, &v.RawRows, &v.PendingSamples)
+	return s.readTieredStats(ctx, tx)
+}
+
+func (s *Store) readTieredStats(ctx context.Context, tx *sql.Tx) (TieredStats, error) {
+	v := TieredStats{JitterEnabled: s.JitterEnabled()}
+	var seal, expired, last, pages, free, pageSize int64
+	err := tx.QueryRowContext(ctx, `SELECT sealed_until,expired_until,rollup_rows,rollup_bytes,compacted_samples,last_compaction,(SELECT row_count FROM metadata WHERE id=1),(SELECT count(*) FROM probes WHERE ts<=sealed_until) FROM tier_metadata WHERE id=1`).Scan(&seal, &expired, &v.RollupRows, &v.RollupBytes, &v.CompactedSamples, &last, &v.RawRows, &v.PendingSamples)
 	if err != nil {
 		return v, err
 	}
@@ -575,8 +580,11 @@ func (s *Store) TieredStats(ctx context.Context) (TieredStats, error) {
 	if err = tx.QueryRowContext(ctx, "PRAGMA freelist_count").Scan(&free); err != nil {
 		return v, err
 	}
-	v.DatabaseBytes = pages * 4096
-	v.FreeBytes = free * 4096
+	if err = tx.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
+		return v, err
+	}
+	v.DatabaseBytes = pages * pageSize
+	v.FreeBytes = free * pageSize
 	v.UsedBytes = v.DatabaseBytes - v.FreeBytes
 	if s.ReclamationEnabled() {
 		v.ReclamationEnabled = true

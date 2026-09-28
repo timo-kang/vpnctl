@@ -1949,7 +1949,7 @@ func defaultMonitorDBPath() string {
 
 func handleFleet(args []string) {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, "fleet subcommand required (status|history|uplinks|wireguard|events|alerts)\n")
+		fmt.Fprint(os.Stderr, "fleet subcommand required (status|history|storage|uplinks|wireguard|events|alerts)\n")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -1959,6 +1959,8 @@ func handleFleet(args []string) {
 		fleetHistory(args[1:])
 	case "wireguard":
 		fatal(runFleetWireGuard(args[1:]))
+	case "storage":
+		fatal(runFleetStorage(args[1:]))
 	case "uplinks":
 		fatal(runFleetUplinks(args[1:]))
 	case "events":

@@ -276,6 +276,8 @@ func (s *Server) ListenAndServeContext(ctx context.Context) error {
 	}
 	stopHistory := s.startHistoryMaintenance()
 	defer stopHistory()
+	stopHealth := s.startStorageHealth()
+	defer stopHealth()
 	server := &http.Server{
 		Handler: s.httpHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20,
@@ -311,6 +313,7 @@ func (s *Server) httpHandler() http.Handler {
 	mux.HandleFunc("/candidates", s.requireClientCert(s.handleCandidates))
 	mux.HandleFunc("/metrics", s.requireClientCert(s.handleMetrics))
 	mux.HandleFunc("/monitor/peers", s.requireClientCert(s.handleMonitorPeers))
+	mux.HandleFunc("/fleet/storage", s.requireClientCert(s.handleStorageHealth))
 	mux.HandleFunc("/monitor/wireguard", s.requireClientCert(s.handleWireGuard))
 	mux.HandleFunc("/fleet/wireguard", s.handleAuthorizedWireGuard)
 	mux.HandleFunc("/monitor/metrics", s.requireClientCert(s.handleMonitorMetrics))
@@ -1444,7 +1447,7 @@ func (s *Server) applyWGContext(ctx context.Context, peers []wireguard.Peer) err
 
 func (s *Server) statusPageData() statuspage.Data {
 	snapshot := s.fleetSnapshot()
-	data := statuspage.Data{Title: "vpnctl", TotalCount: len(snapshot.Nodes)}
+	data := statuspage.Data{Title: "vpnctl", TotalCount: len(snapshot.Nodes), Storage: s.storageHealth(time.Now())}
 	if st, ok := s.history.(interface{ Tiered() bool }); ok {
 		data.HistoryTiered = st.Tiered()
 	}

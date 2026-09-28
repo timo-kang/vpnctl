@@ -39,6 +39,12 @@
   </div>
 
   {{if .Nodes}}
+  <section aria-label="History storage">
+    <p>Storage collection: {{.Storage.Validity}}{{if .Storage.Reason}} ({{.Storage.Reason}}){{end}}, stale={{.Storage.Stale}}, observed={{if .Storage.ObservedAt}}{{.Storage.ObservedAt}}{{else}}unobserved{{end}}</p>
+    {{with .Storage.Values}}<p>Database {{.DatabaseBytes}} bytes; reusable pages {{.FreeBytes}} bytes; WAL {{.WALBytes}} bytes. Raw probes {{.RawRows}}, streams {{.Streams}}, uplinks {{.UplinkRows}}, events {{.EventRows}}.</p>
+    {{with .Tiering}}<p>Rollups {{.RollupRows}} / {{.RollupBytes}} bytes; reclaimed probes {{.ReclaimedSamples}}; last compaction {{.LastCompaction}}.</p>{{end}}
+    {{with .WireGuard}}<p>WireGuard reports {{.Rows}} / {{.MaxRows}}; payload {{.Bytes}} / {{.MaxBytes}} bytes; reclaimed {{.Evicted}}, expired {{.Expired}}, loss envelope {{.LossStart}} … {{.LossEnd}}.</p>{{end}}{{end}}
+  </section>
   <table>
     <thead>
       <tr>

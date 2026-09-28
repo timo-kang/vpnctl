@@ -7,15 +7,13 @@ WireGuard 암호 프로토콜을 사용한다는 사실만으로 `wg show <inter
 | 조합 | 판정 | 전제·권한 | 제공 범위와 검증 |
 | --- | --- | --- | --- |
 | Linux kernel WireGuard + vpnctl controller/node | 지원 | `ip`, `wg`, interface/route 변경 권한; 배포의 forwarding·반환 경로 설정 | 관리, PKI, peer 품질, 선택적 uplink 관측; 1/3/8/32 node kernel suite |
-| 기존 Linux kernel WireGuard + monitor/ping/perf/discover | 지원 | IPv4 interface, `wg` 상태 읽기 권한(CAP_NET_ADMIN 또는 root), target host AllowedIPs/endpoint, UDP responder | RTT/loss/quality, handshake 시각, 로컬 SQLite/HTTP/Prometheus; 실제 두 노드 CLI smoke |
+| 기존 Linux kernel WireGuard + monitor/ping/perf/discover | 지원 | IPv4 interface, `wg` 상태 읽기 권한(CAP_NET_ADMIN 또는 root), target host AllowedIPs/endpoint, UDP responder | RTT/loss/quality·percentile·jitter, handshake·RX/TX, 로컬 SQLite/HTTP/Prometheus; 실제 두 노드 CLI smoke |
 | Linux wireguard-go + `wg` 호환 interface | 제한·미검증 | daemon/socket 접근 권한, `wg show dump`, `ip` IPv4 조회가 모두 가능해야 함 | 같은 discovery 경로를 시도할 수 있으나 kernel suite가 userspace daemon을 검증하지 않음 |
 | Tailscale의 OS interface 사용 모드 | 직접 관측 미지원 | 전용 PeerSource adapter 없음 | 같은 호스트에서 별도 kernel WG interface를 관측하는 공존만 가능; Tailscale peer/status 수집을 보장하지 않음 |
 | Tailscale userspace networking 모드 | 직접 관측 미지원 | 전용 adapter 및 peer 경로 연동 없음 | vpnctl `--interface` 지원 대상 아님 |
 | Nebula tunnel | 직접 관측 미지원 | 전용 PeerSource adapter 없음 | 별도 kernel WG interface와 공존 가능; Nebula peer/status 수집을 보장하지 않음 |
 
-controller uplink 관측은 node 설정에서 명시적으로 활성화한다. monitor의 로컬 DB는
-controller history로 자동 업로드되지 않는다. monitor handshake는 WG metadata이며,
-transfer counter/jitter/모든 percentile의 공통 영속화는 #17의 미완료 범위다.
+controller uplink 관측은 node 설정에서 명시적으로 활성화한다. `monitor --history-config node.yaml`은 실제 probe와 분당 WG 관측을 별도 bounded mTLS 큐로 중앙에 제출한다. 기존 로컬 DB 전체를 옮기는 기능은 아니다. percentile·jitter·WG counter의 공통 저장과 reset 처리는 구현됐으며, [복합 장기 검증](m2-gate.md)과 M2 최종 판정은 남아 있다. [WG 관측 계약](wireguard-observations.md)을 따른다.
 
 `monitor`는 기존 interface/route/peer 설정을 변경하지 않는다. `node serve`, `up`,
 controller의 `wg_apply`는 관리 명령이므로 기존 VPN과 interface·주소·route 소유권을
