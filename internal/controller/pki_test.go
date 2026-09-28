@@ -49,6 +49,9 @@ func lifecycleServer(t *testing.T, clientLife ...string) (*Server, *httptest.Ser
 	if len(clientLife) > 1 {
 		caLifetime, serverLifetime, serverWindow = clientLife[1], clientLifetime, "1m"
 	}
+	if len(clientLife) > 2 {
+		clientWindow = clientLife[2]
+	}
 	s, err := NewServer(config.ControllerConfig{DataDir: dir, Listen: "127.0.0.1:0", VPNCIDR: "10.7.0.0/24", WGAddress: "10.7.0.1/24", PKI: &config.PKIConfig{CAExpiry: caLifetime, ServerExpiry: serverLifetime, ClientExpiry: clientLifetime, ServerRenewBefore: serverWindow, ClientRenewBefore: clientWindow, CheckInterval: "100ms", CAOverlap: "1s"}})
 	if err != nil {
 		t.Fatal(err)

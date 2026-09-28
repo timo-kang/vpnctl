@@ -74,12 +74,13 @@ func TestNetns_M2Soak(t *testing.T) {
 		}
 	}
 	start := time.Time{}
+	workloadEnd := time.Time{}
 	completed := false
 	phases := map[string]int{}
 	// Write an explicit incomplete verdict even on assertion failure. Process
 	// kill/host loss can leave no verdict; consumers must also treat that as incomplete.
 	defer func() {
-		verdict := map[string]any{"schema_version": 1, "started_at": start, "finished_at": time.Now().UTC(), "requested_seconds": duration.Seconds(), "nodes": size, "completed": completed && !t.Failed(), "phases": phases, "m2_gate": "pending_review", "wall_clock_24h": !start.IsZero() && time.Since(start) >= 24*time.Hour}
+		verdict := map[string]any{"schema_version": 1, "started_at": start, "finished_at": time.Now().UTC(), "requested_seconds": duration.Seconds(), "nodes": size, "completed": completed && !t.Failed(), "phases": phases, "m2_gate": "pending_review", "wall_clock_24h": !start.IsZero() && !workloadEnd.IsZero() && workloadEnd.Sub(start) >= 24*time.Hour}
 		b, _ := json.MarshalIndent(verdict, "", "  ")
 		verdictPath := filepath.Join(results, "verdict.json")
 		if err := os.WriteFile(verdictPath, b, 0600); err != nil {
@@ -179,8 +180,12 @@ func TestNetns_M2Soak(t *testing.T) {
 		agents[n] = startAgent(n)
 		monitors[n] = startMonitor(n)
 	}
-	read := func(n int) (soakObservation, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	read := func(n int, parents ...context.Context) (soakObservation, error) {
+		parent := context.Background()
+		if len(parents) > 0 {
+			parent = parents[0]
+		}
+		ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 		defer cancel()
 		cmd := netCommand(ctx, ns[n+1], worker, "-test.run=^TestNetworkWorker$")
 		cmd.Env = append(os.Environ(), "VPNCTL_WORKER=soak-read", "VPNCTL_SOAK_CONFIG="+paths[n])
@@ -196,30 +201,21 @@ func TestNetns_M2Soak(t *testing.T) {
 	}
 	// A reader can report failure truthfully; only a complete known baseline starts
 	// the clock. The API, not test-side injected observations, supplies the evidence.
+	expectedPeers := func(n int) []string {
+		var peers []string
+		for i := range cfgs {
+			if i != n {
+				peers = append(peers, cfgs[i].Node.Name)
+			}
+		}
+		return peers
+	}
 	ready := func(n int) error {
 		v, e := read(n)
 		if e != nil {
 			return e
 		}
-		if v.Error != "" || v.Storage.Validity != "observed" || v.RegisteredNodes != size || v.WGReports == 0 || v.WGPeers != size || v.Delivery.WireGuardDelivery.Delivered == 0 || v.Sources["agent-direct"] == 0 || v.Sources["monitor-overlay"] == 0 || v.UplinkSamples == 0 || v.LatestUplinkStage != "none" {
-			return fmt.Errorf("producer not ready: error=%q storage=%s nodes=%d WG_reports=%d WG_peers=%d WG_delivered=%d sources=%v uplinks=%d stage=%s", v.Error, v.Storage.Validity, v.RegisteredNodes, v.WGReports, v.WGPeers, v.Delivery.WireGuardDelivery.Delivered, v.Sources, v.UplinkSamples, v.LatestUplinkStage)
-		}
-		expected := map[string]bool{}
-		for i := range cfgs {
-			if i != n {
-				expected[cfgs[i].Node.Name] = true
-			}
-		}
-		for _, peer := range v.WGPeerNodes {
-			delete(expected, peer)
-		}
-		if len(expected) != 0 {
-			return fmt.Errorf("current WG peer identities missing: %v", expected)
-		}
-		if v.WGObservedAt == nil || time.Since(*v.WGObservedAt) >= 90*time.Second {
-			return fmt.Errorf("WG collection stale")
-		}
-		return nil
+		return checkSoakReady(v, size, expectedPeers(n), time.Time{}, time.Now())
 	}
 	for n := 0; n < size; n++ {
 		node := n
@@ -352,10 +348,32 @@ func TestNetns_M2Soak(t *testing.T) {
 					eventually(t, 30*time.Second, op, func() error { _, e := admin(api.AdminRequest{Operation: op}); return e })
 				}
 			}
-			eventually(t, 150*time.Second, "recovery after "+name, func() error { return ready(0) })
-			if name == "node_remove_rejoin" {
-				eventually(t, 150*time.Second, "rejoined producer", func() error { return ready(size - 1) })
-			}
+			// An old healthy snapshot is not evidence of post-fault recovery.
+			// All nodes share one deadline; do not multiply it by fleet size.
+			recoveredAfter := time.Now().UTC()
+			recoveryCtx, stopRecovery := context.WithTimeout(context.Background(), 150*time.Second)
+			eventually(t, 150*time.Second, "fresh fleet recovery after "+name, func() error {
+				snapshots := make([]soakObservation, 0, size)
+				for n := 0; n < size; n++ {
+					v, e := read(n, recoveryCtx)
+					if e != nil {
+						return e
+					}
+					if e = checkSoakReady(v, size, expectedPeers(n), recoveredAfter, time.Now()); e != nil {
+						return fmt.Errorf("node %d: %w", n, e)
+					}
+					v.Phase = name
+					snapshots = append(snapshots, v)
+				}
+				if e := recoveryCtx.Err(); e != nil {
+					return e
+				}
+				for _, v := range snapshots {
+					emit(v)
+				}
+				return nil
+			})
+			stopRecovery()
 			phases[name]++
 			emit(map[string]any{"kind": "fault_recovered", "phase": name, "at": time.Now().UTC(), "duration_seconds": time.Since(began).Seconds()})
 			mustWrite(t, phasePath, "steady")
@@ -365,9 +383,12 @@ func TestNetns_M2Soak(t *testing.T) {
 		}
 	}
 	for n := 0; n < size; n++ {
-		sample(n, "final", true)
+		if e := checkSoakReady(sample(n, "final", true), size, expectedPeers(n), time.Time{}, time.Now()); e != nil {
+			t.Fatal("final producer readiness", n, e)
+		}
 	}
-	emit(map[string]any{"kind": "workload_end", "at": time.Now().UTC(), "elapsed_seconds": time.Since(start).Seconds()})
+	workloadEnd = time.Now().UTC()
+	emit(map[string]any{"kind": "workload_end", "at": workloadEnd, "elapsed_seconds": workloadEnd.Sub(start).Seconds()})
 	for n := 0; n < size; n++ {
 		monitors[n].terminate(t)
 		agents[n].terminate(t)

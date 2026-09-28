@@ -23,6 +23,7 @@ type soakObservation struct {
 	WGPeerNodes            []string              `json:"wireguard_peer_nodes"`
 	HeartbeatUnknown       int                   `json:"heartbeat_unknown"`
 	RecentEvents           []history.Event       `json:"recent_events"`
+	CompletedAt            time.Time             `json:"observation_completed_at"`
 	At                     time.Time             `json:"at"`
 	Phase                  string                `json:"phase"`
 	Node                   string                `json:"node"`
@@ -34,6 +35,7 @@ type soakObservation struct {
 	ProbeSamples           int                   `json:"probe_samples"`
 	Sources                map[string]int        `json:"probe_sources"`
 	WGReports              int                   `json:"wireguard_reports_in_page"`
+	UplinkObservedAt       *time.Time            `json:"uplink_observed_at"`
 	WGObservedAt           *time.Time            `json:"wireguard_observed_at"`
 	WGPeers                int                   `json:"wireguard_peers"`
 	UplinkSamples          int                   `json:"uplink_samples"`
@@ -152,6 +154,7 @@ func readSoakObservation() error {
 			}
 			if len(u.Snapshots) > 0 && len(u.Snapshots[0].Targets) > 0 {
 				v.LatestUplinkStage = u.Snapshots[0].Targets[0].FailureStage
+				v.UplinkObservedAt = &u.Snapshots[0].At
 			}
 			return nil
 		}); e != nil {
@@ -175,5 +178,30 @@ func readSoakObservation() error {
 	if e := collect(); e != nil {
 		v.Error = e.Error()
 	}
+	v.CompletedAt = time.Now().UTC()
 	return json.NewEncoder(os.Stdout).Encode(v)
+}
+
+// checkSoakReady validates current identities and collection times, rather than
+// treating a recent but pre-fault healthy snapshot as recovery evidence.
+func checkSoakReady(v soakObservation, size int, peers []string, after, now time.Time) error {
+	if v.Error != "" || v.Storage.Validity != "observed" || v.Storage.Stale || v.RegisteredNodes != size || v.HeartbeatUnknown != 0 || v.HeartbeatMaxAgeSeconds > 30 || v.WGReports == 0 || v.WGPeers != size || v.Delivery.WireGuardDelivery.Delivered == 0 || v.Sources["agent-direct"] == 0 || v.Sources["monitor-overlay"] == 0 || v.UplinkSamples == 0 || v.LatestUplinkStage != "none" {
+		return fmt.Errorf("producer not ready: error=%q storage=%s nodes=%d WG_reports=%d WG_peers=%d WG_delivered=%d sources=%v uplinks=%d stage=%s", v.Error, v.Storage.Validity, v.RegisteredNodes, v.WGReports, v.WGPeers, v.Delivery.WireGuardDelivery.Delivered, v.Sources, v.UplinkSamples, v.LatestUplinkStage)
+	}
+	for _, at := range []*time.Time{v.WGObservedAt, v.UplinkObservedAt} {
+		if at == nil || at.Before(after) || at.After(now) || now.Sub(*at) >= 90*time.Second {
+			return fmt.Errorf("producer collection predates recovery or is stale/unknown")
+		}
+	}
+	expected := map[string]bool{}
+	for _, id := range peers {
+		expected[id] = true
+	}
+	for _, id := range v.WGPeerNodes {
+		delete(expected, id)
+	}
+	if len(expected) != 0 {
+		return fmt.Errorf("current WG peer identities missing: %v", expected)
+	}
+	return nil
 }

@@ -25,7 +25,7 @@ LTE/Wi-Fi/Ethernet 전환 제어는 M3 #21/#22/#24다. WG handshake/counter 증�
 
 ```sh
 # 빠른 실행기 검증. 실제 24시간 합격이 아니다.
-VPNCTL_SOAK_DURATION=8m VPNCTL_SOAK_NODES=3 \
+VPNCTL_SOAK_DURATION=12m VPNCTL_SOAK_NODES=3 \
 VPNCTL_SOAK_PHASE_INTERVAL=30s \
 VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-m2-smoke ./scripts/test-m2-soak.sh
 
@@ -56,7 +56,8 @@ sampling/용량 합격 근거가 아니다. 메모리 제한은 성능 보장이
 7. CA prepare/activate/rollback/retire.
 
 각 API 관측은 2초 timeout이고, 정상 구간 heartbeat age는 30초를 넘지 않아야 한다.
-전체 생산자 복구에는 최대 150초를 허용한다. 여기에는 원래 분당 수집 주기를 기다리는
+장애 해제 시각 이후 새 WG/uplink 표본과 현재 peer ID를 모든 노드에서 요구한다.
+전체 노드가 공유하는 복구 예산은 최대 150초다. 노드마다 예산을 추가하지 않는다. 여기에는 원래 분당 수집 주기를 기다리는
 시간이 포함되며 application failover SLO와 같지 않다. 최종 controller 종료 뒤 DB
 무결성을 검사한다. 프로세스·namespace 정리는 기존 sandbox runner를 사용한다.
 
@@ -81,6 +82,14 @@ private 생성 파일은 지정 storage root 아래 새 `mktemp` 디렉터리에
 page limit이 있고 `events_truncated`를 보존한다. delivery counter는 process restart 시
 초기화되므로 phase 전후 별도 세션으로 합산해야 한다. 전체 24시간 timeline/population의
 최종 검토에는 query pagination 및 원본/집계/회수/drop 분석을 함께 붙여야 한다.
+
+## 분석과 병행 압력 검증
+
+[#94 실행 결과 분석·압력 fixture](m2-evidence.md)는 현재 실행의 종료 후 검토와 별도
+혼합 WAL 압력 검증을 자동화한다. CI는 runner 실제 종료 코드를 보존하고 오프라인 분석기로
+trace/verdict/resource/manifest를 대조한다. 독립 mTLS fixture는 승인 ID 원장과 보존 건수,
+압력 중 heartbeat/인증서 갱신 등의 지연을 검증한다. 이 두 결과가 성공해도 기존 baseline에
+장기 압력이 있었다거나 kernel 생산량 전체를 대조했다는 의미는 아니다.
 
 ## 별도로 충족해야 하는 최종 부하 조건
 
