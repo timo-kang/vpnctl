@@ -20,6 +20,8 @@
 
 - WG 저장 기능이 아직 활성화되지 않은 DB의 metric이 0으로 출력되는 계약 불일치를 수정했다. JSON의 enabled=false와 함께 Prometheus도 NaN을 유지한다.
 
+- 실제 60초 profile에서 스케줄링 차이로 두 collection 간격이 59.999초가 되면 WG 제출이 다음 주기까지 생략되어 90초 freshness를 넘는 결함을 발견했다. UTC 분 구간당 1회 sampling으로 바꾸고 동일 구간 중복·clock 역행을 차단했다. 실제 표본 시각은 유지한다. 결정적 회귀 검사는 수정 전 실패를 확인했다.
+
 ## 검증과 남은 범위
 
 저장 health의 10개 schema 조합, snapshot 소유권/race, cancel/DB 누락/회복, compaction

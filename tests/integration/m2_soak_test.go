@@ -202,7 +202,7 @@ func TestNetns_M2Soak(t *testing.T) {
 			return e
 		}
 		if v.Error != "" || v.Storage.Validity != "observed" || v.RegisteredNodes != size || v.WGReports == 0 || v.WGPeers != size || v.Delivery.WireGuardDelivery.Delivered == 0 || v.Sources["agent-direct"] == 0 || v.Sources["monitor-overlay"] == 0 || v.UplinkSamples == 0 || v.LatestUplinkStage != "none" {
-			return fmt.Errorf("producer not ready: %s WG=%d probes=%d uplinks=%d", v.Error, v.WGReports, v.ProbeSamples, v.UplinkSamples)
+			return fmt.Errorf("producer not ready: error=%q storage=%s nodes=%d WG_reports=%d WG_peers=%d WG_delivered=%d sources=%v uplinks=%d stage=%s", v.Error, v.Storage.Validity, v.RegisteredNodes, v.WGReports, v.WGPeers, v.Delivery.WireGuardDelivery.Delivered, v.Sources, v.UplinkSamples, v.LatestUplinkStage)
 		}
 		expected := map[string]bool{}
 		for i := range cfgs {

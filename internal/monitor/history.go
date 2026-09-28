@@ -228,13 +228,18 @@ func (m *Monitor) reportDiscoveryFailure(reason string, wgReason ...string) {
 // reportWireGuard captures both bindings before enqueue, outside probe delivery.
 // Minute sampling bounds central storage; local observations retain loop cadence.
 func (h *HistoryReporter) reportWireGuard(peers []peersource.Peer, iface string, reason ...string) {
+	h.reportWireGuardAt(time.Now().UTC(), peers, iface, reason...)
+}
+
+func (h *HistoryReporter) reportWireGuardAt(now time.Time, peers []peersource.Peer, iface string, reason ...string) {
 	if h == nil || h.wgqueue == nil {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	now := time.Now().UTC()
-	if !h.wgLast.IsZero() && now.Sub(h.wgLast) >= 0 && now.Sub(h.wgLast) < wgstats.ReportInterval {
+	// Bound by UTC minute slots, not elapsed time since a jittered callback.
+	// Keep the real collection timestamp; do not reopen a slot on clock rollback.
+	if !h.wgLast.IsZero() && !now.Truncate(wgstats.ReportInterval).After(h.wgLast.Truncate(wgstats.ReportInterval)) {
 		return
 	}
 	if h.reason != "" || now.Before(h.observed) || now.Sub(h.observed) > historyBindingTTL || h.self.Validate() != nil {

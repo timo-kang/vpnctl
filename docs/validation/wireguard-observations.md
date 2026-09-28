@@ -55,9 +55,15 @@ clock-skewed handshake, or interval over 90 seconds yields null rate/delta.
 A handshake older than the history retention remains a valid timestamp.
 
 Local collection follows `--interval` (default 5 seconds); local freshness uses
-`--quality-stale-after`. Central submissions are sampled at most once per minute,
-and central views become stale at 90 seconds. The central rate describes its
-actual minute-spaced interval, not the local five-second interval. Historical
+`--quality-stale-after`. Central submissions are sampled at most once per UTC minute slot per reporter
+process; retries keep the same ID. This avoids discarding a minute-cadence sample
+just because scheduler jitter made two callbacks 59.999 seconds apart. A clock
+rollback cannot reopen an already sampled slot. This is a calendar-slot limit,
+not a strict 60-second minimum between adjacent transmissions. Central views
+become stale at 90 seconds, and rates use the actual collection interval. Slots
+never rewrite timestamps or fill missing observations. Slow collection or gaps
+can still produce stale/unknown; a configured interval alone does not prove
+freshness. Historical
 views are evaluated at their own collection time. The first row in a queried
 window may lack a predecessor and legitimately have an unknown rate.
 
