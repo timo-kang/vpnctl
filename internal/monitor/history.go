@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -117,9 +116,6 @@ func (h *HistoryReporter) refresh(ctx context.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if err != nil {
-		if h.reason != "catalog_unavailable" {
-			slog.Warn("monitor history mapping unavailable", "error", err)
-		}
 		h.peers = nil
 		h.reason = "catalog_unavailable"
 		return
@@ -161,9 +157,8 @@ func (h *HistoryReporter) bind(peer peersource.Peer) func(time.Time, probeOutcom
 	}
 	if reason != "" {
 		h.dropped++
-		if h.lastDrop != reason {
-			slog.Warn("monitor observation cannot be uploaded", "reason", reason)
-		}
+		// This executes on the probe loop. Report through status/metrics rather
+		// than a synchronous log sink that can block both probes and readers.
 		h.lastDrop = reason
 		metrics.MonitorHistoryMappingDroppedTotal.WithLabelValues(reason).Inc()
 		h.mu.Unlock()

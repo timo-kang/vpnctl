@@ -29,6 +29,11 @@
    기존 계약 검사는 source를 구별하고 실제 monitor 성공·차단 실패·재시작 보존을 별도로
    검사한다. 임시 direct WG peer는 원상 복구한 후 기존 uplink-only 검증을 계속한다.
 
+8. mapping 오류 로그가 probe 루프 및 mapping mutex 안에서 동기 출력되어 로그 sink가
+   막히면 관측도 멈출 수 있었다. 해당 경로는 상태·고정 label 계수로 알리고 동기 로그를
+   제거했다. 출력이 멈춘 logger를 설치해도 binding/실패 cache 무효화/상태 조회가
+   끝나는 회귀 시험을 추가했다.
+
 ## 검증 근거
 
 - 단위 및 실제 UDP: 고정 ID/시각/binding 재시도, 다른 준비된 표본의 진전, 재시작 ID,

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -281,5 +282,37 @@ func TestMonitorHistoryOptInRejectsMissingOrAmbiguousCredentials(t *testing.T) {
 	}
 	if s := (*HistoryReporter)(nil).Status(); s.Enabled {
 		t.Fatal("standalone monitor unexpectedly uploads")
+	}
+}
+
+type stalledHistoryLog struct{ release <-chan struct{} }
+
+func (s stalledHistoryLog) Write(b []byte) (int, error) { <-s.release; return len(b), nil }
+func TestMonitorMappingErrorsCannotBlockOnDiagnosticSink(t *testing.T) {
+	// A full journal pipe must not block cache invalidation, probe binding or
+	// status readers. Keep this test sequential while replacing the global sink.
+	release := make(chan struct{})
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(stalledHistoryLog{release}, nil)))
+	defer slog.SetDefault(old)
+	done := make(chan struct{})
+	h, p := mappedReporter("http://127.0.0.1:1")
+	go func() {
+		defer close(done)
+		p.PublicKey = "unregistered-server"
+		h.bind(p)
+		h.refresh(context.Background())
+		_ = h.Status()
+	}()
+	select {
+	case <-done:
+		close(release)
+	case <-time.After(time.Second):
+		close(release)
+		<-done
+		t.Fatal("diagnostic output blocked mapping/probe path")
+	}
+	if status := h.Status(); status.MappingDropped != 1 || status.ErrorReason != "catalog_unavailable" {
+		t.Fatal("failure signal lost", status)
 	}
 }
