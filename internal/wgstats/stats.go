@@ -200,7 +200,13 @@ func (v View) Text() string {
 		}
 		return fmt.Sprintf("%.1f", *f)
 	}
-	return fmt.Sprintf("WG %s hs=%s RX/TX(bytes)=%s/%s inferred(B/s)=%s/%s reason=%s stale=%t", v.Validity, v.HandshakeState, val(v.RX), val(v.TX), rate(v.RXPerSecond), rate(v.TXPerSecond), v.RateReason, v.Stale)
+	instant := func(at *time.Time) string {
+		if at == nil || at.IsZero() {
+			return "-"
+		}
+		return at.UTC().Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("WG %s hs=%s handshake_at=%s handshake_age(s)=%s collected_at=%s RX/TX(bytes)=%s/%s inferred(B/s)=%s/%s reason=%s stale=%t", v.Validity, v.HandshakeState, instant(v.Handshake), rate(v.HandshakeAgeSeconds), instant(&v.ObservedAt), val(v.RX), val(v.TX), rate(v.RXPerSecond), rate(v.TXPerSecond), v.RateReason, v.Stale)
 }
 
 func (v View) Clone() View {

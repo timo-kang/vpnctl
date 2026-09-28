@@ -3,6 +3,7 @@ package wgstats
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,5 +80,17 @@ func TestCounterBoundaries(t *testing.T) {
 	v = Compare(unknown, nil)
 	if v.RX != nil || v.HandshakeState != "unknown" || unknown.Validate() != nil {
 		t.Fatal(v)
+	}
+}
+
+func TestTextKeepsHandshakeAndCollectionTimes(t *testing.T) {
+	at := time.Date(2026, 9, 28, 7, 0, 0, 0, time.UTC)
+	s := sample(at, 42)
+	v := Compare(s, nil).Fresh(at.Add(time.Second), MaxGap)
+	text := v.Text()
+	for _, want := range []string{"hs=observed", "handshake_at=2026-09-28T06:59:59Z", "handshake_age(s)=2.0", "collected_at=2026-09-28T07:00:00Z", "RX/TX(bytes)=42/42"} {
+		if !strings.Contains(text, want) {
+			t.Fatal(text, want)
+		}
 	}
 }
