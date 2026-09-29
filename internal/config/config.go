@@ -86,6 +86,7 @@ type PKIConfig struct {
 
 // NodeConfig is used by the agent process running on a device.
 type NodeConfig struct {
+	RelayCacheDir     string         `yaml:"relay_cache_dir,omitempty"`
 	UplinkObservation *uplink.Config `yaml:"uplink_observation,omitempty"`
 
 	Name                        string   `yaml:"name"`

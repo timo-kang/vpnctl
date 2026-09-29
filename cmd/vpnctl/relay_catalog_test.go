@@ -3,9 +3,6 @@
 package main
 
 import (
-	"crypto/ecdh"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"vpnctl/internal/api"
+	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relaycatalog"
 )
 
@@ -81,24 +79,45 @@ func checkRelayCLIWorkflow(t *testing.T, run func(...string) string, controllerP
 	if len(view.Spec.Paths) != 2 || view.NodeID != "a" {
 		t.Fatal("CLI returned wrong catalog")
 	}
-	key, e := ecdh.X25519().GenerateKey(rand.Reader)
-	if e != nil {
-		t.Fatal(e)
+	var report relaycache.Report
+	if e = json.Unmarshal([]byte(run("node", "relay", "status", "--config", nodePath)), &report); e != nil || report.Validity != "missing" {
+		t.Fatal("uninitialized cache status", e)
 	}
-	public := base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())
-	args := []string{"node", "relay", "bind", "--config", nodePath, "--controller-id", view.ControllerID, "--generation", strconv.FormatUint(view.Generation, 10), "--path-id", spec.Paths[0].ID, "--public-key", public}
+	for attempt := 0; attempt < 2; attempt++ {
+		if e = json.Unmarshal([]byte(run("node", "relay", "refresh", "--config", nodePath)), &report); e != nil || !report.UsableCache || report.Preparation != "complete" || len(report.Paths) != 2 {
+			t.Fatal("CLI refresh", e)
+		}
+	}
+	if e = json.Unmarshal([]byte(run("node", "relay", "status", "--config", nodePath)), &report); e != nil || !report.UsableCache {
+		t.Fatal("offline status", e)
+	}
+	cfg, err := loadConfig(nodePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := relaycache.Open(filepath.Join(cfg.Node.PKIDir, "relay-cache"), relaycache.Options{NodeID: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, childErr := cliProcess(t, "node", "relay", "refresh", "--config", nodePath).CombinedOutput()
+	owner.Close()
+	if childErr == nil || !strings.Contains(string(out), "relay cache is busy") {
+		t.Fatal("second process did not reject cache ownership")
+	}
+	public := report.Paths[0].PublicKey
+	args := []string{"node", "relay", "bind", "--config", nodePath, "--controller-id", view.ControllerID, "--generation", strconv.FormatUint(view.Generation, 10), "--path-id", report.Paths[0].PathID, "--public-key", public}
 	for attempt := 0; attempt < 2; attempt++ {
 		if e = json.Unmarshal([]byte(run(args...)), &view); e != nil {
 			t.Fatal(e)
 		}
-		if view.Generation != 2 || len(view.Bindings) != 1 || view.Bindings[0].PublicKey != public {
+		if view.Generation != 3 || len(view.Bindings) != 2 || view.Bindings[0].PublicKey != public {
 			t.Fatal("CLI retry changed binding")
 		}
 	}
 	if e = json.Unmarshal([]byte(run("controller", "relay", "status", "--config", controllerPath)), &status); e != nil {
 		t.Fatal(e)
 	}
-	if status.RelayCatalog == nil || status.RelayCatalog.Generation != 2 {
+	if status.RelayCatalog == nil || status.RelayCatalog.Generation != 3 {
 		t.Fatal("CLI status is stale")
 	}
 }

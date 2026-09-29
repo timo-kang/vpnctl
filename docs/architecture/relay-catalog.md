@@ -5,8 +5,8 @@
 분리된 원장이다. LTE 보유 여부를 요구하지 않으며 `underlay_id`는 Wi-Fi/Ethernet 등
 노드가 나중에 실제 장치와 연결할 논리 이름이다. 현재 그 장치의 존재/가용성을 확인하지 않는다.
 
-이 단계에서 실행되는 것은 catalog 발행·조회와 binding 저장이다. node의 영속 cache,
-경로별 비밀키 생성/보관, relay peer 설정, forwarding·return path 적용, 경로 probe,
+catalog 발행·조회와 binding 저장에 더해 [node 영속 cache와 경로 키](node-relay-cache.md)를
+제공한다. relay peer 설정, forwarding·return path 적용, 경로 probe,
 자동 전환/rollback은 아직 구현하지 않았다. `priority`, `cost`, `drain`, `disabled`는
 승인 메타데이터다. 성공한 binding 응답은 실제 uplink 연결 성공을 의미하지 않는다.
 
@@ -31,6 +31,9 @@ vpnctl controller relay apply --config controller.yaml \
   --file relay-catalog.json --controller-id "$CATALOG_CONTROLLER_ID" \
   --generation "$CATALOG_GENERATION" --ttl 1h
 
+vpnctl node relay refresh --config node.yaml
+vpnctl node relay status --config node.yaml
+# 아래 명령은 cache를 갱신하지 않는 저수준 조회·binding이다.
 vpnctl node relay catalog --config node.yaml
 # 공개키의 비밀키는 노드가 소유해야 하며, 기존 node/다른 경로의 키와 달라야 한다.
 vpnctl node relay bind --config node.yaml \
@@ -52,7 +55,7 @@ vpnctl node relay bind --config node.yaml \
 - 응답은 `controller_id`, `generation`, `issued_at`, `expires_at`, `node_id`, `spec`,
   `bindings`이다. `schema_version`은 `spec` 안에 있다. Go client는 schema·시간·소유권·
   key/IP/hash 일관성과 응답 크기를 검사하고, bind 응답에서 요청한 key/path를 확인한다.
-  호출 사이의 세대 역행/동일 세대 내용 변경을 기억하는 영속 cache 검사는 후속 구현이다.
+  호출 사이의 세대 역행/동일 세대 내용 변경은 `node relay refresh`의 영속 cache가 검사한다.
 - plaintext/인증 identity 없음은 401, 다른 노드 또는 폐기된 자격은 403, 없는 catalog/path는
   404, invalid schema/definition은 400이다. stale CAS·만료·용량 부족은 409이며
   `relay_catalog_conflict`, `relay_catalog_expired`, `relay_catalog_capacity`로 구분한다.
@@ -115,7 +118,7 @@ catalog와 binding은 기존 `registry.yaml`의 한 원자적 교체에 포함�
 검사한 뒤 새 목적지에 기록한다. 기존 PKI 백업에는 catalog 원장도 포함된다.
 
 백업 시점 이후 할당/폐기된 key/IP 정보는 그 백업에 없다. 오래된 백업 복원은 최신
-원장과 동등하지 않으며 실제 배포된 peer와 대조해야 한다. 후속 cache의 세대 역행 거절과
+원장과 동등하지 않으며 실제 배포된 peer와 대조해야 한다. node cache의 세대 역행 거절과
 명시적 재승인 절차 없이 이전 snapshot을 최신 승인으로 자동 취급해서는 안 된다.
 
 관리 변경은 기존 admin audit에 actor/operation/result를 남기고 신규 binding은
