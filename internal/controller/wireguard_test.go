@@ -220,7 +220,14 @@ func TestWireGuardRealReporterResponseLossKeepsLocalCollection(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); mon.Run(ctx) }()
 	defer func() { cancel(); <-done }()
-	waitPKI(t, 5*time.Second, func() bool { return uploader.Status().WireGuardDelivery.Delivered >= 1 })
+	waitPKI(t, 5*time.Second, func() bool {
+		status := uploader.Status().WireGuardDelivery
+		// A new minute's report can overtake the first report's delayed retry.
+		return status.Delivered >= 1 && status.Pending == 0
+	})
+	if status := uploader.Status().WireGuardDelivery; status.Dropped != 0 {
+		t.Fatal("wireguard delivery dropped a report", status)
+	}
 	// Crossing a UTC minute permits another legitimate report. Assert that
 	// the committed first report is retried with its identity and stored once.
 	q, e := c.FleetWireGuard(ctx, "robot", "1h", 10)
@@ -244,6 +251,7 @@ func TestWireGuardRealReporterResponseLossKeepsLocalCollection(t *testing.T) {
 	if calls != 2 || firstObserved.IsZero() {
 		t.Fatal("lost-response retry changed identity/population", calls)
 	}
+	t.Logf("persisted reports=%d, first report attempts=%d", len(q.Snapshots), calls)
 	if snap := mon.Latest(); snap.Stale || snap.Time.Before(firstObserved.Add(500*time.Millisecond)) {
 		t.Fatal("delivery stopped local collection", snap)
 	}
