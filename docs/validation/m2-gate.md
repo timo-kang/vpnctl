@@ -29,6 +29,11 @@ VPNCTL_SOAK_DURATION=12m VPNCTL_SOAK_NODES=3 \
 VPNCTL_SOAK_PHASE_INTERVAL=30s \
 VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-m2-smoke ./scripts/test-m2-soak.sh
 
+# 장기 cadence/인증서 조건을 먼저 짧게 확인한다. 실제 24h 통과가 아니다.
+VPNCTL_SOAK_PROFILE=production VPNCTL_SOAK_DURATION=20m \
+VPNCTL_SOAK_NODES=3 VPNCTL_SOAK_PHASE_INTERVAL=30s \
+VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-m2-production ./scripts/test-m2-soak.sh
+
 # 기본 장기 profile. 경로는 원하는 실제 저장장치의 기존 디렉터리를 지정한다.
 VPNCTL_SOAK_DURATION=24h VPNCTL_SOAK_NODES=8 \
 VPNCTL_SOAK_PHASE_INTERVAL=1h \
@@ -38,7 +43,9 @@ VPNCTL_ARTIFACT_DIR=/path/to/public-results ./scripts/test-m2-soak.sh
 
 노드 수는 3..32, duration은 1m..168h, phase 간격은 20초 이상이다. 모든 phase를
 끝내지 못하면 실패한다. 기본 CPU 2개, memory/swap 합계 2GiB를 Docker로 제한한다.
-24시간 이상은 direct/monitor/WG가 60초 cadence, 짧은 smoke의 direct/monitor는 2초,
+`VPNCTL_SOAK_PROFILE`은 auto(기본), smoke, production이다. production은 짧은 실행에도
+선택 가능하며, 24시간 이상에서 smoke는 거절한다. profile과 CA 대기 예산은 결과에 기록한다.
+production은 direct/monitor/WG가 60초 cadence, 짧은 smoke의 direct/monitor는 2초,
 uplink는 최소 30초, WG 중앙 제출은 항상 분당 상한이다. 짧은 profile은 생산 환경의
 sampling/용량 합격 근거가 아니다. 메모리 제한은 성능 보장이 아니며 OOM은 실패다.
 
@@ -57,6 +64,8 @@ sampling/용량 합격 근거가 아니다. 메모리 제한은 성능 보장이
 
 각 API 관측은 2초 timeout이고, 정상 구간 heartbeat age는 30초를 넘지 않아야 한다.
 장애 해제 시각 이후 새 WG/uplink 표본과 현재 peer ID를 모든 노드에서 요구한다.
+CA 작업별 대기는 smoke 30초, production 120초다. production의 정상 credential
+동기화 idle 주기 최대 60초와 TLS·저장·ACK 여유를 포함한다. ACK 없이 CA 전환을 허용하지 않는다.
 전체 노드가 공유하는 복구 예산은 최대 150초다. 노드마다 예산을 추가하지 않는다. 여기에는 원래 분당 수집 주기를 기다리는
 시간이 포함되며 application failover SLO와 같지 않다. 최종 controller 종료 뒤 DB
 무결성을 검사한다. 프로세스·namespace 정리는 기존 sandbox runner를 사용한다.

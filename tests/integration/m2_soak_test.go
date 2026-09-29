@@ -43,6 +43,10 @@ func TestNetns_M2Soak(t *testing.T) {
 	if phaseEvery > duration/7 {
 		t.Fatal("duration cannot cover all seven phases at this interval")
 	}
+	profile, e := resolveSoakProfile(duration, os.Getenv("VPNCTL_SOAK_PROFILE"))
+	if e != nil {
+		t.Fatal(e)
+	}
 	requireNetwork(t)
 	bin := integrationBinary(t)
 	worker, e := os.Executable()
@@ -89,12 +93,7 @@ func TestNetns_M2Soak(t *testing.T) {
 			exposeSoakArtifact(t, verdictPath)
 		}
 	}()
-	cadence := 60
-	leaf, renew := "1h", "40m"
-	if duration < 24*time.Hour {
-		cadence = 2
-		leaf, renew = "60s", "40s"
-	}
+	cadence, leaf, renew := profile.cadence, profile.leaf, profile.renew
 	private, public := wgKeyPair(t)
 	ctrlPath, ctrlDir := filepath.Join(dir, "controller.yaml"), filepath.Join(dir, "controller")
 	c := config.Config{Controller: &config.ControllerConfig{Listen: "0.0.0.0:8443", DataDir: ctrlDir, VPNCIDR: "10.77.0.0/24", WGApply: true, WGInterface: "wg0", WGPort: 51820, MTU: 1280, WGAddress: "10.77.0.1/24", WGPrivateKey: private, ServerPublicKey: public, ServerEndpoint: "192.0.2.1:51820", ServerAllowedIPs: []string{"10.77.0.0/24", relayTargetIP + "/32"}, ServerKeepaliveSec: 1, PKI: &config.PKIConfig{CAExpiry: "240h", ServerExpiry: leaf, ClientExpiry: leaf, ServerRenewBefore: renew, ClientRenewBefore: renew, CheckInterval: "1s", CAOverlap: "2s", ServerSANs: []string{"192.0.2.1", "10.77.0.1"}}}}
@@ -227,7 +226,7 @@ func TestNetns_M2Soak(t *testing.T) {
 	exposeSoakArtifact(t, filepath.Join(results, "resources.jsonl"))
 	defer stopResources()
 	start = time.Now()
-	emit(map[string]any{"kind": "start", "at": start, "nodes": size, "cadence_seconds": cadence, "duration_seconds": duration.Seconds()})
+	emit(map[string]any{"kind": "start", "at": start, "nodes": size, "cadence_seconds": cadence, "duration_seconds": duration.Seconds(), "profile": profile.name, "ca_step_timeout_seconds": profile.caWait.Seconds()})
 	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()
 	nextPhase := start.Add(phaseEvery)
@@ -345,7 +344,7 @@ func TestNetns_M2Soak(t *testing.T) {
 				}
 				operations = append(operations, "ca.retire")
 				for _, op := range operations {
-					eventually(t, 30*time.Second, op, func() error { _, e := admin(api.AdminRequest{Operation: op}); return e })
+					eventually(t, profile.caWait, op, func() error { _, e := admin(api.AdminRequest{Operation: op}); return e })
 				}
 			}
 			// An old healthy snapshot is not evidence of post-fault recovery.
@@ -422,5 +421,33 @@ func exposeSoakArtifact(t *testing.T, path string) {
 	}
 	if e := os.Chown(path, uid, gid); e != nil {
 		t.Fatal(e)
+	}
+}
+
+type soakProfile struct {
+	name, leaf, renew string
+	cadence           int
+	caWait            time.Duration
+}
+
+func resolveSoakProfile(duration time.Duration, requested string) (soakProfile, error) {
+	if requested == "" || requested == "auto" {
+		requested = "smoke"
+		if duration >= 24*time.Hour {
+			requested = "production"
+		}
+	}
+	switch requested {
+	case "smoke":
+		if duration >= 24*time.Hour {
+			return soakProfile{}, fmt.Errorf("24h qualification requires production cadence/PKI")
+		}
+		return soakProfile{"smoke", "60s", "40s", 2, 30 * time.Second}, nil
+	case "production":
+		// One healthy idle sync interval plus a minute for TLS/file/ACK work.
+		// This changes only CA test admission waiting, not API/route deadlines.
+		return soakProfile{"production", "1h", "40m", 60, api.CredentialSyncMaxDelay + time.Minute}, nil
+	default:
+		return soakProfile{}, fmt.Errorf("VPNCTL_SOAK_PROFILE must be auto, smoke or production")
 	}
 }

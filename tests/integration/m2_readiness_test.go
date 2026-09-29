@@ -55,3 +55,27 @@ func TestSoakReadinessRequiresPostFaultCurrentProducers(t *testing.T) {
 		t.Fatal("stale initial/final snapshot accepted")
 	}
 }
+
+func TestSoakReadinessProfileMatchesCredentialCadence(t *testing.T) {
+	for _, duration := range []time.Duration{12 * time.Minute, 24 * time.Hour} {
+		p, e := resolveSoakProfile(duration, "auto")
+		if e != nil {
+			t.Fatal(e)
+		}
+		if duration >= 24*time.Hour && (p.cadence != 60 || p.caWait != 2*time.Minute || p.leaf != "1h") {
+			t.Fatal(p)
+		}
+		if duration < 24*time.Hour && (p.cadence != 2 || p.caWait != 30*time.Second) {
+			t.Fatal(p)
+		}
+	}
+	p, e := resolveSoakProfile(20*time.Minute, "production")
+	if e != nil || p.leaf != "1h" || p.cadence != 60 || p.caWait != 2*time.Minute {
+		t.Fatal(p, e)
+	}
+	for _, s := range []string{"typo", "smoke"} {
+		if _, e := resolveSoakProfile(24*time.Hour, s); e == nil {
+			t.Fatal("invalid long profile accepted", s)
+		}
+	}
+}
