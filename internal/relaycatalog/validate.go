@@ -39,7 +39,7 @@ func validText(s string, max int) bool {
 	}
 	return true
 }
-func ValidatePublicKey(s string) error {
+func validatePublicKey(s string) error {
 	b, e := base64.StdEncoding.DecodeString(s)
 	if e != nil || len(b) != 32 || base64.StdEncoding.EncodeToString(b) != s || PublicKeyID(s) != s {
 		return invalid("public key must be canonical base64 X25519")
