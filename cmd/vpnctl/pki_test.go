@@ -16,6 +16,7 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/pki"
+	"vpnctl/internal/store"
 )
 
 func TestPKICLITrustedBootstrapBackupAndRestore(t *testing.T) {
@@ -98,6 +99,7 @@ func TestPKICLITrustedBootstrapBackupAndRestore(t *testing.T) {
 	if err := client.SyncCredentials(context.Background(), nodeDir, "a"); err != nil {
 		t.Fatal(err)
 	}
+	checkRelayCLIWorkflow(t, run, controllerPath, nodePath)
 	run("controller", "pki", "ca-prepare", "--config", controllerPath)
 	if out, err := cliProcess(t, "controller", "pki", "ca-activate", "--config", controllerPath).CombinedOutput(); err == nil || !strings.Contains(string(out), "acknowledged") {
 		t.Fatalf("missing meaningful CA gate error: %v %s", err, out)
@@ -134,6 +136,13 @@ func TestPKICLITrustedBootstrapBackupAndRestore(t *testing.T) {
 	restoredDir := filepath.Join(dir, "restored")
 	restoredConfig := filepath.Join(dir, "restored.yaml")
 	run("controller", "pki", "restore", "--file", backupPath, "--data-dir", restoredDir, "--config-out", restoredConfig)
+	restoredRegistry, err := store.LoadRegistry(filepath.Join(restoredDir, "registry.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredRegistry.RelayCatalog == nil || restoredRegistry.RelayCatalog.Generation != 2 || len(restoredRegistry.RelayCatalog.Bindings) != 1 {
+		t.Fatal("CLI CA lifecycle/backup lost relay catalog")
+	}
 	stateData, err := os.ReadFile(filepath.Join(restoredDir, "pki", "authority.json"))
 	if err != nil {
 		t.Fatal(err)

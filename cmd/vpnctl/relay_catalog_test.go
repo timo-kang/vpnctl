@@ -3,10 +3,16 @@
 package main
 
 import (
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"vpnctl/internal/api"
 	"vpnctl/internal/relaycatalog"
 )
 
@@ -39,5 +45,60 @@ func TestRelayCatalogExampleContract(t *testing.T) {
 	}
 	if e = relaycatalog.ValidateSpec(spec, relaycatalog.Environment{VPNCIDR: "10.7.0.0/24", Nodes: map[string]bool{"robot-a": true}}); e != nil {
 		t.Fatal("documented example", e)
+	}
+}
+
+// Called from the real CLI PKI lifecycle fixture: the catalog survives the same
+// CA prepare/activate/rollback and backup/restore sequence as node identity.
+func checkRelayCLIWorkflow(t *testing.T, run func(...string) string, controllerPath, nodePath string) {
+	t.Helper()
+	spec, e := readRelaySpec("../../configs/relay-catalog.example.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	for i := range spec.Paths {
+		spec.Paths[i].NodeID = "a"
+	}
+	raw, e := json.Marshal(spec)
+	if e != nil {
+		t.Fatal(e)
+	}
+	path := filepath.Join(t.TempDir(), "relay.json")
+	if e = os.WriteFile(path, raw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	var status api.AdminResponse
+	if e = json.Unmarshal([]byte(run("controller", "relay", "apply", "--config", controllerPath, "--file", path)), &status); e != nil {
+		t.Fatal(e)
+	}
+	if status.RelayCatalog == nil || status.RelayCatalog.Generation != 1 {
+		t.Fatal("CLI did not publish catalog")
+	}
+	var view relaycatalog.View
+	if e = json.Unmarshal([]byte(run("node", "relay", "catalog", "--config", nodePath)), &view); e != nil {
+		t.Fatal(e)
+	}
+	if len(view.Spec.Paths) != 2 || view.NodeID != "a" {
+		t.Fatal("CLI returned wrong catalog")
+	}
+	key, e := ecdh.X25519().GenerateKey(rand.Reader)
+	if e != nil {
+		t.Fatal(e)
+	}
+	public := base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())
+	args := []string{"node", "relay", "bind", "--config", nodePath, "--controller-id", view.ControllerID, "--generation", strconv.FormatUint(view.Generation, 10), "--path-id", spec.Paths[0].ID, "--public-key", public}
+	for attempt := 0; attempt < 2; attempt++ {
+		if e = json.Unmarshal([]byte(run(args...)), &view); e != nil {
+			t.Fatal(e)
+		}
+		if view.Generation != 2 || len(view.Bindings) != 1 || view.Bindings[0].PublicKey != public {
+			t.Fatal("CLI retry changed binding")
+		}
+	}
+	if e = json.Unmarshal([]byte(run("controller", "relay", "status", "--config", controllerPath)), &status); e != nil {
+		t.Fatal(e)
+	}
+	if status.RelayCatalog == nil || status.RelayCatalog.Generation != 2 {
+		t.Fatal("CLI status is stale")
 	}
 }
