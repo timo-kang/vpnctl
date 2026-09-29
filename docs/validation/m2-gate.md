@@ -85,7 +85,8 @@ private 생성 파일은 지정 storage root 아래 새 `mktemp` 디렉터리에
   certificate fingerprint/만료, 중앙 저장 snapshot. 개인키·토큰·설정 파일은 포함하지 않는다.
 - `recovery-failure.json`: 복구 실패 시 마지막으로 확인한 노드별 producer 시각, 기대·관측 peer,
   공통 deadline과 실패 이유. 관측 이력 대신 노드당 마지막 진단 한 건만 보존하며 자동 합격
-  근거로 사용하지 않는다. 일부 노드는 앞선 실패로 아직 읽지 못했을 수 있다.
+  근거로 사용하지 않는다. 마지막 요청이 실패하면 직전에 성공한 조회의 상태와 시각을 보존한다.
+  일부 노드는 앞선 실패로 아직 읽지 못했을 수 있다.
 - `resources.jsonl`: container/cgroup CPU·메모리·I/O와 사용 불가 신호. 해당 리소스만으로
   실제 deployment disk의 p99나 모든 host 부하를 설명하지 않는다.
 - `verdict.json`: 요청/실제 경과시간, 완료 여부, 실행한 phase 건수, `wall_clock_24h`와

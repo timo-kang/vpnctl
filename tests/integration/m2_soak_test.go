@@ -380,6 +380,8 @@ func TestNetns_M2Soak(t *testing.T) {
 				for n := 0; n < size; n++ {
 					v, e := read(n, recoveryCtx)
 					checkedAt := time.Now().UTC()
+					diagnostic := lastRecovery[n]
+					diagnostic.recordRead(v, e, checkedAt)
 					if e == nil {
 						e = checkSoakReady(v, size, expectedPeers(n), recoveredAfter, checkedAt)
 					}
@@ -391,7 +393,10 @@ func TestNetns_M2Soak(t *testing.T) {
 						}
 					}
 					deadline, _ := recoveryCtx.Deadline()
-					lastRecovery[n] = soakRecoveryDiagnostic{Phase: name, Node: cfgs[n].Node.Name, CheckedAt: checkedAt, RequiredAfter: recoveredAfter, Deadline: deadline, Error: reason, ObservationAt: v.At, WireGuardObservedAt: v.WGObservedAt, UplinkObservedAt: v.UplinkObservedAt, RegisteredNodes: v.RegisteredNodes, WireGuardPeers: v.WGPeers, ExpectedPeers: expectedPeers(n), ObservedPeers: v.WGPeerNodes, StorageValidity: v.Storage.Validity, StorageStale: v.Storage.Stale}
+					diagnostic.Phase, diagnostic.Node = name, cfgs[n].Node.Name
+					diagnostic.RequiredAfter, diagnostic.Deadline = recoveredAfter, deadline
+					diagnostic.Error, diagnostic.ExpectedPeers = reason, expectedPeers(n)
+					lastRecovery[n] = diagnostic
 					if e != nil {
 						return fmt.Errorf("node %d: %w", n, e)
 					}
