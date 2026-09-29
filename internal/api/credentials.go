@@ -182,6 +182,10 @@ func (c *Client) SyncCredentials(ctx context.Context, dir, nodeID string) (resul
 	return c.AcknowledgeTrust(ctx, current.Generation)
 }
 
+// CredentialSyncMaxDelay is the maximum idle delay after a healthy trust sync.
+// Request time and retry failures are additional; this is not a rotation SLO.
+const CredentialSyncMaxDelay = time.Minute
+
 // MaintainCredentials retries with a bounded exponential delay. A successful
 // sync uses a fraction of the remaining lifetime (at most one minute), leaving
 // repeated opportunities before expiry even with short test/field lifetimes.
@@ -201,10 +205,10 @@ func (c *Client) MaintainCredentials(ctx context.Context, dir, nodeID string) {
 			failures++
 			metrics.PKIEventsTotal.WithLabelValues("node", "sync", "failed").Inc()
 			slog.Warn("client PKI sync failed", "node_id", nodeID, "attempt", failures, "err", err)
-			delay = min(time.Minute, time.Second*time.Duration(1<<min(failures-1, 6)))
+			delay = min(CredentialSyncMaxDelay, time.Second*time.Duration(1<<min(failures-1, 6)))
 		} else {
 			failures = 0
-			delay = time.Minute
+			delay = CredentialSyncMaxDelay
 		}
 		if creds, loadErr := pki.LoadCredentials(dir); loadErr == nil {
 			if cert, parseErr := pki.ParseCertificate(creds.ClientCert); parseErr == nil {
