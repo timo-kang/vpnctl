@@ -21,6 +21,7 @@ import (
 	"vpnctl/internal/api"
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/pki"
+	"vpnctl/internal/relaycatalog"
 
 	"vpnctl/internal/atomicfile"
 )
@@ -149,7 +150,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	// Validate operation and retry keys before consuming bounded mutation capacity.
 	switch req.Operation {
-	case "node.remove", "pki.status", "pki.revoke", "ca.prepare", "ca.activate", "ca.retire", "ca.rollback", "pki.backup", "token.create", "token.list", "token.revoke", "token.result":
+	case "relay.catalog.status", "relay.catalog.apply", "node.remove", "pki.status", "pki.revoke", "ca.prepare", "ca.activate", "ca.retire", "ca.rollback", "pki.backup", "token.create", "token.list", "token.revoke", "token.result":
 	default:
 		writeJSONError(w, 400, "unknown admin operation")
 		return
@@ -161,7 +162,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Operation != "pki.status" && req.Operation != "token.list" && req.Operation != "token.result" {
+	if req.Operation != "relay.catalog.status" && req.Operation != "pki.status" && req.Operation != "token.list" && req.Operation != "token.result" {
 		release, admissionErr := s.adminAdmission.acquire(r.Context())
 		if admissionErr != nil {
 			if errors.Is(admissionErr, errAdminOverloaded) {
@@ -180,6 +181,13 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	response := api.AdminResponse{RequestID: req.RequestID}
 	var err error
 	switch req.Operation {
+	case "relay.catalog.status", "relay.catalog.apply":
+		target = "relay-catalog"
+		response.RelayCatalog, err = s.adminRelayCatalog(req)
+		if err != nil {
+			writeRelayError(w, err)
+			return
+		}
 	case "node.remove":
 		operation = req.Operation
 		if _, validationErr := pki.NodeIdentityURI(req.NodeID); validationErr != nil {
@@ -298,6 +306,11 @@ func (s *Server) removeNode(nodeID string) (resultErr error) {
 		return errNodeNotFound
 	}
 	next.RemovedNodes[nodeID] = time.Now().UTC()
+	var retireErr error
+	next.RelayCatalog, retireErr = relaycatalog.RemoveNode(next.RelayCatalog, nodeID, time.Now())
+	if retireErr != nil {
+		return retireErr
+	}
 	commitErr := s.commitRegistryLocked(next, s.cfg.WGApply)
 	if err := commitErr; err != nil && !atomicfile.Replaced(err) {
 		return err

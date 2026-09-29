@@ -14,10 +14,12 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"vpnctl/internal/atomicfile"
+	"vpnctl/internal/relaycatalog"
 )
 
 // Registry persists registered nodes and their metadata.
 type Registry struct {
+	RelayCatalog *relaycatalog.State  `yaml:"relay_catalog,omitempty"`
 	Version      int                  `yaml:"version"`
 	UpdatedAt    time.Time            `yaml:"updated_at"`
 	Nodes        []NodeInfo           `yaml:"nodes"`
@@ -73,8 +75,11 @@ func LoadRegistry(path string) (*Registry, error) {
 	if err := dec.Decode(&extra); err != io.EOF {
 		return nil, fmt.Errorf("invalid registry: expected a single document")
 	}
-	if reg.Version < 0 || reg.Version > 1 {
+	if reg.Version < 0 || reg.Version > 2 {
 		return nil, fmt.Errorf("unsupported registry version %d", reg.Version)
+	}
+	if (reg.Version == 2) != (reg.RelayCatalog != nil) {
+		return nil, fmt.Errorf("registry version/catalog mismatch")
 	}
 	return &reg, nil
 }
@@ -84,7 +89,14 @@ func SaveRegistry(path string, reg *Registry) error {
 	if reg == nil {
 		return nil
 	}
-	reg.Version = 1
+	if reg.RelayCatalog != nil {
+		reg.Version = 2
+	} else {
+		if reg.Version >= 2 {
+			return fmt.Errorf("cannot drop relay catalog from version 2 registry")
+		}
+		reg.Version = 1
+	}
 	reg.UpdatedAt = time.Now().UTC()
 	data, err := yaml.Marshal(reg)
 	if err != nil {
@@ -117,6 +129,9 @@ func removeNode(
 		return false, err
 	}
 
+	if reg.RelayCatalog != nil {
+		return false, fmt.Errorf("catalog-enabled node removal requires controller admin IPC")
+	}
 	filtered := make([]NodeInfo, 0, len(reg.Nodes))
 	found := false
 	for _, node := range reg.Nodes {

@@ -109,6 +109,20 @@ jobs:
       - run: go build ./cmd/vpnctl
       - run: go build ./cmd/vpnctl-lab-report
 
+  relay-catalog:
+    name: M3 relay catalog variable scale and replay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: 1/3/8/32 authenticated nodes, 4 relays, 8 candidates per node
+        env:
+          VPNCTL_RELAY_CATALOG_SCALE: '1'
+        run: go test -race ./internal/controller -run '^TestRelayCatalogVariableScale$' -count=1 -timeout=5m -v
+
   history-churn:
     name: History path churn race and fault recovery
     runs-on: ubuntu-24.04

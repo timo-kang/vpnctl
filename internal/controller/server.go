@@ -124,6 +124,9 @@ func NewServer(cfg config.ControllerConfig) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("registry IPAM validation: %w", err)
 	}
+	if err := validateRelayRegistry(reg, cfg); err != nil {
+		return nil, err
+	}
 	changed = changed || ipamChanged
 	if changed {
 		if err := store.SaveRegistry(regPath, reg); err != nil {
@@ -320,6 +323,8 @@ func (s *Server) httpHandler() http.Handler {
 	mux.HandleFunc("/nat-probe", s.requireClientCert(s.handleNATProbe))
 	mux.HandleFunc("/direct-result", s.requireClientCert(s.handleDirectResult))
 	mux.HandleFunc("/wg-config", s.requireClientCert(s.handleWGConfig))
+	mux.HandleFunc("/relay-catalog", s.requireClientCert(s.handleRelayCatalog))
+	mux.HandleFunc("/relay-bindings", s.requireClientCert(s.handleRelayBinding))
 	mux.HandleFunc("/fleet/status", s.requireClientCert(s.handleFleetStatus))
 	mux.HandleFunc("/fleet/history", s.handleAuthorizedFleetHistory)
 	mux.HandleFunc("/uplink-observations", s.requireClientCert(s.handleUplinkObservation))
@@ -367,7 +372,7 @@ type authenticatedNode struct {
 func (s *Server) requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mayWritePKI := s.requestMayWritePKI(r)
-		mayWriteRegistry := r.Method == http.MethodPost && (r.URL.Path == "/register" || r.URL.Path == "/nat-probe")
+		mayWriteRegistry := r.Method == http.MethodPost && (r.URL.Path == "/register" || r.URL.Path == "/nat-probe" || r.URL.Path == "/relay-bindings")
 		if mayWritePKI || r.Method == http.MethodPost {
 			// Reject already invalid identities before they can queue behind writers.
 			// This preflight grants no authority; recheck after both admissions below.
@@ -786,6 +791,9 @@ func (s *Server) registerWithIssuance(input nodeRegistration, autoApply bool, is
 	if _, removed := s.reg.RemovedNodes[input.Name]; removed {
 		return nodeRegistrationResult{}, errNodeRemoved
 	}
+	if s.reg.RelayCatalog.KeyReserved(input.PubKey) {
+		return nodeRegistrationResult{}, fmt.Errorf("%w: public key is reserved by relay catalog", errRegistrationValidation)
+	}
 	next := cloneRegistry(s.reg)
 	existingIndex := -1
 	for i := range next.Nodes {
@@ -942,6 +950,7 @@ func cloneRegistry(reg *store.Registry) *store.Registry {
 		return &store.Registry{}
 	}
 	clone := *reg
+	// RelayCatalog is an immutable published value; its mutators return deep copies.
 	clone.Nodes = append([]store.NodeInfo(nil), reg.Nodes...)
 	clone.RemovedNodes = make(map[string]time.Time, len(reg.RemovedNodes))
 	for id, removedAt := range reg.RemovedNodes {
