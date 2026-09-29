@@ -47,6 +47,10 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "m3-echo":
+		err = serveM3Echo()
+	case "m3-probe":
+		err = runM3Probe()
 	case "soak-read":
 		err = readSoakObservation()
 	case "peer-probe":
