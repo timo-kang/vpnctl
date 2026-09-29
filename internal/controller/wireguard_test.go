@@ -167,9 +167,10 @@ func TestWireGuardCertificateRenewalPreservesCounterBaseline(t *testing.T) {
 
 type wireGuardResponseLoss struct {
 	*history.Store
-	mu    sync.Mutex
-	calls int
-	first string
+	mu         sync.Mutex
+	calls      int
+	first      string
+	firstCalls int
 }
 
 func (s *wireGuardResponseLoss) IngestWireGuard(ctx context.Context, r wgstats.Report, now time.Time) error {
@@ -181,10 +182,11 @@ func (s *wireGuardResponseLoss) IngestWireGuard(ctx context.Context, r wgstats.R
 	s.calls++
 	if s.calls == 1 {
 		s.first = r.ID
+		s.firstCalls = 1
 		return errors.New("response lost after commit")
 	}
-	if s.first != r.ID {
-		return errors.New("retry changed identity")
+	if r.ID == s.first {
+		s.firstCalls++
 	}
 	return nil
 }
@@ -218,18 +220,39 @@ func TestWireGuardRealReporterResponseLossKeepsLocalCollection(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); mon.Run(ctx) }()
 	defer func() { cancel(); <-done }()
-	waitPKI(t, 5*time.Second, func() bool { return uploader.Status().WireGuardDelivery.Delivered == 1 })
+	waitPKI(t, 5*time.Second, func() bool {
+		status := uploader.Status().WireGuardDelivery
+		// A new minute's report can overtake the first report's delayed retry.
+		return status.Delivered >= 1 && status.Pending == 0
+	})
+	if status := uploader.Status().WireGuardDelivery; status.Dropped != 0 {
+		t.Fatal("wireguard delivery dropped a report", status)
+	}
+	// Crossing a UTC minute permits another legitimate report. Assert that
+	// the committed first report is retried with its identity and stored once.
 	q, e := c.FleetWireGuard(ctx, "robot", "1h", 10)
-	if e != nil || q.Storage.Rows != 1 || len(q.Snapshots) != 1 {
+	if e != nil || q.Storage.Rows != len(q.Snapshots) || len(q.Snapshots) < 1 {
 		t.Fatal(q, e)
 	}
 	fault.mu.Lock()
-	calls, first := fault.calls, fault.first
+	calls, first := fault.firstCalls, fault.first
 	fault.mu.Unlock()
-	if calls != 2 || q.Snapshots[0].ID != first {
-		t.Fatal("response-loss duplication", calls, q)
+	var firstObserved time.Time
+	seen := map[string]bool{}
+	for _, snapshot := range q.Snapshots {
+		if seen[snapshot.ID] {
+			t.Fatal("duplicate persisted report")
+		}
+		seen[snapshot.ID] = true
+		if snapshot.ID == first {
+			firstObserved = snapshot.ObservedAt
+		}
 	}
-	if snap := mon.Latest(); snap.Stale || snap.Time.Before(q.Snapshots[0].ObservedAt.Add(500*time.Millisecond)) {
+	if calls != 2 || firstObserved.IsZero() {
+		t.Fatal("lost-response retry changed identity/population", calls)
+	}
+	t.Logf("persisted reports=%d, first report attempts=%d", len(q.Snapshots), calls)
+	if snap := mon.Latest(); snap.Stale || snap.Time.Before(firstObserved.Add(500*time.Millisecond)) {
 		t.Fatal("delivery stopped local collection", snap)
 	}
 	if _, e = c.Register(ctx, api.RegisterRequest{Name: "robot", PubKey: wireGuardTestKey(1), DirectMode: "off"}); e != nil {

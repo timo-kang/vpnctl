@@ -23,7 +23,17 @@ import (
 
 // Unlike the short lifecycle suite, all node and monitor producers remain alive
 // across the complete measured interval, except the explicitly injected faults.
-func TestNetns_M2Soak(t *testing.T) {
+func TestNetns_M2Soak(t *testing.T) { runM2Soak(t, false) }
+
+// Focused production-cadence reproduction. It cannot qualify the full M2 gate.
+func TestNetns_M2NodeRejoin(t *testing.T) {
+	if os.Getenv("VPNCTL_SOAK_REJOIN_ONLY") != "1" {
+		t.Skip("explicit focused rejoin opt-in required")
+	}
+	runM2Soak(t, true)
+}
+
+func runM2Soak(t *testing.T, rejoinOnly bool) {
 	raw := os.Getenv("VPNCTL_SOAK_DURATION")
 	if raw == "" {
 		t.Skip("explicit duration required for persistent mixed soak")
@@ -31,6 +41,15 @@ func TestNetns_M2Soak(t *testing.T) {
 	duration, e := time.ParseDuration(raw)
 	if e != nil || duration < time.Minute || duration > 7*24*time.Hour {
 		t.Fatal("soak duration must be 1m..168h")
+	}
+	if rejoinOnly && (duration < 6*time.Minute || duration > 20*time.Minute || os.Getenv("VPNCTL_SOAK_PROFILE") != "production") {
+		t.Fatal("focused rejoin requires production profile and 6m..20m duration")
+	}
+	actions := []string{"controller_restart", "underlay_loss", "target_restart", "monitor_restart", "node_remove_rejoin", "ca_rotation", "ca_rollback"}
+	minimumPhases := len(actions)
+	if rejoinOnly {
+		actions = []string{"node_remove_rejoin"}
+		minimumPhases = 2
 	}
 	size, e := strconv.Atoi(os.Getenv("VPNCTL_SOAK_NODES"))
 	if e != nil || size < 3 || size > 32 {
@@ -40,8 +59,8 @@ func TestNetns_M2Soak(t *testing.T) {
 	if e != nil || phaseEvery < 20*time.Second {
 		t.Fatal("phase interval must be >=20s")
 	}
-	if phaseEvery > duration/7 {
-		t.Fatal("duration cannot cover all seven phases at this interval")
+	if phaseEvery > duration/time.Duration(minimumPhases) {
+		t.Fatal("duration cannot cover the required phases at this interval")
 	}
 	profile, e := resolveSoakProfile(duration, os.Getenv("VPNCTL_SOAK_PROFILE"))
 	if e != nil {
@@ -81,10 +100,31 @@ func TestNetns_M2Soak(t *testing.T) {
 	workloadEnd := time.Time{}
 	completed := false
 	phases := map[string]int{}
+	lastRecovery := map[int]soakRecoveryDiagnostic{}
+	defer func() {
+		if !t.Failed() || len(lastRecovery) == 0 {
+			return
+		}
+		raw, e := json.MarshalIndent(lastRecovery, "", "  ")
+		if e != nil {
+			t.Error(e)
+			return
+		}
+		path := filepath.Join(results, "recovery-failure.json")
+		if e = os.WriteFile(path, raw, 0600); e != nil {
+			t.Error(e)
+			return
+		}
+		exposeSoakArtifact(t, path)
+	}()
+
 	// Write an explicit incomplete verdict even on assertion failure. Process
 	// kill/host loss can leave no verdict; consumers must also treat that as incomplete.
 	defer func() {
 		verdict := map[string]any{"schema_version": 1, "started_at": start, "finished_at": time.Now().UTC(), "requested_seconds": duration.Seconds(), "nodes": size, "completed": completed && !t.Failed(), "phases": phases, "m2_gate": "pending_review", "wall_clock_24h": !start.IsZero() && !workloadEnd.IsZero() && workloadEnd.Sub(start) >= 24*time.Hour}
+		if rejoinOnly {
+			verdict["m2_gate"] = "not_qualifying_focused_rejoin"
+		}
 		b, _ := json.MarshalIndent(verdict, "", "  ")
 		verdictPath := filepath.Join(results, "verdict.json")
 		if err := os.WriteFile(verdictPath, b, 0600); err != nil {
@@ -231,7 +271,6 @@ func TestNetns_M2Soak(t *testing.T) {
 	defer tick.Stop()
 	nextPhase := start.Add(phaseEvery)
 	actionIndex, reporter := 0, 0
-	actions := []string{"controller_restart", "underlay_loss", "target_restart", "monitor_restart", "node_remove_rejoin", "ca_rotation", "ca_rollback"}
 	sample := func(n int, label string, requireHealthy bool) soakObservation {
 		t.Helper()
 		v, e := read(n)
@@ -255,7 +294,13 @@ func TestNetns_M2Soak(t *testing.T) {
 		return v
 	}
 	for time.Since(start) < duration {
-		sample(reporter%size, "steady", true)
+		n := reporter % size
+		v := sample(n, "steady", true)
+		// Detect a stopped producer between faults as well. The emitted sample
+		// preserves its last timestamps even if the next fault is hours away.
+		if e := checkSoakReady(v, size, expectedPeers(n), time.Time{}, time.Now()); e != nil {
+			t.Fatalf("steady producer readiness, node %d: %v", n, e)
+		}
 		reporter++
 		if !time.Now().Before(nextPhase) {
 			name := actions[actionIndex%len(actions)]
@@ -354,11 +399,20 @@ func TestNetns_M2Soak(t *testing.T) {
 			eventually(t, 150*time.Second, "fresh fleet recovery after "+name, func() error {
 				snapshots := make([]soakObservation, 0, size)
 				for n := 0; n < size; n++ {
-					v, e := read(n, recoveryCtx)
-					if e != nil {
-						return e
+					v, readErr := read(n, recoveryCtx)
+					checkedAt := time.Now().UTC()
+					e := readErr
+					if e == nil {
+						e = checkSoakReady(v, size, expectedPeers(n), recoveredAfter, checkedAt)
 					}
-					if e = checkSoakReady(v, size, expectedPeers(n), recoveredAfter, time.Now()); e != nil {
+					diagnostic := lastRecovery[n]
+					diagnostic.recordRead(v, readErr, e, checkedAt)
+					deadline, _ := recoveryCtx.Deadline()
+					diagnostic.Phase, diagnostic.Node = name, cfgs[n].Node.Name
+					diagnostic.RequiredAfter, diagnostic.Deadline = recoveredAfter, deadline
+					diagnostic.ExpectedPeers = expectedPeers(n)
+					lastRecovery[n] = diagnostic
+					if e != nil {
 						return fmt.Errorf("node %d: %w", n, e)
 					}
 					v.Phase = name
@@ -373,6 +427,7 @@ func TestNetns_M2Soak(t *testing.T) {
 				return nil
 			})
 			stopRecovery()
+			clear(lastRecovery)
 			phases[name]++
 			emit(map[string]any{"kind": "fault_recovered", "phase": name, "at": time.Now().UTC(), "duration_seconds": time.Since(began).Seconds()})
 			mustWrite(t, phasePath, "steady")
@@ -400,6 +455,9 @@ func TestNetns_M2Soak(t *testing.T) {
 	}
 	if len(phases) != len(actions) {
 		t.Fatalf("incomplete fault coverage: %v; increase duration or reduce phase interval", phases)
+	}
+	if rejoinOnly && phases["node_remove_rejoin"] < 2 {
+		t.Fatal("focused rejoin did not complete two replacements", phases)
 	}
 	completed = true
 }

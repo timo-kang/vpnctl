@@ -63,6 +63,8 @@ sampling/용량 합격 근거가 아니다. 메모리 제한은 성능 보장이
 7. CA prepare/activate/rollback/retire.
 
 각 API 관측은 2초 timeout이고, 정상 구간 heartbeat age는 30초를 넘지 않아야 한다.
+장애 주입 사이의 정상 구간에도 순환 조회하는 노드의 producer freshness·peer 상태를 검사하고
+실패 snapshot을 trace에 보존한다. 다음 장애가 발생할 때까지 수집 중단을 숨기지 않는다.
 장애 해제 시각 이후 새 WG/uplink 표본과 현재 peer ID를 모든 노드에서 요구한다.
 CA 작업별 대기는 smoke 30초, production 120초다. production의 정상 credential
 동기화 idle 주기 최대 60초와 TLS·저장·ACK 여유를 포함한다. ACK 없이 CA 전환을 허용하지 않는다.
@@ -81,6 +83,10 @@ private 생성 파일은 지정 storage root 아래 새 `mktemp` 디렉터리에
 - `trace.jsonl`: 관측 시각, phase, heartbeat, API latency, source별 현재 품질 창 표본 수,
   monitor delivery, WG 최신 시각/peer 수, uplink 결과, 제한된 최근 이벤트와 alert,
   certificate fingerprint/만료, 중앙 저장 snapshot. 개인키·토큰·설정 파일은 포함하지 않는다.
+- `recovery-failure.json`: 복구 실패 시 마지막으로 확인한 노드별 producer 시각, 기대·관측 peer,
+  공통 deadline과 실패 이유. 관측 이력 대신 노드당 마지막 진단 한 건만 보존하며 자동 합격
+  근거로 사용하지 않는다. 마지막 요청이 실패하면 직전에 성공한 조회의 상태·시각·readiness 실패 이유를 보존한다.
+  일부 노드는 앞선 실패로 아직 읽지 못했을 수 있다.
 - `resources.jsonl`: container/cgroup CPU·메모리·I/O와 사용 불가 신호. 해당 리소스만으로
   실제 deployment disk의 p99나 모든 host 부하를 설명하지 않는다.
 - `verdict.json`: 요청/실제 경과시간, 완료 여부, 실행한 phase 건수, `wall_clock_24h`와
@@ -112,3 +118,33 @@ trace/verdict/resource/manifest를 대조한다. 독립 mTLS fixture는 승인 I
 현재 개발 호스트는 NVMe/ext4다. 운영 profile의 저장장치·filesystem, CPU, 최대 노드 수,
 관측 관계와 cadence를 확인한 뒤 대표성 및 허용 예산을 확정한다. 이 정보가 없으면
 개발 호스트 결과로 기록하고 현장 운영 합격을 자동 선언하지 않는다.
+
+## 비활성 경로의 집계 이후 혼합 업로드 회귀 (#107)
+
+장기 시험에서 원본 probe가 사라지고 rollup/live 참조만 남은 경로가 생기자 uplink·event
+업로드가 중단되는 저장 결함을 확인했다. 두 업로드 경로가 legacy 정리 함수를 호출하여
+아직 참조 중인 stream 삭제를 시도했기 때문이다. tiered 모드의 stream 정리는 전용 유지보수만
+담당하도록 수정한다. 오래된 경로 두 세대의 집계·controller 재시작 후 1/3/8노드의 인증된
+uplink·event 업로드, 정확한 건수·멱등성·원래 집계 보존을 짧은 회귀로 검증한다.
+
+짧은 재현은 저장 시계를 진행시켜 6시간 경계를 확인하며 실제 24시간 운영을 대체하지 않는다.
+원본 실패 baseline을 보존하고 수정 커밋을 고정한 새 run의 결과를 #91에서 별도로 판정한다.
+
+## 반복 node 교체 집중 재현 (#110)
+
+```sh
+VPNCTL_SOAK_REJOIN_ONLY=1 VPNCTL_SOAK_PROFILE=production \
+VPNCTL_SOAK_DURATION=6m VPNCTL_SOAK_NODES=8 VPNCTL_SOAK_PHASE_INTERVAL=30s \
+VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 VPNCTL_TEST_MEMORY=2g \
+VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-m2-rejoin ./scripts/test-netns.sh \
+  -test.run='^TestNetns_M2NodeRejoin$' -test.timeout=12m
+```
+
+production profile, 6~20분, 최소 두 번의 삭제·새 identity 등록과 폐기 credential replay 거절을
+요구한다. 60초 수집 주기와 150초 공통 복구 기한을 유지하며, 7종 전체 복합 시험과 구분한다.
+verdict는 `m2_gate=not_qualifying_focused_rejoin`이다. 성공해도 24시간 또는 전체 M2 합격
+근거로 대체할 수 없으며 전체 분석기는 누락된 fault 범위를 성공으로 인정하지 않는다.
+
+Direct probe의 성공 피드백으로 `P2PReady`가 false→true가 되어도 같은 라운드의 나머지
+제출을 취소하지 않는다. kernel peer 적용은 한 owner가 즉시 수행한다. 준비 철회, peer
+identity/key/address/목록 및 로컬 probe 입력이 바뀌면 기존 cancel/drain 경계를 유지한다.
