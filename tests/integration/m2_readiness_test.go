@@ -5,6 +5,7 @@
 package integration
 
 import (
+	"strings"
 	"testing"
 	"time"
 	"vpnctl/internal/history"
@@ -46,6 +47,19 @@ func TestSoakReadinessRequiresPostFaultCurrentProducers(t *testing.T) {
 				t.Fatal("incomplete recovery accepted")
 			}
 		})
+	}
+	for _, producer := range []string{"wireguard", "uplink"} {
+		v := healthy()
+		old := after.Add(-time.Second)
+		if producer == "wireguard" {
+			v.WGObservedAt = &old
+		} else {
+			v.UplinkObservedAt = &old
+		}
+		e := checkSoakReady(v, 3, peers, after, now)
+		if e == nil || !strings.Contains(e.Error(), producer+" collection") || !strings.Contains(e.Error(), "required_after=") {
+			t.Fatal("missing producer/timing diagnostics", e)
+		}
 	}
 	// Initial/final checks also reject stale snapshots without a fault cutoff.
 	v := healthy()

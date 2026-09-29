@@ -188,9 +188,16 @@ func checkSoakReady(v soakObservation, size int, peers []string, after, now time
 	if v.Error != "" || v.Storage.Validity != "observed" || v.Storage.Stale || v.RegisteredNodes != size || v.HeartbeatUnknown != 0 || v.HeartbeatMaxAgeSeconds > 30 || v.WGReports == 0 || v.WGPeers != size || v.Delivery.WireGuardDelivery.Delivered == 0 || v.Sources["agent-direct"] == 0 || v.Sources["monitor-overlay"] == 0 || v.UplinkSamples == 0 || v.LatestUplinkStage != "none" {
 		return fmt.Errorf("producer not ready: error=%q storage=%s nodes=%d WG_reports=%d WG_peers=%d WG_delivered=%d sources=%v uplinks=%d stage=%s", v.Error, v.Storage.Validity, v.RegisteredNodes, v.WGReports, v.WGPeers, v.Delivery.WireGuardDelivery.Delivered, v.Sources, v.UplinkSamples, v.LatestUplinkStage)
 	}
-	for _, at := range []*time.Time{v.WGObservedAt, v.UplinkObservedAt} {
-		if at == nil || at.Before(after) || at.After(now) || now.Sub(*at) >= 90*time.Second {
-			return fmt.Errorf("producer collection predates recovery or is stale/unknown")
+	for _, producer := range []struct {
+		name string
+		at   *time.Time
+	}{{"wireguard", v.WGObservedAt}, {"uplink", v.UplinkObservedAt}} {
+		at := producer.at
+		if at == nil {
+			return fmt.Errorf("%s collection time is unknown", producer.name)
+		}
+		if at.Before(after) || at.After(now) || now.Sub(*at) >= 90*time.Second {
+			return fmt.Errorf("%s collection is pre-recovery, stale or future: observed=%s required_after=%s checked_at=%s", producer.name, at.UTC().Format(time.RFC3339Nano), after.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
 		}
 	}
 	expected := map[string]bool{}

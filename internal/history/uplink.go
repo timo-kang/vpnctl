@@ -111,7 +111,9 @@ func (s *Store) IngestUplink(ctx context.Context, node string, snapshot uplink.S
 		return err
 	}
 	defer db.Close()
-	if now.Sub(s.lastCleanup) >= time.Minute {
+	// Tiered maintenance owns stream retirement and must preserve rollups/live
+	// references. Inline raw-only cleanup can delete a compacted-only stream.
+	if !s.Tiered() && now.Sub(s.lastCleanup) >= time.Minute {
 		if err = s.maintainDB(ctx, db, now); err != nil {
 			return err
 		}

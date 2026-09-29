@@ -81,6 +81,24 @@ func TestNetns_M2Soak(t *testing.T) {
 	workloadEnd := time.Time{}
 	completed := false
 	phases := map[string]int{}
+	lastRecovery := map[int]soakRecoveryDiagnostic{}
+	defer func() {
+		if !t.Failed() || len(lastRecovery) == 0 {
+			return
+		}
+		raw, e := json.MarshalIndent(lastRecovery, "", "  ")
+		if e != nil {
+			t.Error(e)
+			return
+		}
+		path := filepath.Join(results, "recovery-failure.json")
+		if e = os.WriteFile(path, raw, 0600); e != nil {
+			t.Error(e)
+			return
+		}
+		exposeSoakArtifact(t, path)
+	}()
+
 	// Write an explicit incomplete verdict even on assertion failure. Process
 	// kill/host loss can leave no verdict; consumers must also treat that as incomplete.
 	defer func() {
@@ -255,7 +273,13 @@ func TestNetns_M2Soak(t *testing.T) {
 		return v
 	}
 	for time.Since(start) < duration {
-		sample(reporter%size, "steady", true)
+		n := reporter % size
+		v := sample(n, "steady", true)
+		// Detect a stopped producer between faults as well. The emitted sample
+		// preserves its last timestamps even if the next fault is hours away.
+		if e := checkSoakReady(v, size, expectedPeers(n), time.Time{}, time.Now()); e != nil {
+			t.Fatalf("steady producer readiness, node %d: %v", n, e)
+		}
 		reporter++
 		if !time.Now().Before(nextPhase) {
 			name := actions[actionIndex%len(actions)]
@@ -355,10 +379,20 @@ func TestNetns_M2Soak(t *testing.T) {
 				snapshots := make([]soakObservation, 0, size)
 				for n := 0; n < size; n++ {
 					v, e := read(n, recoveryCtx)
-					if e != nil {
-						return e
+					checkedAt := time.Now().UTC()
+					if e == nil {
+						e = checkSoakReady(v, size, expectedPeers(n), recoveredAfter, checkedAt)
 					}
-					if e = checkSoakReady(v, size, expectedPeers(n), recoveredAfter, time.Now()); e != nil {
+					reason := ""
+					if e != nil {
+						reason = e.Error()
+						if len(reason) > 1024 {
+							reason = reason[:1024]
+						}
+					}
+					deadline, _ := recoveryCtx.Deadline()
+					lastRecovery[n] = soakRecoveryDiagnostic{Phase: name, Node: cfgs[n].Node.Name, CheckedAt: checkedAt, RequiredAfter: recoveredAfter, Deadline: deadline, Error: reason, ObservationAt: v.At, WireGuardObservedAt: v.WGObservedAt, UplinkObservedAt: v.UplinkObservedAt, RegisteredNodes: v.RegisteredNodes, WireGuardPeers: v.WGPeers, ExpectedPeers: expectedPeers(n), ObservedPeers: v.WGPeerNodes, StorageValidity: v.Storage.Validity, StorageStale: v.Storage.Stale}
+					if e != nil {
 						return fmt.Errorf("node %d: %w", n, e)
 					}
 					v.Phase = name
@@ -373,6 +407,7 @@ func TestNetns_M2Soak(t *testing.T) {
 				return nil
 			})
 			stopRecovery()
+			clear(lastRecovery)
 			phases[name]++
 			emit(map[string]any{"kind": "fault_recovered", "phase": name, "at": time.Now().UTC(), "duration_seconds": time.Since(began).Seconds()})
 			mustWrite(t, phasePath, "steady")
