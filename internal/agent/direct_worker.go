@@ -54,7 +54,8 @@ func (s *directSnapshots) update(out chan directSnapshot, change func(*directSna
 }
 
 // This is the only owner of WG peer application. Probe results never apply WG
-// state. New input cancels and drains the old measurement before replacing it.
+// state. Changed probe inputs or readiness withdrawal cancel and drain the old
+// measurement. Positive readiness feedback alone must not cancel its own round.
 func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, nodeID string, shared *direct.Shared, updates <-chan directSnapshot, applyPeers func([]wireguard.Peer) error) {
 	interval := time.Duration(cfg.DirectIntervalSec) * time.Second
 	if interval <= 0 {
@@ -94,10 +95,13 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 			return
 		case next := <-updates:
 			wasRunning := stop != nil
-			drain()
+			preserve := preservesDirectProbeRound(snapshot, next)
+			if !preserve {
+				drain()
+			}
 			snapshot = next
 			apply()
-			if wasRunning {
+			if wasRunning && !preserve {
 				timer.Reset(interval)
 			}
 		case <-done:
@@ -126,6 +130,27 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 			go func() { defer close(completed); measureDirect(work, client, cfg, nodeID, shared, current, batch) }()
 		}
 	}
+}
+
+// Controller success feedback can arrive while other results from this round
+// are still being submitted. It changes desired routing, not probe identity.
+// Withdrawals and any identity/address/input change retain the cancellation
+// barrier; outstanding measurements cannot survive a real configuration change.
+func preservesDirectProbeRound(before, after directSnapshot) bool {
+	if before.publicAddr != after.publicAddr || before.natType != after.natType || len(before.peers) != len(after.peers) {
+		return false
+	}
+	for i, old := range before.peers {
+		next := after.peers[i]
+		if old.P2PReady && !next.P2PReady {
+			return false
+		}
+		old.P2PReady, next.P2PReady = false, false
+		if old != next {
+			return false
+		}
+	}
+	return true
 }
 
 func desiredDirectPeers(cfg config.NodeConfig, candidates []api.PeerCandidate) map[string]wireguard.Peer {

@@ -129,3 +129,22 @@ uplink·event 업로드, 정확한 건수·멱등성·원래 집계 보존을 �
 
 짧은 재현은 저장 시계를 진행시켜 6시간 경계를 확인하며 실제 24시간 운영을 대체하지 않는다.
 원본 실패 baseline을 보존하고 수정 커밋을 고정한 새 run의 결과를 #91에서 별도로 판정한다.
+
+## 반복 node 교체 집중 재현 (#110)
+
+```sh
+VPNCTL_SOAK_REJOIN_ONLY=1 VPNCTL_SOAK_PROFILE=production \
+VPNCTL_SOAK_DURATION=6m VPNCTL_SOAK_NODES=8 VPNCTL_SOAK_PHASE_INTERVAL=30s \
+VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 VPNCTL_TEST_MEMORY=2g \
+VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-m2-rejoin ./scripts/test-netns.sh \
+  -test.run='^TestNetns_M2NodeRejoin$' -test.timeout=12m
+```
+
+production profile, 6~20분, 최소 두 번의 삭제·새 identity 등록과 폐기 credential replay 거절을
+요구한다. 60초 수집 주기와 150초 공통 복구 기한을 유지하며, 7종 전체 복합 시험과 구분한다.
+verdict는 `m2_gate=not_qualifying_focused_rejoin`이다. 성공해도 24시간 또는 전체 M2 합격
+근거로 대체할 수 없으며 전체 분석기는 누락된 fault 범위를 성공으로 인정하지 않는다.
+
+Direct probe의 성공 피드백으로 `P2PReady`가 false→true가 되어도 같은 라운드의 나머지
+제출을 취소하지 않는다. kernel peer 적용은 한 owner가 즉시 수행한다. 준비 철회, peer
+identity/key/address/목록 및 로컬 probe 입력이 바뀌면 기존 cancel/drain 경계를 유지한다.

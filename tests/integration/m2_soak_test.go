@@ -26,7 +26,12 @@ import (
 func TestNetns_M2Soak(t *testing.T) { runM2Soak(t, false) }
 
 // Focused production-cadence reproduction. It cannot qualify the full M2 gate.
-func TestNetns_M2NodeRejoin(t *testing.T) { runM2Soak(t, true) }
+func TestNetns_M2NodeRejoin(t *testing.T) {
+	if os.Getenv("VPNCTL_SOAK_REJOIN_ONLY") != "1" {
+		t.Skip("explicit focused rejoin opt-in required")
+	}
+	runM2Soak(t, true)
+}
 
 func runM2Soak(t *testing.T, rejoinOnly bool) {
 	raw := os.Getenv("VPNCTL_SOAK_DURATION")
