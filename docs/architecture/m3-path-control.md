@@ -1,8 +1,9 @@
 # M3 경로 제어 계약과 초기 dataplane 결정 (#21/#22/#23/#24/#98)
 
-상태: **catalog/binding v1 구현, dataplane·자동 전환은 후속 단계**.
+상태: **catalog/binding v1과 node key/cache 구현, dataplane·자동 전환은 후속 단계**.
 [관리 CLI·인증 API·운영 제한](relay-catalog.md)은 #103의 구현 범위다.
-후보 cache, OS 적용, 자동 선택·전환 계약은 아직 구현 준비 상태다.
+[후보 cache와 경로 키](node-relay-cache.md)는 #105의 구현 범위다.
+OS 적용, 자동 선택·전환 계약은 아직 구현 준비 상태다.
 `TestNetns_M3PathTopology`는 정적 후보와 시험기가 명시적으로 선택한 경로를 검증한다.
 
 ## 목적과 경계
@@ -54,8 +55,8 @@ node당 후보는 초기 계약에서 최대 8개, relay 최대 4개, underlay �
 ## 발행 계약
 
 다음 표는 M3 전체 구현의 목표 계약이다. `GET /relay-catalog`와 경로 binding v1의
-실제 필드·지원 범위는 [구현 문서](relay-catalog.md)를 따른다. policy, 영속 cache의
-동일 세대 내용 검증, 키 교체 전환 확인은 후속 단계다. 기존 `/wg-config`는 단일 relay
+실제 필드·지원 범위는 [구현 문서](relay-catalog.md)를 따른다. 영속 cache는 동일 세대 내용
+변경을 거절한다. policy와 키 교체 전환 확인은 후속 단계다. 기존 `/wg-config`는 단일 relay
 동작을 유지하며 새 catalog만 발행해도 OS 경로가 바뀌지는 않는다.
 
 | 필드 | 불변 조건 |

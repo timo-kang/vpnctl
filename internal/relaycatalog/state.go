@@ -383,3 +383,7 @@ func retirementTime(now, created time.Time) time.Time {
 	}
 	return now.UTC()
 }
+
+// DefinitionHash identifies a validated candidate's immutable binding identity.
+// Callers must validate the containing spec/view before using this value.
+func DefinitionHash(spec Spec, path Path) string { return definitionHash(spec, path) }

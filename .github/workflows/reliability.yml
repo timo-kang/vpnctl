@@ -110,7 +110,7 @@ jobs:
       - run: go build ./cmd/vpnctl-lab-report
 
   relay-catalog:
-    name: M3 relay catalog variable scale and replay
+    name: M3 relay catalog and node cache contention
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
@@ -122,6 +122,10 @@ jobs:
         env:
           VPNCTL_RELAY_CATALOG_SCALE: '1'
         run: go test -race ./internal/controller -run '^TestRelayCatalogVariableScale$' -count=1 -timeout=5m -v
+      - name: Concurrent initial path preparation, cache reopen and controller restore
+        env:
+          VPNCTL_RELAY_CACHE_SCALE: '1'
+        run: go test -race ./internal/controller -run '^TestRelayCacheVariableScale$' -count=1 -timeout=5m -v
 
   history-churn:
     name: History path churn race and fault recovery

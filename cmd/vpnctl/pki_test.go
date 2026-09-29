@@ -16,6 +16,7 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/pki"
+	"vpnctl/internal/relaycache"
 	"vpnctl/internal/store"
 )
 
@@ -111,10 +112,12 @@ func TestPKICLITrustedBootstrapBackupAndRestore(t *testing.T) {
 	if err := client.SyncCredentials(context.Background(), nodeDir, "a"); err != nil {
 		t.Fatal(err)
 	}
+	run("node", "relay", "refresh", "--config", nodePath)
 	run("controller", "pki", "ca-rollback", "--config", controllerPath)
 	if err := client.SyncCredentials(context.Background(), nodeDir, "a"); err != nil {
 		t.Fatal(err)
 	}
+	run("node", "relay", "refresh", "--config", nodePath)
 	current, err := pki.LoadCredentials(nodeDir)
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +129,14 @@ func TestPKICLITrustedBootstrapBackupAndRestore(t *testing.T) {
 	run("controller", "pki", "revoke", "--config", controllerPath, "--fingerprint", pki.Fingerprint(cert))
 	if _, err := client.FleetStatus(context.Background()); err == nil {
 		t.Fatal("CLI revocation did not take effect")
+	}
+	deniedOutput, deniedErr := cliProcess(t, "node", "relay", "refresh", "--config", nodePath).Output()
+	var denied relaycache.Report
+	if deniedErr == nil || json.Unmarshal(deniedOutput, &denied) != nil || denied.UsableCache || denied.Refresh.Result != "denied" {
+		t.Fatal("CLI did not report rejected refresh")
+	}
+	if err := json.Unmarshal([]byte(run("node", "relay", "status", "--config", nodePath)), &denied); err != nil || denied.UsableCache || denied.BlockedReason == "" {
+		t.Fatal("status forgot denial", err)
 	}
 	backupPath := filepath.Join(dir, "backup.json")
 	run("controller", "pki", "backup", "--config", controllerPath, "--out", backupPath)
@@ -140,7 +151,7 @@ func TestPKICLITrustedBootstrapBackupAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restoredRegistry.RelayCatalog == nil || restoredRegistry.RelayCatalog.Generation != 2 || len(restoredRegistry.RelayCatalog.Bindings) != 1 {
+	if restoredRegistry.RelayCatalog == nil || restoredRegistry.RelayCatalog.Generation != 3 || len(restoredRegistry.RelayCatalog.Bindings) != 2 {
 		t.Fatal("CLI CA lifecycle/backup lost relay catalog")
 	}
 	stateData, err := os.ReadFile(filepath.Join(restoredDir, "pki", "authority.json"))
