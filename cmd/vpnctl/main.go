@@ -51,6 +51,7 @@ Usage:
   vpnctl version
   vpnctl controller init --config <path>
   vpnctl controller status --config <path>
+  vpnctl controller relay status|apply --config <path> [--file <catalog.json> --controller-id <id> --generation <n> --ttl 1h]
   vpnctl controller history backup --config <path> --out <history.db>
   vpnctl controller history restore --config <path> --file <history.db>
   vpnctl controller history enable-jitter --config <path> --out <pre-jitter-backup.db>
@@ -65,6 +66,7 @@ Usage:
   vpnctl node run --config <path>
   vpnctl node diagnose --config <path> [--submit]
   vpnctl node sync-config --config <path>
+  vpnctl node relay catalog|bind --config <path> [--controller-id <id> --generation <n> --path-id <id> --public-key <key>]
   vpnctl direct serve --config <path> [--listen :0]
   vpnctl direct test --config <path> --peer <name>
   vpnctl discover --config <path>
@@ -171,6 +173,10 @@ func handleController(args []string) {
 		controllerStatus(args[1:])
 	case "token":
 		controllerToken(args[1:])
+	case "relay":
+		if err := runControllerRelay(args[1:]); err != nil {
+			fatal(err)
+		}
 	case "remove-node":
 		controllerRemoveNode(args[1:])
 	case "history":
@@ -410,6 +416,10 @@ func handleNode(args []string) {
 		nodeServe(args[1:])
 	case "run":
 		nodeRun(args[1:])
+	case "relay":
+		if err := runNodeRelay(args[1:]); err != nil {
+			fatal(err)
+		}
 	case "sync-config":
 		nodeSyncConfig(args[1:])
 	default:

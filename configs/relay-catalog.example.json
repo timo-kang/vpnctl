@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "pool_cidr": "10.78.0.0/24",
+  "reserved_ips": [
+    "10.78.0.1"
+  ],
+  "relays": [
+    {
+      "id": "relay-a",
+      "site": "example-a",
+      "public_key": "BCPNbDI1dc0Q1UzFG94xNum7VAtRSaf6Xq5B7z9KeSA=",
+      "key_generation": 1,
+      "endpoints": [
+        {
+          "id": "udp",
+          "address": "192.0.2.11:51820"
+        }
+      ]
+    },
+    {
+      "id": "relay-b",
+      "site": "example-b",
+      "public_key": "b2Aa5WptpFPoqH9O0njPP6o68uRVAKlCoptsNUrW7Vo=",
+      "key_generation": 1,
+      "endpoints": [
+        {
+          "id": "udp",
+          "address": "198.51.100.12:51820"
+        }
+      ]
+    }
+  ],
+  "targets": [
+    {
+      "id": "server-uplink",
+      "prefixes": [
+        "198.18.0.2/32"
+      ],
+      "probe_address": "198.18.0.2",
+      "protocol": "tcp",
+      "port": 443
+    }
+  ],
+  "paths": [
+    {
+      "id": "robot-a-primary",
+      "node_id": "robot-a",
+      "relay_id": "relay-a",
+      "endpoint_id": "udp",
+      "underlay_id": "wifi-main",
+      "target_ids": [
+        "server-uplink"
+      ],
+      "priority": 10,
+      "cost": 0,
+      "drain": false,
+      "disabled": false
+    },
+    {
+      "id": "robot-a-backup",
+      "node_id": "robot-a",
+      "relay_id": "relay-b",
+      "endpoint_id": "udp",
+      "underlay_id": "ethernet",
+      "target_ids": [
+        "server-uplink"
+      ],
+      "priority": 20,
+      "cost": 0,
+      "drain": false,
+      "disabled": false
+    }
+  ]
+}
