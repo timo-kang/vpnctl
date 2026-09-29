@@ -378,24 +378,18 @@ func TestNetns_M2Soak(t *testing.T) {
 			eventually(t, 150*time.Second, "fresh fleet recovery after "+name, func() error {
 				snapshots := make([]soakObservation, 0, size)
 				for n := 0; n < size; n++ {
-					v, e := read(n, recoveryCtx)
+					v, readErr := read(n, recoveryCtx)
 					checkedAt := time.Now().UTC()
-					diagnostic := lastRecovery[n]
-					diagnostic.recordRead(v, e, checkedAt)
+					e := readErr
 					if e == nil {
 						e = checkSoakReady(v, size, expectedPeers(n), recoveredAfter, checkedAt)
 					}
-					reason := ""
-					if e != nil {
-						reason = e.Error()
-						if len(reason) > 1024 {
-							reason = reason[:1024]
-						}
-					}
+					diagnostic := lastRecovery[n]
+					diagnostic.recordRead(v, readErr, e, checkedAt)
 					deadline, _ := recoveryCtx.Deadline()
 					diagnostic.Phase, diagnostic.Node = name, cfgs[n].Node.Name
 					diagnostic.RequiredAfter, diagnostic.Deadline = recoveredAfter, deadline
-					diagnostic.Error, diagnostic.ExpectedPeers = reason, expectedPeers(n)
+					diagnostic.ExpectedPeers = expectedPeers(n)
 					lastRecovery[n] = diagnostic
 					if e != nil {
 						return fmt.Errorf("node %d: %w", n, e)
