@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"vpnctl/internal/api"
+	"vpnctl/internal/config"
 	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relaycatalog"
 	"vpnctl/internal/relayplan"
@@ -90,8 +91,11 @@ func runControllerRelay(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(response)
 }
 func runNodeRelay(args []string) error {
+	if len(args) > 0 && (args[0] == "prepare" || args[0] == "inspect" || args[0] == "release" || args[0] == "recover") {
+		return runNodeRelayApply(args)
+	}
 	if len(args) == 0 || args[0] != "catalog" && args[0] != "bind" && args[0] != "refresh" && args[0] != "status" && args[0] != "plan" {
-		return fmt.Errorf("node relay catalog|bind|refresh|status|plan required")
+		return fmt.Errorf("node relay catalog|bind|refresh|status|plan|prepare|inspect|release|recover required")
 	}
 	fs := flag.NewFlagSet("node relay "+args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "enrolled node YAML configuration")
@@ -160,23 +164,7 @@ func runNodeRelay(args []string) error {
 		if dir == "" {
 			dir = filepath.Join(cfg.Node.PKIDir, "relay-cache")
 		}
-		legacy := []string{cfg.Node.WGPublicKey, cfg.Node.ServerPublicKey}
-		if cfg.Node.WGPrivateKey != "" {
-			data, err := base64.StdEncoding.DecodeString(cfg.Node.WGPrivateKey)
-			if err != nil {
-				return fmt.Errorf("invalid legacy WireGuard private key")
-			}
-			private, err := ecdh.X25519().NewPrivateKey(data)
-			if err != nil {
-				return fmt.Errorf("invalid legacy WireGuard private key")
-			}
-			public := base64.StdEncoding.EncodeToString(private.PublicKey().Bytes())
-			if cfg.Node.WGPublicKey != "" && relaycatalog.PublicKeyID(cfg.Node.WGPublicKey) != public {
-				return fmt.Errorf("legacy WireGuard key pair mismatch")
-			}
-			legacy = append(legacy, public)
-		}
-		cache, err := relaycache.Open(dir, relaycache.Options{NodeID: cfg.Node.Name, Create: args[0] == "refresh", LegacyPublicKeys: legacy})
+		cache, err := openNodeRelayCache(cfg.Node, dir, args[0] == "refresh")
 		if errors.Is(err, relaycache.ErrMissing) && args[0] == "plan" {
 			return printRelayPlan(context.Background(), cfg.Node.Name, *id, relaycache.MissingReport(cfg.Node.Name), cfg.Node.RelayUnderlays, nil)
 		}
@@ -227,6 +215,26 @@ func runNodeRelay(args []string) error {
 		return e
 	}
 	return json.NewEncoder(os.Stdout).Encode(v)
+}
+
+func openNodeRelayCache(cfg *config.NodeConfig, dir string, create bool) (*relaycache.Store, error) {
+	legacy := []string{cfg.WGPublicKey, cfg.ServerPublicKey}
+	if cfg.WGPrivateKey != "" {
+		data, err := base64.StdEncoding.DecodeString(cfg.WGPrivateKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid legacy WireGuard private key")
+		}
+		private, err := ecdh.X25519().NewPrivateKey(data)
+		if err != nil {
+			return nil, fmt.Errorf("invalid legacy WireGuard private key")
+		}
+		public := base64.StdEncoding.EncodeToString(private.PublicKey().Bytes())
+		if cfg.WGPublicKey != "" && relaycatalog.PublicKeyID(cfg.WGPublicKey) != public {
+			return nil, fmt.Errorf("legacy WireGuard key pair mismatch")
+		}
+		legacy = append(legacy, public)
+	}
+	return relaycache.Open(dir, relaycache.Options{NodeID: cfg.Name, Create: create, LegacyPublicKeys: legacy})
 }
 
 func printRelayPlan(ctx context.Context, node, controller string, report relaycache.Report, underlays []relayplan.Underlay, cache *relaycache.Store) error {

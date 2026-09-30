@@ -38,7 +38,7 @@ func (p *planIssuer) BindRelayPath(_ context.Context, r relaycatalog.BindRequest
 	return p.state.NodeView(r.NodeID), e
 }
 
-func checkM3LocalPlans(t *testing.T, robot, private string, publicKeys []string) {
+func checkM3LocalPlans(t *testing.T, robot string, relays []string, target, private string, relayKeys, publicKeys []string) {
 	t.Helper()
 	bin := integrationBinary(t)
 	spec := relaycatalog.Spec{SchemaVersion: 1, PoolCIDR: "10.78.0.0/16", Targets: []relaycatalog.Target{{ID: "app", Prefixes: []string{m3Target + "/32"}, ProbeAddress: m3Target, Port: 9192, Protocol: "tcp"}}}
@@ -184,5 +184,6 @@ func checkM3LocalPlans(t *testing.T, robot, private string, publicKeys []string)
 	plan("eligible", 2)
 	netOutput(t, robot, "ip", "link", "set", "renamed0", "name", "wan0")
 	plan("eligible", 4)
+	checkM3PreparedPaths(t, robot, relays, target, private, configPath, relayKeys, plan("eligible", 4))
 	t.Log("M3 plan: two real underlays/four approved paths, no LTE or default route, repeated device/address changes; kernel configuration unchanged by CLI")
 }

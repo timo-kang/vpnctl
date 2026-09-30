@@ -133,6 +133,11 @@ forwarding/firewall/서버 반환 route/SNAT는 [relay 배포 계약](../deploym
 
 ## 로컬 경로 준비 계획 (#109)
 
+후속 [후보 적용·해제·복구 검증](../architecture/node-relay-prepare.md)(#112)은 같은 topology에서
+실제 제품 CLI가 후보를 설치한 뒤 fixture의 relay peer/target route로 패킷을 검증한다.
+소유권 충돌, 다른 underlay로의 UDP 우회 차단, SIGKILL 후 복구와 원래 route/rule 보존을
+검사하며 `m3-prepare-*/report.json`에 완료 여부와 통과 단계를 남긴다.
+
 `TestNetns_M3PathTopology`는 정적 후보 설치 전에 실제 `node relay plan` CLI도 실행한다.
 2개의 relay와 Ethernet/Wi-Fi underlay에서 LTE·default gateway 없이 4개 승인 후보를
 만들고, gateway 경유·link down·source 주소 변경/삭제·rename을 확인한다. 각 호출 전후의
