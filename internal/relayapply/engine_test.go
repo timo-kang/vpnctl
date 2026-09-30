@@ -325,17 +325,18 @@ func TestJournalAndOwnershipFailures(t *testing.T) {
 	}
 }
 func TestKernelNamespaceLock(t *testing.T) {
-	u, err := kernelLock()
+	name := fmt.Sprintf("@vpnctl.relay-apply.test.%d", os.Getpid())
+	u, err := namedKernelLock(name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second, e := kernelLock(); e == nil {
+	if second, e := namedKernelLock(name); e == nil {
 		second()
 		u()
 		t.Fatal("concurrent kernel writer accepted")
 	}
 	u()
-	u, err = kernelLock()
+	u, err = namedKernelLock(name)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -36,11 +36,14 @@ func digest(j Journal) string {
 // An abstract Unix socket is a nonblocking, namespace-wide advisory lock.
 // The kernel releases it on process death and CLOEXEC prevents child leakage.
 func kernelLock() (func(), error) {
+	return namedKernelLock("@vpnctl.relay-apply.v1")
+}
+func namedKernelLock(name string) (func(), error) {
 	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
-	if err = unix.Bind(fd, &unix.SockaddrUnix{Name: "@vpnctl.relay-apply.v1"}); err != nil {
+	if err = unix.Bind(fd, &unix.SockaddrUnix{Name: name}); err != nil {
 		unix.Close(fd)
 		return nil, errors.New("another process owns the relay apply lock in this network namespace")
 	}
