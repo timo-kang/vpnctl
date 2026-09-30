@@ -151,7 +151,7 @@ func TestPKICLITrustedBootstrapBackupAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restoredRegistry.RelayCatalog == nil || restoredRegistry.RelayCatalog.Generation != 3 || len(restoredRegistry.RelayCatalog.Bindings) != 2 {
+	if restoredRegistry.RelayCatalog == nil || restoredRegistry.RelayCatalog.Generation != 6 || len(restoredRegistry.RelayCatalog.Bindings) != 2 || restoredRegistry.Version != 3 || len(restoredRegistry.RelayCatalog.Recipients) != 1 {
 		t.Fatal("CLI CA lifecycle/backup lost relay catalog")
 	}
 	stateData, err := os.ReadFile(filepath.Join(restoredDir, "pki", "authority.json"))

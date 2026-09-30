@@ -81,15 +81,49 @@ type Binding struct {
 // State is immutable once published. Mutators return a deep copy. Retired keys,
 // leases and IDs remain reserved; they are not automatically reused after delete.
 type State struct {
-	ReservedRelayKeys []string  `json:"reserved_relay_keys" yaml:"reserved_relay_keys"`
-	ControllerID      string    `json:"controller_id" yaml:"controller_id"`
-	Generation        uint64    `json:"generation" yaml:"generation"`
-	IssuedAt          time.Time `json:"issued_at" yaml:"issued_at"`
-	ExpiresAt         time.Time `json:"expires_at" yaml:"expires_at"`
-	Spec              Spec      `json:"spec" yaml:"spec"`
-	Bindings          []Binding `json:"bindings" yaml:"bindings"`
-	RetiredPathIDs    []string  `json:"retired_path_ids" yaml:"retired_path_ids"`
-	RetiredRelayIDs   []string  `json:"retired_relay_ids" yaml:"retired_relay_ids"`
+	// RecipientSchema is sticky after the first explicit relay grant. Old
+	// registries have no grants; older binaries must not silently drop them.
+	RecipientSchema   int              `json:"recipient_schema,omitempty" yaml:"recipient_schema,omitempty"`
+	Recipients        []RecipientGrant `json:"recipients,omitempty" yaml:"recipients,omitempty"`
+	ReservedRelayKeys []string         `json:"reserved_relay_keys" yaml:"reserved_relay_keys"`
+	ControllerID      string           `json:"controller_id" yaml:"controller_id"`
+	Generation        uint64           `json:"generation" yaml:"generation"`
+	IssuedAt          time.Time        `json:"issued_at" yaml:"issued_at"`
+	ExpiresAt         time.Time        `json:"expires_at" yaml:"expires_at"`
+	Spec              Spec             `json:"spec" yaml:"spec"`
+	Bindings          []Binding        `json:"bindings" yaml:"bindings"`
+	RetiredPathIDs    []string         `json:"retired_path_ids" yaml:"retired_path_ids"`
+	RetiredRelayIDs   []string         `json:"retired_relay_ids" yaml:"retired_relay_ids"`
+}
+
+// RecipientGrant is an administrator-owned association, not a certificate role.
+// Certificate renewal preserves it; identity removal deletes it atomically.
+type RecipientGrant struct {
+	RelayID     string `json:"relay_id" yaml:"relay_id"`
+	PrincipalID string `json:"principal_id" yaml:"principal_id"`
+}
+
+type RecipientUpdate struct {
+	ControllerID       string `json:"controller_id"`
+	ExpectedGeneration uint64 `json:"expected_generation"`
+	RelayID            string `json:"relay_id"`
+	// Empty means withdraw. It is never inferred from the relay ID or key.
+	PrincipalID string `json:"principal_id"`
+}
+
+// DeploymentView contains only bound, enabled paths assigned to this relay.
+// Draining paths retain their existing bindings. It contains no grant list,
+// retirement ledger, other relay descriptors or private keys.
+type DeploymentView struct {
+	SchemaVersion int       `json:"schema_version"`
+	ControllerID  string    `json:"controller_id"`
+	Generation    uint64    `json:"generation"`
+	IssuedAt      time.Time `json:"issued_at"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	PrincipalID   string    `json:"principal_id"`
+	RelayID       string    `json:"relay_id"`
+	Spec          Spec      `json:"spec"`
+	Bindings      []Binding `json:"bindings"`
 }
 type Update struct {
 	ControllerID       string `json:"controller_id"`

@@ -42,7 +42,7 @@ func (c *Client) BindRelayPath(ctx context.Context, req relaycatalog.BindRequest
 }
 
 // This versioned contract bounds decoding before allocating descriptor slices.
-func (c *Client) relayJSON(ctx context.Context, method, path string, body any, out *relaycatalog.View) error {
+func (c *Client) relayJSON(ctx context.Context, method, path string, body any, out any) error {
 	var payload []byte
 	var e error
 	if body != nil {

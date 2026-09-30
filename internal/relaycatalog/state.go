@@ -32,6 +32,7 @@ func cloneSpec(s Spec) Spec {
 func clone(s *State) *State {
 	n := *s
 	n.Spec = cloneSpec(s.Spec)
+	n.Recipients = slices.Clone(s.Recipients)
 	n.ReservedRelayKeys = slices.Clone(s.ReservedRelayKeys)
 	n.Bindings = slices.Clone(s.Bindings)
 	n.RetiredPathIDs = slices.Clone(s.RetiredPathIDs)
@@ -188,6 +189,9 @@ func Apply(old *State, r Update, env Environment, now time.Time) (*State, error)
 		}
 	}
 	n.Spec = spec
+	n.Recipients = slices.DeleteFunc(n.Recipients, func(g RecipientGrant) bool {
+		return !slices.ContainsFunc(spec.Relays, func(r Relay) bool { return r.ID == g.RelayID })
+	})
 	for _, r := range spec.Relays {
 		if !slices.Contains(n.ReservedRelayKeys, r.PublicKey) {
 			n.ReservedRelayKeys = append(n.ReservedRelayKeys, r.PublicKey)
@@ -310,7 +314,8 @@ func RemoveNode(old *State, nodeID string, now time.Time) (*State, error) {
 			n.Spec.Paths = append(n.Spec.Paths, p)
 		}
 	}
-	if len(n.Spec.Paths) == len(old.Spec.Paths) {
+	n.Recipients = slices.DeleteFunc(n.Recipients, func(g RecipientGrant) bool { return g.PrincipalID == nodeID })
+	if len(n.Spec.Paths) == len(old.Spec.Paths) && len(n.Recipients) == len(old.Recipients) {
 		return old, nil
 	}
 	for i, b := range n.Bindings {

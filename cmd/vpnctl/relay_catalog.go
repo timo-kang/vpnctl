@@ -48,8 +48,11 @@ func readRelaySpec(path string) (relaycatalog.Spec, error) {
 	return s, nil
 }
 func runControllerRelay(args []string) error {
+	if len(args) > 0 && (args[0] == "grant" || args[0] == "withdraw") {
+		return runControllerRelayRecipient(args)
+	}
 	if len(args) == 0 || args[0] != "status" && args[0] != "apply" {
-		return fmt.Errorf("controller relay status|apply required")
+		return fmt.Errorf("controller relay status|apply|grant|withdraw required")
 	}
 	fs := flag.NewFlagSet("controller relay "+args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "controller YAML configuration")

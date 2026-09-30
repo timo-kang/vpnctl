@@ -152,6 +152,24 @@ func TestRelayCatalogVariableScale(t *testing.T) {
 			if e = validateRelayRegistry(disk, s.cfg); e != nil {
 				t.Fatal(e)
 			}
+			// Every relay receives exactly two bound paths per robot, regardless
+			// of fleet size. One enrolled principal may hold multiple explicit
+			// grants; there is no implicit authority from that principal's name.
+			for i, r := range spec.Relays {
+				principal := fmt.Sprintf("robot-%02d", i%count)
+				c = grantRecipient(t, s, r.ID, principal)
+				for retry := 0; retry < 4; retry++ {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					v, err := clients[principal].RelayDeployment(ctx, principal, r.ID)
+					cancel()
+					if err != nil || len(v.Bindings) != count*2 || len(v.Spec.Paths) != count*2 || len(v.Spec.Relays) != 1 || v.Generation != c.Generation {
+						t.Fatal("scoped relay deployment population/budget", err)
+					}
+				}
+				grantRecipient(t, s, r.ID, "")
+				_, err := clients[principal].RelayDeployment(context.Background(), principal, r.ID)
+				assertRelayHTTP(t, err, 403, "relay_recipient_denied")
+			}
 			t.Logf("nodes=%d relays=4 candidates=%d unique durable bindings=%d; concurrent legacy registration/catalog read <=2s; 4 replays/node + PKI sync", count, count*8, len(c.Bindings))
 		})
 	}

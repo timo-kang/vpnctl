@@ -304,6 +304,9 @@ func (s *State) Validate(env Environment) error {
 	if e := ValidateSpec(s.Spec, env); e != nil {
 		return e
 	}
+	if e := s.validateRecipients(env); e != nil {
+		return e
+	}
 	if len(s.RetiredPathIDs)+len(s.Spec.Paths) > MaxPathIDs || len(s.RetiredRelayIDs)+len(s.Spec.Relays) > MaxRelayIDs || len(s.Bindings) > MaxPathIDs {
 		return fmt.Errorf("%w: lifetime ledger limit", ErrCapacity)
 	}
