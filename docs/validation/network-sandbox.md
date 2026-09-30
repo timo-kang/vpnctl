@@ -129,3 +129,14 @@ CI는 기존 kernel 작업에서 이 시나리오를 필수 실행한다. `nodes
 forwarding/firewall/서버 반환 route/SNAT는 [relay 배포 계약](../deployment/relay-network.md)에
 따로 둔다. 배포 저장소는 필요한 계약 파일을 고정된 commit/tag에서 가져다 쓰고,
 실제 환경별 적용·영속화·복원 책임을 가진다.
+
+
+## 로컬 경로 준비 계획 (#109)
+
+`TestNetns_M3PathTopology`는 정적 후보 설치 전에 실제 `node relay plan` CLI도 실행한다.
+2개의 relay와 Ethernet/Wi-Fi underlay에서 LTE·default gateway 없이 4개 승인 후보를
+만들고, gateway 경유·link down·source 주소 변경/삭제·rename을 확인한다. 각 호출 전후의
+route/rule/link/WG 설정이 같은지 검사한다. 승인 발행자는 이 fixture의 로컬 시험 대역이며,
+인증된 catalog/cache 발행은 별도 mTLS CLI 수명주기와 규모별 시험에서 검증한다.
+[설정과 출력 계약](../architecture/node-relay-plan.md)을 참고한다. 이 단계는 경로 적용이나
+자동 전환 합격을 뜻하지 않는다.

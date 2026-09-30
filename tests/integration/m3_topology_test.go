@@ -197,13 +197,18 @@ func TestNetns_M3PathTopology(t *testing.T) {
 			t.Error(e)
 		}
 	}()
+	relayKeys, relayPubs := make([]string, 2), make([]string, 2)
+	for r := range relays {
+		relayKeys[r], relayPubs[r] = wgKeyPair(t)
+	}
+	checkM3LocalPlans(t, robot, private, relayPubs)
 	var paths []m3Path
 	for r, relay := range relays {
 		for u, prefix := range []string{"192.0.2", "198.51.100"} {
 			i := r*2 + u
 			p := m3Path{r, u, fmt.Sprintf("wg%d", i), fmt.Sprintf("%s.%d", prefix, 11+r), prefix + ".10", fmt.Sprintf("10.78.%d.2", i), fmt.Sprintf("10.78.%d.1", i), 101 + i}
 			robotKey, robotPub := wgKeyPair(t)
-			relayKey, relayPub := wgKeyPair(t)
+			relayKey, relayPub := relayKeys[r], relayPubs[r]
 			robotKeyFile := filepath.Join(private, fmt.Sprintf("robot-%d.key", i))
 			relayKeyFile := filepath.Join(private, fmt.Sprintf("relay-%d.key", i))
 			mustWrite(t, robotKeyFile, robotKey)

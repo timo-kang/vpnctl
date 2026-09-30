@@ -19,6 +19,7 @@ import (
 	"vpnctl/internal/api"
 	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relaycatalog"
+	"vpnctl/internal/relayplan"
 )
 
 func readRelaySpec(path string) (relaycatalog.Spec, error) {
@@ -89,8 +90,8 @@ func runControllerRelay(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(response)
 }
 func runNodeRelay(args []string) error {
-	if len(args) == 0 || args[0] != "catalog" && args[0] != "bind" && args[0] != "refresh" && args[0] != "status" {
-		return fmt.Errorf("node relay catalog|bind|refresh|status required")
+	if len(args) == 0 || args[0] != "catalog" && args[0] != "bind" && args[0] != "refresh" && args[0] != "status" && args[0] != "plan" {
+		return fmt.Errorf("node relay catalog|bind|refresh|status|plan required")
 	}
 	fs := flag.NewFlagSet("node relay "+args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "enrolled node YAML configuration")
@@ -110,7 +111,7 @@ func runNodeRelay(args []string) error {
 		var cacheFlag bool
 		fs.Visit(func(f *flag.Flag) { cacheFlag = cacheFlag || f.Name == "cache-dir" || f.Name == "timeout" })
 		if cacheFlag {
-			return fmt.Errorf("cache-dir/timeout require refresh or status")
+			return fmt.Errorf("cache-dir/timeout require refresh, status or plan")
 		}
 	}
 	if args[0] == "bind" {
@@ -128,12 +129,29 @@ func runNodeRelay(args []string) error {
 	if cfg.Node == nil || cfg.Node.Name == "" || cfg.Node.Controller == "" || cfg.Node.PKIDir == "" {
 		return fmt.Errorf("enrolled node identity, controller and pki_dir required")
 	}
-	if args[0] == "refresh" || args[0] == "status" {
-		if *id != "" || *gen != 0 || *path != "" || *key != "" {
-			return fmt.Errorf("refresh/status do not accept manual binding flags")
+	if args[0] == "refresh" || args[0] == "status" || args[0] == "plan" {
+		if e := relayplan.ValidateUnderlays(cfg.Node.RelayUnderlays); e != nil {
+			return e
+		}
+		if *id != "" && args[0] != "plan" || *gen != 0 || *path != "" || *key != "" {
+			return fmt.Errorf("refresh/status/plan do not accept manual binding flags (plan accepts controller-id)")
 		}
 		if *timeout <= 0 || *timeout > relaycache.MaxRefreshDuration {
 			return fmt.Errorf("timeout must be positive and at most 2m")
+		}
+		if args[0] == "plan" {
+			explicit := false
+			fs.Visit(func(f *flag.Flag) {
+				if f.Name == "timeout" {
+					explicit = true
+				}
+			})
+			if !explicit {
+				*timeout = relayplan.MaxDuration
+			}
+			if *timeout > relayplan.MaxDuration {
+				return fmt.Errorf("plan timeout must be at most 20s")
+			}
 		}
 		dir := *cacheDir
 		if dir == "" {
@@ -159,6 +177,9 @@ func runNodeRelay(args []string) error {
 			legacy = append(legacy, public)
 		}
 		cache, err := relaycache.Open(dir, relaycache.Options{NodeID: cfg.Node.Name, Create: args[0] == "refresh", LegacyPublicKeys: legacy})
+		if errors.Is(err, relaycache.ErrMissing) && args[0] == "plan" {
+			return printRelayPlan(context.Background(), cfg.Node.Name, *id, relaycache.MissingReport(cfg.Node.Name), cfg.Node.RelayUnderlays, nil)
+		}
 		if errors.Is(err, relaycache.ErrMissing) && args[0] == "status" {
 			return json.NewEncoder(os.Stdout).Encode(relaycache.MissingReport(cfg.Node.Name))
 		}
@@ -167,6 +188,17 @@ func runNodeRelay(args []string) error {
 		}
 		defer cache.Close()
 		var report relaycache.Report
+		if args[0] == "plan" {
+			report, err = cache.Status()
+			if err != nil {
+				return err
+			}
+			parent, stop := signalContext()
+			defer stop()
+			ctx, cancel := context.WithTimeout(parent, *timeout)
+			defer cancel()
+			return printRelayPlan(ctx, cfg.Node.Name, *id, report, cfg.Node.RelayUnderlays, cache)
+		}
 		if args[0] == "status" {
 			report, err = cache.Status()
 		} else {
@@ -195,4 +227,36 @@ func runNodeRelay(args []string) error {
 		return e
 	}
 	return json.NewEncoder(os.Stdout).Encode(v)
+}
+
+func printRelayPlan(ctx context.Context, node, controller string, report relaycache.Report, underlays []relayplan.Underlay, cache *relaycache.Store) error {
+	plan, err := relayplan.Build(ctx, node, controller, report, underlays, nil)
+	if err != nil {
+		return err
+	}
+	if cache != nil {
+		latest, e := cache.Status() // Persist expiry observed while collecting inventory.
+		if e != nil || latest.Validity != report.Validity || latest.BlockedReason != report.BlockedReason {
+			plan.State, plan.CacheValidity = "blocked", latest.Validity
+			plan.Reason = "cache_" + latest.Validity
+			if latest.BlockedReason != "" {
+				plan.Reason = "cache_" + latest.BlockedReason
+			}
+			if e != nil {
+				plan.CacheValidity, plan.Reason = "unknown", "cache_status_failed"
+			}
+			for i := range plan.Paths {
+				plan.Paths[i].State = "excluded"
+				plan.Paths[i].Reason = plan.Reason
+				plan.Paths[i].Pin = nil
+			}
+		}
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(plan); err != nil {
+		return err
+	}
+	if plan.State != "eligible" {
+		return fmt.Errorf("no eligible relay path: %s", plan.Reason)
+	}
+	return nil
 }

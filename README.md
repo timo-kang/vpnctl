@@ -77,7 +77,8 @@ vpnctl doctor --config configs/node.yaml
 [재사용 가능한 sandbox 실행 계약](tests/integration/README.md)을 참고하세요.
 
 다중 relay의 승인 후보와 경로별 공개키/IP 원장은 [Relay catalog v1](docs/architecture/relay-catalog.md)
-CLI/API로 관리합니다. 후보의 OS 설치와 자동 전환은 후속 구현 단계입니다.
+CLI/API로 관리합니다. [로컬 장치 매핑과 경로 준비 계획](docs/architecture/node-relay-plan.md)은
+`node relay plan`으로 확인합니다. 후보의 OS 설치와 자동 전환은 후속 구현 단계입니다.
 
 ## Architecture
 
