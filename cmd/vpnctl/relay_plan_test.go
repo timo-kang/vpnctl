@@ -164,6 +164,12 @@ fi
 			if e == nil {
 				t.Fatal("unusable approval accepted", mode)
 			}
+			prepareArgs := append([]string{}, args...)
+			prepareArgs[2] = "prepare"
+			prepareArgs = append(prepareArgs, "--path-id", spec.Paths[0].ID)
+			if b, err := cliProcess(t, prepareArgs...).CombinedOutput(); err == nil || strings.Contains(string(b), `"kernel_ready":true`) || strings.Contains(string(b), "private_key") {
+				t.Fatal("unusable preparation accepted or exposed secret", mode, err)
+			}
 			if strings.Contains(string(raw), "private_key") || strings.Contains(stderr.String(), "private_key") {
 				t.Fatal("private field exposed")
 			}

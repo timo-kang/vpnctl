@@ -201,7 +201,7 @@ func TestNetns_M3PathTopology(t *testing.T) {
 	for r := range relays {
 		relayKeys[r], relayPubs[r] = wgKeyPair(t)
 	}
-	checkM3LocalPlans(t, robot, private, relayPubs)
+	checkM3LocalPlans(t, robot, relays, target, private, relayKeys, relayPubs)
 	var paths []m3Path
 	for r, relay := range relays {
 		for u, prefix := range []string{"192.0.2", "198.51.100"} {

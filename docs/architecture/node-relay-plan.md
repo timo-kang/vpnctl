@@ -80,7 +80,7 @@ endpoint /32·로컬 장치/ifindex·source·gateway, 종결 unreachable 요구�
 owner는 controller/node/path/공개키에 묶인다. 숫자 자원은 node/controller 해시 영역과
 catalog 내 path 슬롯으로 제안한다. 경로 집합이 바뀌면 슬롯도 바뀔 수 있으며 예약은 아니다.
 
-`requires_ownership_check=true`, `terminal_unreachable=true`다. 후속 backend(#22/#23)는
+`requires_ownership_check=true`, `terminal_unreachable=true`다. [후보 적용 backend](node-relay-prepare.md)(#112)는
 승인·현재 inventory를 다시 검사하고 실제 interface/table/rule priority/mark와 mask의 충돌,
 다른 관리자의 자원 및 durable journal 소유권을 확인해야 한다. 기존 table을 통째로 flush하거나
 계획만 보고 기존 자원을 덮어쓰면 안 된다. target probe, relay 배포, 수동/자동 선택,

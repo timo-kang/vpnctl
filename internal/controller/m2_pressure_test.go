@@ -34,19 +34,21 @@ type pressureAttempt struct {
 	Result   string `json:"result"`
 }
 type pressureEvidence struct {
-	Ledger         []pressureAttempt                            `json:"request_ledger"`
-	ObservedRows   map[string]int                               `json:"observed_retained_rows"`
-	SchemaVersion  int                                          `json:"schema_version"`
-	Profile        string                                       `json:"profile"`
-	Completed      bool                                         `json:"completed"`
-	WALBytes       int64                                        `json:"pinned_wal_bytes"`
-	Attempts       map[string]int                               `json:"request_attempts"`
-	Rejections     map[string]int                               `json:"backpressure_rejections"`
-	UniqueAccepted map[string]int                               `json:"unique_accepted_ids"`
-	ExpectedProbes map[string]pressurePopulation                `json:"expected_probe_population"`
-	ObservedProbes map[string]pressurePopulation                `json:"observed_probe_population"`
-	Control        map[string]map[string]labreport.Distribution `json:"control_latency_ms"`
-	Coverage       string                                       `json:"coverage"`
+	ControlAttempts        []pressureControlAttempt                     `json:"control_attempts"`
+	OmittedControlAttempts int                                          `json:"omitted_control_attempts"`
+	Ledger                 []pressureAttempt                            `json:"request_ledger"`
+	ObservedRows           map[string]int                               `json:"observed_retained_rows"`
+	SchemaVersion          int                                          `json:"schema_version"`
+	Profile                string                                       `json:"profile"`
+	Completed              bool                                         `json:"completed"`
+	WALBytes               int64                                        `json:"pinned_wal_bytes"`
+	Attempts               map[string]int                               `json:"request_attempts"`
+	Rejections             map[string]int                               `json:"backpressure_rejections"`
+	UniqueAccepted         map[string]int                               `json:"unique_accepted_ids"`
+	ExpectedProbes         map[string]pressurePopulation                `json:"expected_probe_population"`
+	ObservedProbes         map[string]pressurePopulation                `json:"observed_probe_population"`
+	Control                map[string]map[string]labreport.Distribution `json:"control_latency_ms"`
+	Coverage               string                                       `json:"coverage"`
 }
 
 // This is a bounded authenticated API fixture, not a kernel producer soak or
@@ -313,7 +315,7 @@ func testM2Pressure(t *testing.T, tiered bool) {
 		t.Fatal(e)
 	}
 	// Baseline uses the same control operations as the pressure phase.
-	pulse := func(parent context.Context, values map[string][]float64, renew bool) error {
+	pulse := func(parent context.Context, phase string, values map[string][]float64, renew bool) error {
 		// Wait for the fixture's real renewal window; exclude this scheduling
 		// delay from RPC latency, without bypassing the authority policy.
 		if renew {
@@ -364,9 +366,11 @@ func testM2Pressure(t *testing.T, tiered bool) {
 		for _, op := range ops {
 			work, stop := context.WithTimeout(parent, 2*time.Second)
 			started := time.Now()
+			work, trace := tracePressureRequest(work, started)
 			err := op.call(work)
 			elapsed := time.Since(started)
 			stop()
+			ev.recordControl(values, trace.finish(phase, op.name, elapsed, err, parent.Err() != nil))
 			if parent.Err() != nil {
 				return nil
 			}
@@ -376,23 +380,15 @@ func testM2Pressure(t *testing.T, tiered bool) {
 			if elapsed > 2*time.Second {
 				return fmt.Errorf("%s exceeded 2s", op.name)
 			}
-			values[op.name] = append(values[op.name], float64(elapsed.Microseconds())/1000)
 		}
 		return nil
 	}
-	summarize := func(phase string, values map[string][]float64) {
-		ev.Control[phase] = map[string]labreport.Distribution{}
-		for op, v := range values {
-			ev.Control[phase][op] = labreport.Summarize(v)
-		}
-	}
 	baseline := map[string][]float64{}
 	for i := 0; i < 3; i++ {
-		if e = pulse(ctx, baseline, true); e != nil {
+		if e = pulse(ctx, "baseline", baseline, true); e != nil {
 			t.Fatal(e)
 		}
 	}
-	summarize("baseline", baseline)
 	if _, e = db.ExecContext(ctx, "INSERT INTO m2_pressure VALUES(zeroblob(68157440))"); e != nil {
 		t.Fatal(e)
 	}
@@ -416,7 +412,7 @@ func testM2Pressure(t *testing.T, tiered bool) {
 	done := make(chan error, 1)
 	go func() {
 		for i := 0; ; i++ {
-			if err := pulse(controlCtx, pressure, i%4 == 0); err != nil {
+			if err := pulse(controlCtx, "pressure", pressure, i%4 == 0); err != nil {
 				done <- err
 				return
 			}
@@ -445,7 +441,6 @@ func testM2Pressure(t *testing.T, tiered bool) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	summarize("pressure", pressure)
 	if len(pressure["renew_install_ack"]) == 0 {
 		t.Fatal("no renewal under pressure")
 	}
@@ -457,10 +452,9 @@ func testM2Pressure(t *testing.T, tiered bool) {
 	send(1, false)
 	send(2, false)
 	recovery := map[string][]float64{}
-	if e = pulse(ctx, recovery, true); e != nil {
+	if e = pulse(ctx, "recovery", recovery, true); e != nil {
 		t.Fatal(e)
 	}
-	summarize("recovery", recovery)
 	// Confirm both raw and actual compacted views against independent inputs.
 
 	verify()
