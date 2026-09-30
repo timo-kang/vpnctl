@@ -7,6 +7,9 @@ LTE/Wi-Fi/Ethernet 전환 제어는 M3 #21/#22/#24다. WG handshake/counter 증�
 
 ## 현재 증거와 남은 판정
 
+[2026-09-30 baseline 결과](m2-baseline-2026-09-30.md): 8노드의 실제 24시간 실행·최종 검사와
+독립 분석을 통과했다. 장기 혼합 저장 압력/전체 모집단 대조 및 열린 결함의 판정은 남아 있다.
+
 | #19 기준 | 현재 근거 | 최종 판정에 남은 것 |
 | --- | --- | --- |
 | 동일 표본의 품질·freshness 의미 | quality 계약, percentile/jitter 및 WG 공통 출력 검사 | 복합 trace의 표본 시각·source·window를 맞춰 API/CLI/HTML/metric 대조; local과 중앙의 서로 다른 수집 주기를 같은 순간으로 비교하지 않기 |

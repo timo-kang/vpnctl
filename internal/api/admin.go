@@ -21,14 +21,15 @@ import (
 func AdminSocketPath(dataDir string) string { return filepath.Join(dataDir, "run", "admin.sock") }
 
 type AdminRequest struct {
-	RelayCatalog *relaycatalog.Update `json:"relay_catalog,omitempty"`
-	RequestID    string               `json:"request_id,omitempty"`
-	Fingerprint  string               `json:"fingerprint,omitempty"`
-	Operation    string               `json:"operation"`
-	NodeID       string               `json:"node_id,omitempty"`
-	Token        string               `json:"token,omitempty"`
-	TTL          string               `json:"ttl,omitempty"`
-	SingleUse    bool                 `json:"single_use,omitempty"`
+	RelayRecipient *relaycatalog.RecipientUpdate `json:"relay_recipient,omitempty"`
+	RelayCatalog   *relaycatalog.Update          `json:"relay_catalog,omitempty"`
+	RequestID      string                        `json:"request_id,omitempty"`
+	Fingerprint    string                        `json:"fingerprint,omitempty"`
+	Operation      string                        `json:"operation"`
+	NodeID         string                        `json:"node_id,omitempty"`
+	Token          string                        `json:"token,omitempty"`
+	TTL            string                        `json:"ttl,omitempty"`
+	SingleUse      bool                          `json:"single_use,omitempty"`
 }
 
 type AdminResponse struct {

@@ -67,7 +67,7 @@ func RestoreBackup(data []byte, dataDir string) (config.Config, error) {
 	if err := json.Unmarshal(data, &backup); err != nil {
 		return out, err
 	}
-	if backup.Version != 1 || backup.Registry == nil || backup.Config.PKI == nil || backup.Registry.Version < 0 || backup.Registry.Version > 2 {
+	if backup.Version != 1 || backup.Registry == nil || backup.Config.PKI == nil {
 		return out, fmt.Errorf("invalid controller backup")
 	}
 	if err := pki.ValidateAuthoritySnapshot(backup.Authority); err != nil {
@@ -96,8 +96,8 @@ func RestoreBackup(data []byte, dataDir string) (config.Config, error) {
 	if _, err := allocator.validateAndNormalizeRegistry(backup.Registry); err != nil {
 		return out, err
 	}
-	if (backup.Registry.Version == 2) != (backup.Registry.RelayCatalog != nil) {
-		return out, fmt.Errorf("backup registry version/catalog mismatch")
+	if err := backup.Registry.ValidateVersion(); err != nil {
+		return out, err
 	}
 	if err := validateRelayRegistry(backup.Registry, backup.Config); err != nil {
 		return out, err

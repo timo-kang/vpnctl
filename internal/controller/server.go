@@ -325,6 +325,7 @@ func (s *Server) httpHandler() http.Handler {
 	mux.HandleFunc("/wg-config", s.requireClientCert(s.handleWGConfig))
 	mux.HandleFunc("/relay-catalog", s.requireClientCert(s.handleRelayCatalog))
 	mux.HandleFunc("/relay-bindings", s.requireClientCert(s.handleRelayBinding))
+	mux.HandleFunc("/relay-deployment", s.requireClientCert(s.handleRelayDeployment))
 	mux.HandleFunc("/fleet/status", s.requireClientCert(s.handleFleetStatus))
 	mux.HandleFunc("/fleet/history", s.handleAuthorizedFleetHistory)
 	mux.HandleFunc("/uplink-observations", s.requireClientCert(s.handleUplinkObservation))

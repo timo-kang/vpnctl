@@ -120,4 +120,45 @@ func checkRelayCLIWorkflow(t *testing.T, run func(...string) string, controllerP
 	if status.RelayCatalog == nil || status.RelayCatalog.Generation != 3 {
 		t.Fatal("CLI status is stale")
 	}
+	checkRelayRecipientCLI(t, run, controllerPath, nodePath, status.RelayCatalog)
+}
+
+func checkRelayRecipientCLI(t *testing.T, run func(...string) string, controllerPath, nodePath string, catalog *relaycatalog.State) {
+	t.Helper()
+	relay := catalog.Spec.Relays[0].ID
+	var response api.AdminResponse
+	for _, op := range []string{"grant", "withdraw", "grant"} {
+		args := []string{"controller", "relay", op, "--config", controllerPath, "--controller-id", catalog.ControllerID, "--generation", strconv.FormatUint(catalog.Generation, 10), "--relay-id", relay}
+		if op == "grant" {
+			args = append(args, "--principal", "a")
+		}
+		if e := json.Unmarshal([]byte(run(args...)), &response); e != nil {
+			t.Fatal(e)
+		}
+		catalog = response.RelayCatalog
+		if op == "grant" {
+			var view relaycatalog.DeploymentView
+			if e := json.Unmarshal([]byte(run("relay", "catalog", "--config", nodePath, "--relay-id", relay)), &view); e != nil || len(view.Bindings) != 1 || view.PrincipalID != "a" || view.Generation != catalog.Generation {
+				t.Fatal("CLI scoped relay deployment", e)
+			}
+		} else {
+			out, e := cliProcess(t, "relay", "catalog", "--config", nodePath, "--relay-id", relay).Output()
+			if e == nil || len(out) != 0 {
+				t.Fatal("CLI withdrawal returned peer metadata")
+			}
+		}
+	}
+}
+
+func TestRelayRecipientCLIRejectsInputs(t *testing.T) {
+	for _, args := range [][]string{{"grant"}, {"withdraw", "--controller-id", "id", "--generation", "1", "--relay-id", "ra", "--principal", "a"}, {"grant", "--controller-id", "id", "--generation", "1", "--relay-id", "ra"}} {
+		if e := runControllerRelay(args); e == nil {
+			t.Fatal("invalid recipient command accepted", args)
+		}
+	}
+	for _, args := range [][]string{{}, {"apply"}, {"catalog"}, {"catalog", "--relay-id", "r", "--timeout", "0s"}, {"catalog", "--relay-id", "r", "--timeout", "21s"}, {"catalog", "--relay-id", "r", "extra"}, {"sync-credentials", "--relay-id", "r"}, {"sync-credentials", "--timeout", "0s"}} {
+		if e := runRelayRecipient(args); e == nil {
+			t.Fatal("invalid relay command accepted", args)
+		}
+	}
 }

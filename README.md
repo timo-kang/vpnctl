@@ -79,7 +79,10 @@ vpnctl doctor --config configs/node.yaml
 다중 relay의 승인 후보와 경로별 공개키/IP 원장은 [Relay catalog v1](docs/architecture/relay-catalog.md)
 CLI/API로 관리합니다. [로컬 장치 매핑과 경로 준비 계획](docs/architecture/node-relay-plan.md)은
 `node relay plan`으로 확인합니다. [후보 준비·검사·복구](docs/architecture/node-relay-prepare.md)는
-`node relay prepare|inspect|release|recover`로 수행합니다. 릴레이 배포와 자동 전환은 후속 구현 단계입니다.
+`node relay prepare|inspect|release|recover`로 수행합니다.
+[릴레이 수신 주체 승인·조회](docs/architecture/relay-recipient.md)는
+`controller relay grant|withdraw`와 `relay catalog`로 관리합니다. `relay sync-credentials`는
+릴레이 신원의 등록 ACK·인증서 갱신을 수행합니다. 릴레이 peer 설치와 자동 전환은 후속 구현 단계입니다.
 
 ## Architecture
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"vpnctl/internal/api"
@@ -76,8 +77,11 @@ func (s *Server) adminRelayCatalog(r api.AdminRequest) (*relaycatalog.State, err
 		}
 		return s.reg.RelayCatalog, nil
 	}
-	if r.RelayCatalog == nil {
+	if r.Operation == "relay.catalog.apply" && r.RelayCatalog == nil {
 		return nil, fmt.Errorf("%w: relay_catalog update required", relaycatalog.ErrInvalid)
+	}
+	if r.Operation == "relay.recipient.set" && r.RelayRecipient == nil {
+		return nil, fmt.Errorf("%w: relay_recipient update required", relaycatalog.ErrInvalid)
 	}
 	// Like existing administrator mutations, an admitted update completes even
 	// after disconnect. Admission precedes stateMu so queued writers don't stall reads.
@@ -97,9 +101,21 @@ func (s *Server) adminRelayCatalog(r api.AdminRequest) (*relaycatalog.State, err
 	if e := s.ensureRegistryDurableLocked(); e != nil {
 		return nil, e
 	}
-	catalog, e := relaycatalog.Apply(s.reg.RelayCatalog, *r.RelayCatalog, relayEnvironment(s.reg, s.cfg), time.Now())
+	var catalog *relaycatalog.State
+	var e error
+	switch r.Operation {
+	case "relay.catalog.apply":
+		catalog, e = relaycatalog.Apply(s.reg.RelayCatalog, *r.RelayCatalog, relayEnvironment(s.reg, s.cfg), time.Now())
+	case "relay.recipient.set":
+		catalog, e = relaycatalog.SetRecipient(s.reg.RelayCatalog, *r.RelayRecipient, relayEnvironment(s.reg, s.cfg))
+	default:
+		return nil, fmt.Errorf("%w: unsupported relay mutation", relaycatalog.ErrInvalid)
+	}
 	if e != nil {
 		return nil, e
+	}
+	if catalog == s.reg.RelayCatalog {
+		return catalog, nil
 	}
 	next := cloneRegistry(s.reg)
 	next.RelayCatalog = catalog
@@ -109,6 +125,41 @@ func (s *Server) adminRelayCatalog(r api.AdminRequest) (*relaycatalog.State, err
 	slog.Info("relay catalog published", "generation", catalog.Generation, "paths", len(catalog.Spec.Paths), "expires_at", catalog.ExpiresAt)
 	return catalog, nil
 }
+func (s *Server) handleRelayDeployment(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodGet {
+		writeJSONError(w, 405, "GET required")
+		return
+	}
+	identity, ok := requestNodeIdentity(r)
+	if !ok {
+		writeJSONError(w, 401, "relay deployment requires mTLS identity")
+		return
+	}
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil || len(q) != 2 || len(q["schema_version"]) != 1 || q.Get("schema_version") != "1" || len(q["relay_id"]) != 1 || q.Get("relay_id") == "" {
+		writeRelayError(w, fmt.Errorf("%w: schema_version=1 and one relay_id required", relaycatalog.ErrInvalid))
+		return
+	}
+	s.mu.Lock()
+	uncertain := s.registryUncertain
+	view, allowed := s.reg.RelayCatalog.DeploymentFor(identity.id, q.Get("relay_id"))
+	s.mu.Unlock()
+	if uncertain {
+		writeRelayError(w, errRelayUncertain)
+		return
+	}
+	if !allowed {
+		writeJSON(w, 403, api.ErrorResponse{Error: "relay recipient not authorized", Code: "relay_recipient_denied"})
+		return
+	}
+	if !time.Now().Before(view.ExpiresAt) {
+		writeRelayError(w, relaycatalog.ErrExpired)
+		return
+	}
+	writeJSON(w, 200, view)
+}
+
 func (s *Server) relayNodeAuthorized(w http.ResponseWriter, r *http.Request, nodeID string) bool {
 	// This new API always requires a verified identity, even if legacy HTTP APIs
 	// are enabled. Query/body fields never establish authority.

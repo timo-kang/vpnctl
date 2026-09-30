@@ -75,13 +75,28 @@ func LoadRegistry(path string) (*Registry, error) {
 	if err := dec.Decode(&extra); err != io.EOF {
 		return nil, fmt.Errorf("invalid registry: expected a single document")
 	}
-	if reg.Version < 0 || reg.Version > 2 {
-		return nil, fmt.Errorf("unsupported registry version %d", reg.Version)
-	}
-	if (reg.Version == 2) != (reg.RelayCatalog != nil) {
-		return nil, fmt.Errorf("registry version/catalog mismatch")
+	if err := reg.ValidateVersion(); err != nil {
+		return nil, err
 	}
 	return &reg, nil
+}
+
+// ValidateVersion also applies to JSON backups, which do not use the strict
+// YAML registry reader. Version 3 cannot downgrade after the last grant is removed.
+func (reg *Registry) ValidateVersion() error {
+	if reg.Version < 0 || reg.Version > 3 {
+		return fmt.Errorf("unsupported registry version %d", reg.Version)
+	}
+	if (reg.Version >= 2) != (reg.RelayCatalog != nil) {
+		return fmt.Errorf("registry version/catalog mismatch")
+	}
+	if reg.RelayCatalog != nil {
+		schema := reg.RelayCatalog.RecipientSchema
+		if schema < 0 || schema > 1 || (reg.Version == 3) != (schema == 1) || schema == 0 && len(reg.RelayCatalog.Recipients) != 0 {
+			return fmt.Errorf("registry version/recipient schema mismatch")
+		}
+	}
+	return nil
 }
 
 // SaveRegistry writes the registry to disk.
@@ -89,13 +104,25 @@ func SaveRegistry(path string, reg *Registry) error {
 	if reg == nil {
 		return nil
 	}
+	if reg.Version < 0 || reg.Version > 3 {
+		return fmt.Errorf("unsupported registry version %d", reg.Version)
+	}
 	if reg.RelayCatalog != nil {
+		if reg.Version == 3 && reg.RelayCatalog.RecipientSchema != 1 {
+			return fmt.Errorf("cannot drop recipient schema from version 3 registry")
+		}
 		reg.Version = 2
+		if reg.RelayCatalog.RecipientSchema == 1 {
+			reg.Version = 3
+		}
 	} else {
 		if reg.Version >= 2 {
 			return fmt.Errorf("cannot drop relay catalog from version 2 registry")
 		}
 		reg.Version = 1
+	}
+	if err := reg.ValidateVersion(); err != nil {
+		return err
 	}
 	reg.UpdatedAt = time.Now().UTC()
 	data, err := yaml.Marshal(reg)

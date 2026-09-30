@@ -100,14 +100,29 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      # Churn and the real full-mesh producers run on dedicated jobs below.
+      # Churn, the full 128MiB WG payload check, and real full-mesh producers
+      # run on dedicated jobs below. The payload check repeatedly decodes the
+      # full real byte budget under race instrumentation; sharing history's
+      # cumulative 10m test timer can terminate it despite forward progress.
       # Concurrent SQLite race packages on two CPUs can starve live producers
       # past their unchanged 45s convergence budget. Every test still runs.
-      - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$'
+      - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
       - run: go test -race -tags=integration ./tests/integration -run '^TestSoakReadiness' -count=1
       - run: go vet ./...
       - run: go build ./cmd/vpnctl
       - run: go build ./cmd/vpnctl-lab-report
+
+  wireguard-storage:
+    name: WireGuard real byte budget and corruption race
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Exact 128MiB retention, eviction, reopen and backup corruption checks
+        run: go test -race ./internal/history -run '^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$' -count=1 -timeout=5m -v
 
   relay-catalog:
     name: M3 relay catalog and node cache contention

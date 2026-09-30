@@ -150,7 +150,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	// Validate operation and retry keys before consuming bounded mutation capacity.
 	switch req.Operation {
-	case "relay.catalog.status", "relay.catalog.apply", "node.remove", "pki.status", "pki.revoke", "ca.prepare", "ca.activate", "ca.retire", "ca.rollback", "pki.backup", "token.create", "token.list", "token.revoke", "token.result":
+	case "relay.catalog.status", "relay.catalog.apply", "relay.recipient.set", "node.remove", "pki.status", "pki.revoke", "ca.prepare", "ca.activate", "ca.retire", "ca.rollback", "pki.backup", "token.create", "token.list", "token.revoke", "token.result":
 	default:
 		writeJSONError(w, 400, "unknown admin operation")
 		return
@@ -181,12 +181,15 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	response := api.AdminResponse{RequestID: req.RequestID}
 	var err error
 	switch req.Operation {
-	case "relay.catalog.status", "relay.catalog.apply":
+	case "relay.catalog.status", "relay.catalog.apply", "relay.recipient.set":
 		target = "relay-catalog"
 		response.RelayCatalog, err = s.adminRelayCatalog(req)
 		if err != nil {
 			writeRelayError(w, err)
 			return
+		}
+		if req.Operation == "relay.recipient.set" {
+			target = req.RelayRecipient.RelayID
 		}
 	case "node.remove":
 		operation = req.Operation

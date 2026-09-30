@@ -5,7 +5,8 @@
 분리된 원장이다. LTE 보유 여부를 요구하지 않으며 `underlay_id`는 Wi-Fi/Ethernet 등
 노드가 나중에 실제 장치와 연결할 논리 이름이다. 현재 그 장치의 존재/가용성을 확인하지 않는다.
 
-catalog 발행·조회와 binding 저장에 더해 [node 영속 cache와 경로 키](node-relay-cache.md)를
+catalog 발행·조회와 binding 저장에 더해 [node 영속 cache와 경로 키](node-relay-cache.md),
+[node 경로 준비](node-relay-prepare.md), [인증된 relay 배포 조회](relay-recipient.md)를
 제공한다. relay peer 설정, forwarding·return path 적용, 경로 probe,
 자동 전환/rollback은 아직 구현하지 않았다. `priority`, `cost`, `drain`, `disabled`는
 승인 메타데이터다. 성공한 binding 응답은 실제 uplink 연결 성공을 의미하지 않는다.
@@ -69,8 +70,8 @@ binding은 인증된 요청 주체와 승인 path의 관계를 확인한다. Wir
 
 ## 세대·수명·변경 제약
 
-catalog identity는 최초 발행 시 생성하며 generation은 apply, 신규 binding, path가 있는
-node removal마다 증가한다. 레거시 heartbeat와 동일 binding 재시도는 증가시키지 않는다.
+catalog identity는 최초 발행 시 생성하며 generation은 apply, 신규 binding, 수신 주체 변경,
+path 또는 relay grant가 있는 node removal마다 증가한다. 레거시 heartbeat와 동일 binding 재시도는 증가시키지 않는다.
 신규 binding과 apply는 최신 세대에 대한 CAS를 요구한다. 같은 path/key 재시도는 과거의
 양수 세대도 수락한다. 다른 controller ID나 미래 세대는 거절한다.
 
@@ -116,6 +117,9 @@ catalog와 binding은 기존 `registry.yaml`의 한 원자적 교체에 포함�
 발행 후 바이너리만 이전 버전으로 되돌릴 수 없다**. 먼저 기존 PKI backup을 보관하고,
 복원은 catalog를 지원하는 버전에서 검증한다. restore는 schema와 binding 불변식을
 검사한 뒤 새 목적지에 기록한다. 기존 PKI 백업에는 catalog 원장도 포함된다.
+
+relay 수신 주체를 처음 승인하면 registry는 version 3으로 올라간다. 마지막 grant를
+철회한 뒤에도 v3을 유지하며 [수신 주체의 업그레이드 계약](relay-recipient.md)을 따른다.
 
 백업 시점 이후 할당/폐기된 key/IP 정보는 그 백업에 없다. 오래된 백업 복원은 최신
 원장과 동등하지 않으며 실제 배포된 peer와 대조해야 한다. node cache의 세대 역행 거절과
