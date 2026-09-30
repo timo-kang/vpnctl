@@ -20,13 +20,20 @@ var (
 	ErrBusy      = errors.New("relay cache is busy; another refresh or process owns it")
 	ErrMissing   = errors.New("relay cache is not initialized")
 	ErrUnsafe    = errors.New("relay cache requires private, owned regular files and a trusted directory")
-	ErrCorrupt   = errors.New("relay cache is inconsistent; restore the complete node cache or approve new path identities")
+	ErrCorrupt   = errors.New("relay cache is inconsistent; restore the complete cache and reconcile its approval identity")
 	ErrUncertain = errors.New("relay cache durability is uncertain; reopen or refresh to verify storage")
 )
 
 const stateFile = "state.json"
 const markerFile = "initialized"
 const maxStateBytes = 2 << 20
+
+// files is shared by the node key cache and the relay deployment cache. Each
+// caller owns a separate directory and holds cache.lock throughout its lifetime.
+type files struct {
+	root    *os.Root
+	syncDir func() error
+}
 
 // Root-relative operations retain the opened directory across renames. Reject
 // symlinks and writable ancestors before entering them. Root and the current UID
@@ -122,7 +129,7 @@ func syncRoot(root *os.Root) error {
 	defer f.Close()
 	return f.Sync()
 }
-func (s *Store) openFile(name string, flags int) (*os.File, error) {
+func (s *files) openFile(name string, flags int) (*os.File, error) {
 	info, e := s.root.Stat(".")
 	if e != nil {
 		return nil, e
@@ -155,7 +162,7 @@ func (s *Store) openFile(name string, flags int) (*os.File, error) {
 	}
 	return f, nil
 }
-func (s *Store) readFile(name string) ([]byte, error) {
+func (s *files) readFile(name string) ([]byte, error) {
 	f, e := s.openFile(name, os.O_RDONLY)
 	if e != nil {
 		return nil, e
@@ -170,7 +177,7 @@ func (s *Store) readFile(name string) ([]byte, error) {
 	}
 	return b, nil
 }
-func (s *Store) writeFile(name string, data []byte) error {
+func (s *files) writeFile(name string, data []byte) error {
 	if len(data) > maxStateBytes {
 		return ErrCorrupt
 	}

@@ -82,7 +82,9 @@ CLI/API로 관리합니다. [로컬 장치 매핑과 경로 준비 계획](docs/
 `node relay prepare|inspect|release|recover`로 수행합니다.
 [릴레이 수신 주체 승인·조회](docs/architecture/relay-recipient.md)는
 `controller relay grant|withdraw`와 `relay catalog`로 관리합니다. `relay sync-credentials`는
-릴레이 신원의 등록 ACK·인증서 갱신을 수행합니다. 릴레이 peer 설치와 자동 전환은 후속 구현 단계입니다.
+릴레이 신원의 등록 ACK·인증서 갱신을 수행합니다.
+[릴레이 승인 cache](docs/architecture/relay-deployment-cache.md)는 `relay refresh|status`로
+갱신·재시작 후 검증합니다. 릴레이 peer 설치와 자동 전환은 후속 구현 단계입니다.
 
 ## Architecture
 

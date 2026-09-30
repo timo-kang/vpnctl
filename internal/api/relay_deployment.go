@@ -13,8 +13,8 @@ import (
 
 // RelayDeployment returns an online snapshot, not a durable offline approval.
 // principal is checked against the response; only the client certificate grants
-// authority at the server. A later cache must additionally pin controller ID and
-// reject generation rollback or same-generation content changes.
+// authority at the server. The relaycache deployment store additionally pins
+// controller ID and rejects generation rollback or same-generation changes.
 func (c *Client) RelayDeployment(ctx context.Context, principal, relayID string) (relaycatalog.DeploymentView, error) {
 	var v relaycatalog.DeploymentView
 	query := url.Values{"schema_version": {"1"}, "relay_id": {relayID}}
