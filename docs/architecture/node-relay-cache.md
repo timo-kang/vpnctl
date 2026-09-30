@@ -6,6 +6,8 @@ controller의 key/IP binding을 확인한다. `status`는 controller 접속 없�
 후보를 준비하는 단계다. 이 명령은 OS interface/route, relay peer, forwarding, NAT를
 설치하지 않으며 `usable_cache`는 실제 uplink 성공이나 비밀키 소유 증명을 뜻하지 않는다.
 
+승인 cache의 경로를 실제 로컬 장치와 연결하려면 [node relay plan](node-relay-plan.md)을 사용한다.
+
 ## 실행과 설정
 
 [Catalog 발행](relay-catalog.md)과 node enrollment 이후 실행한다.

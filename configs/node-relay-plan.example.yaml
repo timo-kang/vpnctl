@@ -1,0 +1,16 @@
+# Merge these fields into an enrolled node configuration.
+# IDs match relay-catalog.example.json; replace interface names with local devices.
+node:
+  name: robot-a
+  controller: https://controller.example:8443
+  pki_dir: /var/lib/vpnctl-node/pki
+  relay_cache_dir: /var/lib/vpnctl-node/relay-cache
+  relay_underlays:
+    - id: wifi-main
+      interface: wlan0
+      kind: wifi
+      # Required when the interface has several usable IPv4 addresses:
+      # source_ipv4: 192.0.2.10
+    - id: ethernet
+      interface: eth0
+      kind: ethernet

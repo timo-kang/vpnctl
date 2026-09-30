@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"vpnctl/internal/atomicfile"
+	"vpnctl/internal/relayplan"
 	"vpnctl/internal/uplink"
 )
 
@@ -86,8 +87,9 @@ type PKIConfig struct {
 
 // NodeConfig is used by the agent process running on a device.
 type NodeConfig struct {
-	RelayCacheDir     string         `yaml:"relay_cache_dir,omitempty"`
-	UplinkObservation *uplink.Config `yaml:"uplink_observation,omitempty"`
+	RelayUnderlays    []relayplan.Underlay `yaml:"relay_underlays,omitempty"`
+	RelayCacheDir     string               `yaml:"relay_cache_dir,omitempty"`
+	UplinkObservation *uplink.Config       `yaml:"uplink_observation,omitempty"`
 
 	Name                        string   `yaml:"name"`
 	Controller                  string   `yaml:"controller"`
@@ -185,6 +187,9 @@ func Validate(cfg Config) error {
 	if cfg.Node != nil {
 		if cfg.Node.Controller == "" && (cfg.Node.ServerPublicKey == "" || cfg.Node.ServerEndpoint == "" || len(cfg.Node.ServerAllowedIPs) == 0) {
 			return fmt.Errorf("node.controller is required unless server fields are set")
+		}
+		if err := relayplan.ValidateUnderlays(cfg.Node.RelayUnderlays); err != nil {
+			return err
 		}
 		if cfg.Node.UplinkObservation != nil {
 			if err := cfg.Node.UplinkObservation.Validate(); err != nil {

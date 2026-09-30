@@ -68,6 +68,7 @@ Usage:
   vpnctl node sync-config --config <path>
   vpnctl node relay catalog|bind --config <path> [--controller-id <id> --generation <n> --path-id <id> --public-key <key>]
   vpnctl node relay refresh|status --config <path> [--cache-dir <private-dir> --timeout 2m]
+  vpnctl node relay plan --config <path> [--cache-dir <private-dir> --controller-id <id> --timeout 20s]
   vpnctl direct serve --config <path> [--listen :0]
   vpnctl direct test --config <path> --peer <name>
   vpnctl discover --config <path>

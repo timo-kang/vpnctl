@@ -1,2 +1,3 @@
 *.yaml
 *.key
+!node-relay-plan.example.yaml
