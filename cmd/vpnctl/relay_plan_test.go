@@ -42,7 +42,7 @@ func (f *cliPlanIssuer) BindRelayPath(_ context.Context, r relaycatalog.BindRequ
 }
 
 func TestRelayPlanCLIRejectsUnusableApprovals(t *testing.T) {
-	for _, mode := range []string{"missing", "foreign-node", "foreign-controller", "expired", "denied", "uncertain-controller", "disabled", "draining", "unbound", "oversized", "unmapped"} {
+	for _, mode := range []string{"missing", "foreign-node", "foreign-controller", "expired", "expires-during-plan", "denied", "uncertain-controller", "disabled", "draining", "unbound", "oversized", "unmapped"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			if e := os.Chmod(dir, 0700); e != nil {
@@ -64,7 +64,7 @@ func TestRelayPlanCLIRejectsUnusableApprovals(t *testing.T) {
 			}
 			env := relaycatalog.Environment{Nodes: map[string]bool{"robot-a": true}, VPNCIDR: "10.7.0.0/24"}
 			at, ttl := time.Now().UTC(), 3600
-			if mode == "expired" {
+			if mode == "expired" || mode == "expires-during-plan" {
 				at = at.Add(-time.Minute)
 				ttl = 65
 			}
@@ -128,6 +128,27 @@ func TestRelayPlanCLIRejectsUnusableApprovals(t *testing.T) {
 					t.Fatal(e)
 				}
 			}
+			if mode == "expires-during-plan" {
+				cfg.Node.RelayUnderlays = []relayplan.Underlay{{ID: "wifi-main", Interface: "wan0", Kind: "wifi"}, {ID: "ethernet", Interface: "wan1", Kind: "ethernet"}}
+				fakeBin := filepath.Join(dir, "bin")
+				if e = os.Mkdir(fakeBin, 0700); e != nil {
+					t.Fatal(e)
+				}
+				script := `#!/bin/sh
+printf . >> "$VPNCTL_TEST_INVENTORY_MARKER"
+sleep 1
+if [ "$2" = "address" ]; then
+ printf '%s\n' '[{"ifindex":7,"ifname":"wan0","flags":["UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"192.0.2.10","prefixlen":24,"scope":"global"}]},{"ifindex":8,"ifname":"wan1","flags":["UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"198.51.100.10","prefixlen":24,"scope":"global"}]}]'
+else
+ printf '[{"dst":"%s","from":"%s","dev":"%s"}]\n' "$5" "$7" "$9"
+fi
+`
+				if e = os.WriteFile(filepath.Join(fakeBin, "ip"), []byte(script), 0700); e != nil {
+					t.Fatal(e)
+				}
+				t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+				t.Setenv("VPNCTL_TEST_INVENTORY_MARKER", filepath.Join(dir, "collected"))
+			}
 			path := filepath.Join(dir, "node.yaml")
 			if e = config.Save(path, cfg); e != nil {
 				t.Fatal(e)
@@ -171,8 +192,13 @@ func TestRelayPlanCLIRejectsUnusableApprovals(t *testing.T) {
 					}
 				}
 			}
-			if mode == "expired" && !strings.Contains(plan.Reason, "expired") {
+			if (mode == "expired" || mode == "expires-during-plan") && (plan.CacheValidity != "expired" || !strings.Contains(plan.Reason, "expired")) {
 				t.Fatal("expiry hidden", plan.Reason)
+			}
+			if mode == "expires-during-plan" {
+				if b, e := os.ReadFile(filepath.Join(dir, "collected")); e != nil || len(b) == 0 {
+					t.Fatal("cache expired before collection; boundary was not exercised")
+				}
 			}
 			if mode == "denied" && !strings.Contains(plan.Reason, "denied") {
 				t.Fatal("denial hidden", plan.Reason)

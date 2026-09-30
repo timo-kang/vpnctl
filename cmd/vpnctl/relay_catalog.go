@@ -237,7 +237,14 @@ func printRelayPlan(ctx context.Context, node, controller string, report relayca
 	if cache != nil {
 		latest, e := cache.Status() // Persist expiry observed while collecting inventory.
 		if e != nil || latest.Validity != report.Validity || latest.BlockedReason != report.BlockedReason {
-			plan.State, plan.Reason = "blocked", "cache_unavailable_after_collection"
+			plan.State, plan.CacheValidity = "blocked", latest.Validity
+			plan.Reason = "cache_" + latest.Validity
+			if latest.BlockedReason != "" {
+				plan.Reason = "cache_" + latest.BlockedReason
+			}
+			if e != nil {
+				plan.CacheValidity, plan.Reason = "unknown", "cache_status_failed"
+			}
 			for i := range plan.Paths {
 				plan.Paths[i].State = "excluded"
 				plan.Paths[i].Reason = plan.Reason
