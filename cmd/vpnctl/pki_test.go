@@ -97,26 +97,45 @@ func TestPKICLITrustedBootstrapBackupAndRestore(t *testing.T) {
 	}
 	client := api.NewCredentialClient(address, nodeDir)
 	defer client.CloseIdleConnections()
-	if err := client.SyncCredentials(context.Background(), nodeDir, "a"); err != nil {
-		t.Fatal(err)
+	beforeACK, err := store.LoadRegistry(filepath.Join(dir, "controller", "registry.yaml"))
+	if err != nil || len(beforeACK.Nodes) != 1 || !beforeACK.Nodes[0].EnrollmentPending {
+		t.Fatal("bootstrap fixture did not leave enrollment pending", err)
+	}
+	syncRelay := func() {
+		t.Helper()
+		var result struct {
+			SchemaVersion int    `json:"schema_version"`
+			PrincipalID   string `json:"principal_id"`
+			State         string `json:"state"`
+		}
+		raw, err := cliProcess(t, "relay", "sync-credentials", "--config", nodePath).Output()
+		if err != nil {
+			t.Fatal("relay credential sync failed", err)
+		}
+		out := string(raw)
+		if err := json.Unmarshal([]byte(out), &result); err != nil || result.SchemaVersion != 1 || result.PrincipalID != "a" || result.State != "credentials_synchronized" {
+			t.Fatal("relay credential sync output", err)
+		}
+		if strings.Contains(out, "PRIVATE") || strings.Contains(out, "client_key") || strings.Contains(out, "client_cert") {
+			t.Fatal("credential material in sync output")
+		}
+	}
+	syncRelay()
+	afterACK, err := store.LoadRegistry(filepath.Join(dir, "controller", "registry.yaml"))
+	if err != nil || afterACK.Nodes[0].EnrollmentPending {
+		t.Fatal("relay CLI did not confirm enrollment", err)
 	}
 	checkRelayCLIWorkflow(t, run, controllerPath, nodePath)
 	run("controller", "pki", "ca-prepare", "--config", controllerPath)
 	if out, err := cliProcess(t, "controller", "pki", "ca-activate", "--config", controllerPath).CombinedOutput(); err == nil || !strings.Contains(string(out), "acknowledged") {
 		t.Fatalf("missing meaningful CA gate error: %v %s", err, out)
 	}
-	if err := client.SyncCredentials(context.Background(), nodeDir, "a"); err != nil {
-		t.Fatal(err)
-	}
+	syncRelay()
 	run("controller", "pki", "ca-activate", "--config", controllerPath)
-	if err := client.SyncCredentials(context.Background(), nodeDir, "a"); err != nil {
-		t.Fatal(err)
-	}
+	syncRelay()
 	run("node", "relay", "refresh", "--config", nodePath)
 	run("controller", "pki", "ca-rollback", "--config", controllerPath)
-	if err := client.SyncCredentials(context.Background(), nodeDir, "a"); err != nil {
-		t.Fatal(err)
-	}
+	syncRelay()
 	run("node", "relay", "refresh", "--config", nodePath)
 	current, err := pki.LoadCredentials(nodeDir)
 	if err != nil {
@@ -129,6 +148,9 @@ func TestPKICLITrustedBootstrapBackupAndRestore(t *testing.T) {
 	run("controller", "pki", "revoke", "--config", controllerPath, "--fingerprint", pki.Fingerprint(cert))
 	if _, err := client.FleetStatus(context.Background()); err == nil {
 		t.Fatal("CLI revocation did not take effect")
+	}
+	if out, err := cliProcess(t, "relay", "sync-credentials", "--config", nodePath).Output(); err == nil || len(out) != 0 {
+		t.Fatal("revoked identity reported synchronized credentials")
 	}
 	deniedOutput, deniedErr := cliProcess(t, "node", "relay", "refresh", "--config", nodePath).Output()
 	var denied relaycache.Report

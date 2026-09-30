@@ -156,7 +156,7 @@ func TestRelayRecipientCLIRejectsInputs(t *testing.T) {
 			t.Fatal("invalid recipient command accepted", args)
 		}
 	}
-	for _, args := range [][]string{{}, {"apply"}, {"catalog"}, {"catalog", "--relay-id", "r", "--timeout", "0s"}, {"catalog", "--relay-id", "r", "--timeout", "21s"}, {"catalog", "--relay-id", "r", "extra"}} {
+	for _, args := range [][]string{{}, {"apply"}, {"catalog"}, {"catalog", "--relay-id", "r", "--timeout", "0s"}, {"catalog", "--relay-id", "r", "--timeout", "21s"}, {"catalog", "--relay-id", "r", "extra"}, {"sync-credentials", "--relay-id", "r"}, {"sync-credentials", "--timeout", "0s"}} {
 		if e := runRelayRecipient(args); e == nil {
 			t.Fatal("invalid relay command accepted", args)
 		}

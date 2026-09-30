@@ -46,21 +46,24 @@ func runControllerRelayRecipient(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(response)
 }
 
-// This is a bounded online inspection command. It does not cache approval,
-// accept manual deployment JSON, or apply any local networking resources.
+// Relay commands bound online approval reads and explicit PKI synchronization.
+// Neither command caches approval or applies local networking resources.
 func runRelayRecipient(args []string) error {
-	if len(args) == 0 || args[0] != "catalog" {
-		return fmt.Errorf("relay catalog required")
+	if len(args) == 0 || args[0] != "catalog" && args[0] != "sync-credentials" {
+		return fmt.Errorf("relay catalog|sync-credentials required")
 	}
-	fs := flag.NewFlagSet("relay catalog", flag.ContinueOnError)
+	fs := flag.NewFlagSet("relay "+args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "enrolled identity YAML configuration")
 	relay := fs.String("relay-id", "", "explicitly authorized relay ID")
 	timeout := fs.Duration("timeout", 20*time.Second, "request deadline, at most 20s")
 	if e := fs.Parse(args[1:]); e != nil {
 		return e
 	}
-	if len(fs.Args()) != 0 || *relay == "" || *timeout <= 0 || *timeout > 20*time.Second {
-		return fmt.Errorf("relay catalog requires --relay-id and timeout in (0,20s] with no positional arguments")
+	if len(fs.Args()) != 0 || *timeout <= 0 || *timeout > 20*time.Second {
+		return fmt.Errorf("relay commands require timeout in (0,20s] with no positional arguments")
+	}
+	if args[0] == "catalog" && *relay == "" || args[0] == "sync-credentials" && *relay != "" {
+		return fmt.Errorf("--relay-id is required for catalog and forbidden for sync-credentials")
 	}
 	cfg, e := loadConfig(*cfgPath)
 	if e != nil {
@@ -75,6 +78,16 @@ func runRelayRecipient(args []string) error {
 	defer stop()
 	ctx, cancel := context.WithTimeout(parent, *timeout)
 	defer cancel()
+	if args[0] == "sync-credentials" {
+		if e := client.SyncCredentials(ctx, cfg.Node.PKIDir, cfg.Node.Name); e != nil {
+			return e
+		}
+		return json.NewEncoder(os.Stdout).Encode(struct {
+			SchemaVersion int    `json:"schema_version"`
+			PrincipalID   string `json:"principal_id"`
+			State         string `json:"state"`
+		}{1, cfg.Node.Name, "credentials_synchronized"})
+	}
 	view, e := client.RelayDeployment(ctx, cfg.Node.Name, *relay)
 	if e != nil {
 		return e

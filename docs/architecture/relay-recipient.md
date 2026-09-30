@@ -12,6 +12,10 @@ relay 권한을 부여하지 않는다. controller의 Unix admin socket에 접�
 관리자가 완료된 enrollment 신원을 각 relay ID의 수신 주체로 명시해야 한다.
 
 ```sh
+# 기존 node join의 신뢰된 CA/token bootstrap을 완료한 relay 신원에 대해 실행한다.
+# 신뢰 동기화·필요한 갱신·로컬 설치·ACK까지 끝나야 최초 grant가 가능하다.
+vpnctl relay sync-credentials --config relay-identity.yaml --timeout 20s
+
 vpnctl controller relay status --config controller.yaml
 
 # 최신 status의 controller ID와 generation을 사용한다.
@@ -33,6 +37,13 @@ vpnctl controller relay withdraw --config controller.yaml \
 일반 node API의 기존 권한도 유지한다. 따라서 relay 전용 최소 권한 계정 모델은 아니다.
 controller와 같은 호스트에서 relay를 실행하더라도 인증서·관리자 승인·WG private key의
 책임은 구분한다. WG private key는 이 API나 승인 원장으로 배포하지 않는다.
+
+relay 신원 설정에는 `node.name`, `node.controller`, `node.pki_dir`을 사용한다.
+`relay sync-credentials`는 노드 daemon/WG key/인터페이스 없이 PKI 동기화만 수행하고,
+결과에 신원과 완료 상태만 출력한다. 자동 갱신 daemon은 아직 제공하지 않으므로 운영
+스케줄러가 이 명령을 갱신 기한 전에 반복하고 CA 전환 시 ACK를 확인해야 한다.
+기존 legacy node WG key와 relay WG key는 서로 달라야 하며 TLS 전용 신원 설정에는
+legacy WG key를 넣을 필요가 없다. 인증서 만료·revoke는 동기화 성공으로 보고하지 않는다.
 
 relay마다 수신 주체는 하나다. 하나의 주체가 여러 relay를 맡으려면 각각 승인한다.
 다른 주체로 교체하면 이전 주체는 새 조회에서 403을 받는다. 권한 변경은 catalog와

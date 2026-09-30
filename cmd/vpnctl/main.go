@@ -54,6 +54,7 @@ Usage:
   vpnctl controller relay status|apply --config <path> [--file <catalog.json> --controller-id <id> --generation <n> --ttl 1h]
   vpnctl controller relay grant|withdraw --config <path> --controller-id <id> --generation <n> --relay-id <id> [--principal <enrolled-name>]
   vpnctl relay catalog --config <enrolled-identity.yaml> --relay-id <id> [--timeout 20s]
+  vpnctl relay sync-credentials --config <enrolled-identity.yaml> [--timeout 20s]
   vpnctl controller history backup --config <path> --out <history.db>
   vpnctl controller history restore --config <path> --file <history.db>
   vpnctl controller history enable-jitter --config <path> --out <pre-jitter-backup.db>
