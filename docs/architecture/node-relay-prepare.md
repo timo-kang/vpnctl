@@ -40,7 +40,7 @@ prepare에는 `--controller-id`를 추가해 기대하는 controller 신원을 �
 3. private cache의 `apply.json`에 모든 예정 자원과 임의 소유 식별자를 원자적으로 저장한다.
 4. 별도 WG interface를 만들고 alias, 종결 unreachable, endpoint /32 route, mark rule,
    내부 /32 주소, WG 설정을 순서대로 설치한다. 승인과 장치를 재검사한 후 interface를 올린다.
-5. 커널 주소·공개키·peer·endpoint·AllowedIPs·mark·rule·route를 읽어 대조하고 완료를 저장한다.
+5. 커널 주소·공개키·peer·endpoint·AllowedIPs·PSK 미설정·mark·rule·route를 읽어 대조하고 완료를 저장한다.
 
 후보 table에는 선택한 device/source/gateway의 endpoint route와 `unreachable default`만 둔다.
 endpoint route가 사라져도 mark 조회가 main table로 넘어가지 않게 한다. gateway 경로는
@@ -64,6 +64,8 @@ rule은 priority/mark/mask/table/protocol을 대조한다.
   저장 실패·불확실 상태에서는 같은 엔진으로 계속 변경하지 않고 다시 열어 확인해야 한다.
 - cache의 개인키는 승인 재검사 후 `wg setconf`의 stdin pipe로만 전달한다.
   명령 인자, journal, 일반 오류·출력에는 포함하지 않는다. `wg show dump`를 사용하지 않는다.
+  이 후보 계약은 PSK를 승인하지 않는다. 외부 PSK는 private 명령 pipe 안에서 설정 여부를
+  검사하고 준비 완료·삭제를 거절한다. 읽은 PSK 값은 오류·report·artifact에 포함하지 않는다.
 - 전체 작업은 최대 60초, 명령별 3초와 종료 정리 250ms, 명령 stdout 512KiB/stderr 4KiB,
   inventory 목록당 4096개로 제한한다. 초과·파싱 실패는 일부 결과로 진행하지 않는다.
   취소 시 실행 중인 명령과 자식도 종료한다. 파일 I/O의 kernel hang까지 취소하지는 못한다.
@@ -72,7 +74,7 @@ rule은 priority/mark/mask/table/protocol을 대조한다.
 
 외부 관리자는 이 후보의 자원을 동시에 변경하지 않아야 한다. 잠금은 vpnctl 적용자 간의
 직렬화이며 모든 root 도구를 잠그지는 못한다. 커널 전체에 걸친 원자적 트랜잭션을 보장하지 않는다.
-각 변경 전에 다시 확인하며 외부 peer/address/route나 다른 소유 식별자가 발견되면
+각 변경 전에 다시 확인하며 외부 peer/PSK/address/route나 다른 소유 식별자가 발견되면
 자동 삭제를 거절한다. 외부 프로그램의 mark 재작성·라우팅 변경도 배포에서 분리해야 한다.
 
 ## 상태별 조치

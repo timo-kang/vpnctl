@@ -67,6 +67,7 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 		return strings.Join(parts, "\n")
 	}
 	beforeKernel := baseline()
+	forbiddenSecret := ""
 	call := func(action, path string, want bool) relayapply.Result {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
@@ -77,6 +78,9 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 		}
 		cmd := netCommand(ctx, robot, append([]string{bin}, args...)...)
 		b, err := cmd.CombinedOutput()
+		if forbiddenSecret != "" && strings.Contains(string(b), forbiddenSecret) {
+			t.Fatal("CLI exposed the external preshared key")
+		}
 		if (err == nil) != want {
 			for _, read := range [][]string{{"ip", "-j", "-d", "link", "show"}, {"ip", "-j", "-N", "-4", "route", "show", "table", "all"}, {"ip", "-j", "-N", "-4", "rule", "show"}, {"wg", "show", "all", "fwmark"}} {
 				t.Log(netOutput(t, robot, read...))
@@ -133,6 +137,24 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 	call("recover", "", true)
 	call("prepare", first.PathID, true)
 	report.Phases = append(report.Phases, "four_candidates_idempotent_prepare_and_external_peer_conflict")
+	// A PSK on the approved peer changes the cryptographic configuration even
+	// though peer identity, endpoint and AllowedIPs still match the approval.
+	forbiddenSecret, _ = wgKeyPair(t)
+	pskFile := filepath.Join(private, "external-prepare.psk")
+	mustWrite(t, pskFile, forbiddenSecret)
+	netOutput(t, robot, "wg", "set", first.Pin.WGInterface, "peer", first.RelayPublicKey, "preshared-key", pskFile)
+	if out := call("inspect", "", false); out.KernelReady {
+		t.Fatal("unapproved preshared key reported ready")
+	}
+	call("prepare", first.PathID, false)
+	call("release", first.PathID, false)
+	if strings.TrimSpace(netOutput(t, robot, "wg", "show", first.Pin.WGInterface, "public-key")) != first.PublicKey {
+		t.Fatal("interface carrying external PSK was changed")
+	}
+	netOutput(t, robot, "wg", "set", first.Pin.WGInterface, "peer", first.RelayPublicKey, "preshared-key", "/dev/null")
+	call("recover", "", true)
+	call("prepare", first.PathID, true)
+	report.Phases = append(report.Phases, "external_preshared_key_conflict_without_secret_disclosure")
 	for r, ns := range relays {
 		keyfile := filepath.Join(private, fmt.Sprintf("prepare-relay-%d.key", r))
 		mustWrite(t, keyfile, relayKeys[r])

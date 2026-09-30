@@ -145,3 +145,36 @@ func TestWGExtraPeerRefusesRemoval(t *testing.T) {
 		t.Fatal("modified interface removed", err, mutations)
 	}
 }
+
+func TestWGUnapprovedPresharedKey(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		for _, extra := range []bool{false, true} {
+			e, _ := kernelFixture(t)
+			secret := "unapproved-secret"
+			k := kernel{run: func(_ context.Context, _ string, _ string, args ...string) ([]byte, error) {
+				if strings.Contains(strings.Join(args, " "), "address show") {
+					return json.Marshal([]object{{"addr_info": []object{{"family": "inet", "local": strings.TrimSuffix(e.Candidate.InnerAddress, "/32"), "prefixlen": 32}}}})
+				}
+				values := map[string]string{
+					"public-key":           e.Candidate.PublicKey,
+					"peers":                e.Candidate.RelayPublicKey,
+					"endpoints":            e.Candidate.RelayPublicKey + " " + e.Candidate.Endpoint,
+					"allowed-ips":          e.Candidate.RelayPublicKey + " " + strings.Join(prefixes(e), " "),
+					"persistent-keepalive": e.Candidate.RelayPublicKey + " off",
+					"preshared-keys":       e.Candidate.RelayPublicKey + " (none)",
+				}
+				if extra {
+					values["preshared-keys"] = e.Candidate.RelayPublicKey + " " + secret
+				}
+				return []byte(values[args[len(args)-1]]), nil
+			}}
+			ready, err := k.wireState(context.Background(), e, partial)
+			if extra && (!errors.Is(err, ErrConflict) || ready) || !extra && (err != nil || !ready) {
+				t.Fatalf("partial=%v extra=%v ready=%v err=%v", partial, extra, ready, err)
+			}
+			if err != nil && strings.Contains(err.Error(), secret) {
+				t.Fatal("preshared key leaked into error")
+			}
+		}
+	}
+}

@@ -336,7 +336,10 @@ func (k kernel) wireState(ctx context.Context, e Entry, partial bool) (bool, err
 	if !(partial && len(got) == 0) && (len(got) != 1 || got[0] != e.Candidate.InnerAddress) {
 		return false, ErrConflict
 	}
-	checks := []struct{ field, want string }{{"public-key", e.Candidate.PublicKey}, {"peers", e.Candidate.RelayPublicKey}, {"endpoints", e.Candidate.RelayPublicKey + " " + e.Candidate.Endpoint}, {"allowed-ips", e.Candidate.RelayPublicKey + " " + strings.Join(prefixes(e), " ")}, {"persistent-keepalive", e.Candidate.RelayPublicKey + " off"}}
+	// This candidate contract does not approve a PSK. Read that field through
+	// the bounded private command pipe and never include its contents in errors
+	// or reports. An externally configured PSK must block readiness and removal.
+	checks := []struct{ field, want string }{{"public-key", e.Candidate.PublicKey}, {"peers", e.Candidate.RelayPublicKey}, {"endpoints", e.Candidate.RelayPublicKey + " " + e.Candidate.Endpoint}, {"allowed-ips", e.Candidate.RelayPublicKey + " " + strings.Join(prefixes(e), " ")}, {"persistent-keepalive", e.Candidate.RelayPublicKey + " off"}, {"preshared-keys", e.Candidate.RelayPublicKey + " (none)"}}
 	for _, check := range checks {
 		b, err := k.run(ctx, "", "wg", "show", p.WGInterface, check.field)
 		if err != nil {
