@@ -118,6 +118,47 @@ func TestAnalyzeCompleteIsNotQualification(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzeOptionalPeerDiagnosticLatency(t *testing.T) {
+	for _, tc := range []struct {
+		name, code string
+		edit       func(map[string]float64)
+	}{
+		{name: "bounded optional operation"},
+		{name: "diagnostic deadline is not readiness", edit: func(lat map[string]float64) { lat["peer_diagnostic"] = 2100 }},
+		{name: "required request still required", code: "request_latency_missing", edit: func(lat map[string]float64) { delete(lat, "storage") }},
+		{name: "required deadline still enforced", code: "normal_request_deadline", edit: func(lat map[string]float64) { lat["storage"] = 2001 }},
+		{name: "negative diagnostic rejected", code: "trace.jsonl_invalid_record", edit: func(lat map[string]float64) { lat["peer_diagnostic"] = -1 }},
+		{name: "unknown operation rejected", code: "trace.jsonl_invalid_record", edit: func(lat map[string]float64) { delete(lat, "peer_diagnostic"); lat["unknown"] = 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			// Node removal legitimately has an older WG sample than the current
+			// registry. The runner adds an optional diagnostic to this sample.
+			for _, row := range f.trace {
+				if row["phase"] != "node_removed" {
+					continue
+				}
+				lat := row["api_latency_ms"].(map[string]float64)
+				lat["peer_diagnostic"] = 3
+				if tc.edit != nil {
+					tc.edit(lat)
+				}
+			}
+			f.save(t)
+			zero := 0
+			r := Analyze(f.dir, f.manifest, &zero)
+			if tc.code != "" {
+				if r.Status == "complete" || !finding(r, tc.code) {
+					t.Fatalf("want %s: %+v", tc.code, r)
+				}
+			} else if r.Status != "complete" || len(r.Findings) != 0 || r.LatencyMS["node_removed"]["peer_diagnostic"].Count != 1 {
+				t.Fatalf("optional diagnostic broke analysis: %+v", r)
+			}
+		})
+	}
+}
+
 func TestAnalyzeRejectsMissingAndContradictoryEvidence(t *testing.T) {
 	tests := []struct {
 		name, code, status string

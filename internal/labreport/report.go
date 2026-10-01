@@ -22,6 +22,10 @@ import (
 var phases = []string{"controller_restart", "underlay_loss", "target_restart", "monitor_restart", "node_remove_rejoin", "ca_rotation", "ca_rollback"}
 var operations = []string{"local_monitor", "fleet_status", "storage", "wireguard", "uplink", "events", "alerts"}
 
+// This bounded read is emitted only on a peer-population mismatch. Its latency
+// is evidence, not a required observation or a network readiness condition.
+const peerDiagnosticOperation = "peer_diagnostic"
+
 type Distribution struct {
 	Count int      `json:"count"`
 	P50   *float64 `json:"p50"`
@@ -484,18 +488,18 @@ func (a *analyzer) sample(v observation) error {
 			}
 		}
 	}
-	if len(v.Latency) > len(operations) {
+	if len(v.Latency) > len(operations)+1 {
 		return fmt.Errorf("unexpected operation count")
 	}
 	if a.lat[v.Phase] == nil {
 		a.lat[v.Phase] = map[string][]float64{}
 	}
 	for op, n := range v.Latency {
-		if !contains(operations, op) || n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
+		if (!contains(operations, op) && op != peerDiagnosticOperation) || n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
 			return fmt.Errorf("invalid request latency")
 		}
 		a.lat[v.Phase][op] = append(a.lat[v.Phase][op], n)
-		if normal && n > 2000 {
+		if normal && op != peerDiagnosticOperation && n > 2000 {
 			a.finding("failed", "normal_request_deadline")
 		}
 	}
