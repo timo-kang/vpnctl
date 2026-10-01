@@ -295,6 +295,22 @@ func TestMonitorActualUDPOverMTLSAndCredentialRenewal(t *testing.T) {
 	}
 }
 
+type monitorScaleHistory struct {
+	*history.Store
+	mu     sync.Mutex
+	errors map[string]int
+}
+
+func (s *monitorScaleHistory) Ingest(ctx context.Context, node string, batch []history.Observation, now time.Time) error {
+	err := s.Store.Ingest(ctx, node, batch, now)
+	if err != nil {
+		s.mu.Lock()
+		s.errors[batch[0].Source+": "+err.Error()]++
+		s.mu.Unlock()
+	}
+	return err
+}
+
 func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
 	for _, schema := range []int{5, 6, 7, 8, 9} {
 		for _, size := range []int{1, 3, 8, 32} {
@@ -305,6 +321,8 @@ func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
 				var wg sync.WaitGroup
 				defer func() { cancel(); wg.Wait() }()
 				st := s.history.(*history.Store)
+				diagnostic := &monitorScaleHistory{Store: st, errors: map[string]int{}}
+				s.history = diagnostic
 				if schema >= 6 {
 					if err := st.EnableTiering(ctx, time.Now()); err != nil {
 						t.Fatal(err)
@@ -363,6 +381,9 @@ func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
 					if !t.Failed() {
 						return
 					}
+					diagnostic.mu.Lock()
+					t.Logf("storage rejections: %v", diagnostic.errors)
+					diagnostic.mu.Unlock()
 					latest := st.Latest(time.Time{})
 					for i, uploader := range uploaders {
 						id := fmt.Sprintf("node-%02d", i)

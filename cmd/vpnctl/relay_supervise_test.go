@@ -10,6 +10,8 @@ import (
 	"io"
 	"testing"
 	"time"
+
+	"vpnctl/internal/relayapply"
 )
 
 func TestRelaySupervisorContinuesAfterFailureAndBoundsCycles(t *testing.T) {
@@ -40,6 +42,60 @@ func TestRelaySupervisorContinuesAfterFailureAndBoundsCycles(t *testing.T) {
 		if err := d.Decode(&r); err != nil || r.State != "degraded" || r.ObservedAt.IsZero() {
 			t.Fatal(r, err)
 		}
+	}
+}
+
+func TestRelaySupervisorRetriesOnlyNamespaceContentionWithinBudget(t *testing.T) {
+	calls := 0
+	want := new(relayapply.DeploymentEngine)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, err := openSupervisedDeployment(ctx, func() (*relayapply.DeploymentEngine, error) {
+		calls++
+		if calls < 3 {
+			return nil, relayapply.ErrKernelBusy
+		}
+		return want, nil
+	})
+	if err != nil || got != want || calls != 3 {
+		t.Fatal("contention did not converge", calls, err)
+	}
+	denied := errors.New("journal domain mismatch")
+	calls = 0
+	if _, err := openSupervisedDeployment(ctx, func() (*relayapply.DeploymentEngine, error) { calls++; return nil, denied }); !errors.Is(err, denied) || calls != 1 {
+		t.Fatal("non-contention error retried", calls, err)
+	}
+	short, stop := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer stop()
+	started := time.Now()
+	if _, err := openSupervisedDeployment(short, func() (*relayapply.DeploymentEngine, error) { return nil, relayapply.ErrKernelBusy }); !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > time.Second {
+		t.Fatal("contention escaped budget", err)
+	}
+	calls = 0
+	if _, err := openSupervisedDeployment(short, func() (*relayapply.DeploymentEngine, error) { calls++; return want, nil }); !errors.Is(err, context.DeadlineExceeded) || calls != 0 {
+		t.Fatal("cancelled cycle opened engine", calls, err)
+	}
+}
+
+func TestRelaySupervisorYieldsAfterOverrunningCadence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var completed time.Time
+	var idle time.Duration
+	calls := 0
+	err := superviseRelay(ctx, io.Discard, func(context.Context, bool) (relaySupervisionReport, error) {
+		calls++
+		if calls == 1 {
+			time.Sleep(1100 * time.Millisecond)
+			completed = time.Now()
+		} else {
+			idle = time.Since(completed)
+			cancel()
+		}
+		return relaySupervisionReport{SchemaVersion: 1}, nil
+	}, time.Second)
+	if err != nil || calls != 2 || idle < 50*time.Millisecond {
+		t.Fatal("overrunning supervisor monopolizes namespace", calls, idle, err)
 	}
 }
 

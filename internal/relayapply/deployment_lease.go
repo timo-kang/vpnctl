@@ -262,6 +262,9 @@ func leaseDeadline(active bool, expiry, authenticatedAt, now time.Time) (time.Ti
 	}
 	deadline = deadline.Truncate(time.Second)
 	if !now.Before(deadline) {
+		if !active {
+			return time.Time{}, ErrLeaseExpired
+		}
 		return time.Time{}, errors.New("relay approval has no remaining lease time")
 	}
 	return deadline, nil
@@ -285,6 +288,9 @@ func (k deploymentKernel) Lease(ctx context.Context, e DeploymentEntry, approval
 	// A backward wall-clock step cannot turn a nearly expired approval into
 	// another full lease period. Both clocks are bounded by remaining approval.
 	timeoutMS := time.Until(deadline).Milliseconds()
+	if timeoutMS < 1 && !state.Active {
+		return state, ErrLeaseExpired // The already-closed rearm window elapsed before commit.
+	}
 	if timeoutMS < 1 || timeoutMS > DeploymentLeaseDuration.Milliseconds() {
 		return state, errors.New("relay lease clock changed before commit")
 	}
@@ -298,8 +304,16 @@ func (k deploymentKernel) Lease(ctx context.Context, e DeploymentEntry, approval
 		return state, err
 	}
 	state, exists, err = k.leaseRead(ctx, e)
-	if err == nil && (!exists || !state.Active || !state.Deadline.Equal(deadline)) {
-		err = errors.New("relay lease readback incomplete")
+	if err == nil {
+		if !exists || !state.Deadline.Equal(deadline) {
+			err = errors.New("relay lease readback incomplete")
+		} else if !state.Active {
+			// The short rearm lease may expire (or round to a zero-second
+			// countdown) between commit and readback. Its guard is intact and
+			// closed; keep the link for a fresh response instead of tearing it
+			// down as though the validated kernel inventory were corrupt.
+			err = ErrLeaseExpired
+		}
 	}
 	return state, err
 }

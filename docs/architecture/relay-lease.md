@@ -19,6 +19,9 @@ vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
 연장하지 않는다. 최초 cache가 없으면 `refresh`로 초기화해야 한다.
 만료 lease의 재허가는 인증 응답 시각부터 최대 5초까지만 열며, 이후 정상 cycle이
 갱신한다. 응답을 받은 뒤 오래 정지한 프로세스가 오래된 성공 표시만으로 재개할 수 없다.
+재허가 창이 소진되거나 nft 재확인 중 잔여 시간이 0초/만료로 표시되면 정상 규칙의
+차단 상태와 link를 유지하고 다음 새 응답을 기다린다. 규칙 누락·소유자 변조·기한
+불일치는 정상 만료로 취급하지 않고 기존 차단/복구 오류를 유지한다.
 
 ## 시간과 실패 처리
 
@@ -37,6 +40,9 @@ vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
 해제하지는 못한다. 이 경우에도 lease는 갱신되지 않는다. cache lock은 cycle마다
 해제하고, namespace 적용 lock은 HTTP 호출이 끝난 뒤에만 얻는다. 동시 CLI의 busy
 오류는 무한 대기하지 않으며, 운영 작업은 짧은 backoff로 재시도한다.
+namespace 잠금 경합은 기존 cycle 예산 안에서 25ms마다 재시도한다. 작업이 1초보다
+길어져도 잠금을 해제한 뒤 다음 주기까지 최소 50ms를 두어 다른 supervisor에 획득
+기회를 준다. 공정한 FIFO 대기열이나 과부하 상태의 무중단을 보장하지는 않는다.
 
 정상 wall clock에서 통과 기한은 `min(승인 expires_at, 갱신 계산 시각+10초)`를 초 단위로
 내림한 값이다. 따라서 승인 시각보다 최대 1초 일찍 닫힐 수 있다. 새 패킷의 통과 여부를
@@ -87,6 +93,9 @@ JSONL에는 `observed_at`, `cycle_ms`, `state`, `reason`, `refresh`, `approval_s
 외부 peer/route/PSK가 추가되어 interface 제거가 불가능해도 소유 guard를 먼저 닫는다.
 guard 자체가 변조되면 타인 규칙을 덮어쓰지 않고 소유 link 차단을 시도하며 실패를 노출한다.
 모든 endpoint를 순회하므로 한 충돌 때문에 다른 endpoint의 차단 시도를 생략하지 않는다.
+회수 실패가 있어도 최신 승인과 동일한 다른 endpoint의 lease 갱신은 계속한다.
+회수 실패로 journal에 남은 과거 endpoint를 갱신하지 않으며, cache 읽기 실패나 journal
+저장 불확실 상태에서는 갱신을 진행하지 않는다. 전체 결과는 계속 `degraded`로 보고한다.
 
 기존 journal은 `lease_version`이 없으므로 0이다. 새 버전이 이를 읽으면 이전 endpoint를
 차단·회수하고 새 apply를 요구한다. 구형 binary로 downgrade하여 새 journal을 열 수 없다.
@@ -117,9 +126,10 @@ go test -race ./internal/relayapply ./internal/relaycache ./cmd/vpnctl
 VPNCTL_RACE=0 scripts/test-netns.sh -test.run='^TestNetns_M3(PathTopology|RelayDeploymentScale)$'
 ```
 
-실제 host reboot·suspend·wall clock step 조합, 8 endpoint 상한의 동시 감독/악성 부하,
-모든 withdraw/disabled/key rotation의 4경로 패킷 matrix와 최악 지연/SLO는 #124의
-후속 qualification이다. 이 변경만으로 #124/#114/M3 최종 gate를 닫지 않는다.
+실제 controller 기반 네 경로 권한 전이, 1/8 endpoint 규모, 동시 요청 및 과부하 검증은
+[릴레이 승인 검증 계약](../testing/relay-lease-matrix.md)에 별도로 정의한다.
+실제 host reboot·suspend·wall clock step 조합은 #128, 운영 환경의 최악 지연/SLO는
+#124의 후속 qualification이다. 이 변경만으로 #124/#114/M3 최종 gate를 닫지 않는다.
 
 ## 다른 배포 저장소에서 사용하기
 

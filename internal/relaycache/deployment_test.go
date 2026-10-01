@@ -216,6 +216,39 @@ func TestDeploymentRemoteFailuresAndStickyDenial(t *testing.T) {
 	}
 }
 
+func TestDeploymentRepeatedOutageAndReplayAfterDenial(t *testing.T) {
+	dir := privateTempDir(t)
+	s := openDeployment(t, dir)
+	v := deploymentFixture(t)
+	v.Generation += 2
+	approveDeployment(t, s, v)
+	if r, err := s.Refresh(context.Background(), deploymentResponse(relaycatalog.DeploymentView{}, &api.HTTPError{StatusCode: 403})); err == nil || r.ApprovalValid {
+		t.Fatal("denial not recorded", r, err)
+	}
+	for round := 0; round < 12; round++ {
+		for _, failure := range []error{&api.HTTPError{StatusCode: 429}, &api.HTTPError{StatusCode: 500}, &api.HTTPError{StatusCode: 503}, io.EOF, context.DeadlineExceeded} {
+			s.Close()
+			s = openDeployment(t, dir)
+			if r, err := s.Refresh(context.Background(), deploymentResponse(relaycatalog.DeploymentView{}, failure)); err == nil || r.ApprovalValid {
+				t.Fatal("outage revived denial", r, err)
+			}
+		}
+		for _, kind := range []string{"generation", "controller"} {
+			stale := copyDeployment(v)
+			if kind == "generation" {
+				stale.Generation--
+			} else {
+				stale.ControllerID = strings.Repeat("f", 32)
+			}
+			if r, err := s.Refresh(context.Background(), deploymentResponse(stale, nil)); err == nil || r.ApprovalValid {
+				t.Fatal("replay revived denial", kind, r, err)
+			}
+		}
+	}
+	v.Generation++
+	approveDeployment(t, s, v)
+}
+
 func TestDeploymentExpiryAndClockWatermark(t *testing.T) {
 	dir := privateTempDir(t)
 	s := openDeployment(t, dir)

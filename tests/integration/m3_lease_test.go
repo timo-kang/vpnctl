@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -98,7 +97,7 @@ type leaseStreamEvent struct {
 
 // Never reconnect: failure must concern the TCP socket opened before the fault.
 func runLeaseStream() error {
-	c, err := net.DialTimeout("tcp4", m3Target+":9192", time.Second)
+	c, err := m3Dial(time.Second)
 	if err != nil {
 		return err
 	}

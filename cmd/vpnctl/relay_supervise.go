@@ -33,6 +33,8 @@ type relaySupervisionReport struct {
 	Kernel            *relayapply.DeploymentResult `json:"kernel,omitempty"`
 }
 
+const relayKernelRetryInterval = 25 * time.Millisecond
+
 func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, client relaycache.DeploymentClient, refresh bool) (relaySupervisionReport, error) {
 	out := relaySupervisionReport{SchemaVersion: 1, ObservedAt: time.Now().UTC(), State: "degraded", Refresh: "not_due", ApprovalState: "unknown"}
 	c, err := relaycache.OpenDeployment(dir, relaycache.DeploymentOptions{PrincipalID: principal, RelayID: relay})
@@ -63,7 +65,7 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	}
 	// Even a rejected refresh must reach enforcement. An I/O failure that
 	// prevents opening the engine cannot refresh the independent kernel lease.
-	e, openErr := relayapply.OpenDeployment(c)
+	e, openErr := openSupervisedDeployment(ctx, func() (*relayapply.DeploymentEngine, error) { return relayapply.OpenDeployment(c) })
 	if openErr != nil {
 		out.Reason = "enforcement_unavailable"
 		return out, errors.Join(err, openErr)
@@ -92,6 +94,28 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	return out, nil
 }
 
+// Two periodic supervisors can otherwise collide at the same phase forever.
+// Retry only namespace contention, within the caller's existing cycle budget.
+// The independent kernel deadline still closes traffic if that budget runs out.
+func openSupervisedDeployment(ctx context.Context, open func() (*relayapply.DeploymentEngine, error)) (*relayapply.DeploymentEngine, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		e, err := open()
+		if !errors.Is(err, relayapply.ErrKernelBusy) {
+			return e, err
+		}
+		timer := time.NewTimer(relayKernelRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func superviseRelay(ctx context.Context, w io.Writer, cycle func(context.Context, bool) (relaySupervisionReport, error), refreshInterval time.Duration) error {
 	nextRefresh := time.Time{}
 	for {
@@ -112,8 +136,11 @@ func superviseRelay(ctx context.Context, w io.Writer, cycle func(context.Context
 			return err
 		}
 		wait := time.Until(started.Add(time.Second))
-		if wait < 0 {
-			wait = 0
+		// An overrun must still yield the namespace. Otherwise a supervisor
+		// taking just over one second can reacquire on every cycle before a
+		// competing process's bounded lock retry wakes up.
+		if wait < 2*relayKernelRetryInterval {
+			wait = 2 * relayKernelRetryInterval
 		}
 		timer := time.NewTimer(wait)
 		select {

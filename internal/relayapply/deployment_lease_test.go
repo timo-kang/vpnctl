@@ -6,8 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"vpnctl/internal/relaycache"
 )
 
 func TestLeaseRejectsAlteredRulesAndUnboundedCountdown(t *testing.T) {
@@ -61,6 +67,89 @@ func TestLeaseRejectsAlteredRulesAndUnboundedCountdown(t *testing.T) {
 type failedLeaseBackend struct {
 	deploymentBackend
 	failed string
+}
+
+type failedRemovalBackend struct {
+	deploymentBackend
+	failed string
+}
+
+func (b failedRemovalBackend) Down(ctx context.Context, e DeploymentEntry) error {
+	err := b.deploymentBackend.Down(ctx, e)
+	if e.Endpoint == b.failed {
+		return errors.Join(err, ErrConflict)
+	}
+	return err
+}
+
+func TestLeaseCleanupConflictDoesNotStarveApprovedEndpoint(t *testing.T) {
+	for _, mode := range []string{"conflict", "status-failure", "journal-uncertain"} {
+		t.Run(mode, func(t *testing.T) {
+			e, k, c, issuer, o, _ := deploymentFixture(t, 1)
+			for _, ep := range []string{"ep0", "ep1"} {
+				o.EndpointID = ep
+				if ep == "ep1" {
+					o.ListenPort = 51821
+				}
+				if _, err := e.Apply(context.Background(), o); err != nil {
+					t.Fatal(err)
+				}
+			}
+			issuer.view.Generation++
+			paths := issuer.view.Spec.Paths[:0]
+			removed := map[string]bool{}
+			for _, p := range issuer.view.Spec.Paths {
+				if p.EndpointID == "ep0" {
+					removed[p.ID] = true
+				} else {
+					paths = append(paths, p)
+				}
+			}
+			issuer.view.Spec.Paths = paths
+			bindings := issuer.view.Bindings[:0]
+			for _, b := range issuer.view.Bindings {
+				if !removed[b.PathID] {
+					bindings = append(bindings, b)
+				}
+			}
+			issuer.view.Bindings = bindings
+			if _, err := c.Refresh(context.Background(), issuer); err != nil {
+				t.Fatal(err)
+			}
+			before := k.objects["ep1"].lease.Deadline
+			e.backend = failedRemovalBackend{k, "ep0"}
+			if mode == "status-failure" {
+				e.cache = &failedLeaseRecheckCache{deploymentCache: c}
+			}
+			if mode == "journal-uncertain" {
+				e.backend = k
+				e.cache = &failingDeploymentCache{deploymentCache: c, failAt: 1}
+			}
+			if out, err := e.Maintain(context.Background(), time.Now().UTC()); err == nil || out.KernelReady {
+				t.Fatal("cleanup conflict hidden", out, err)
+			}
+			if k.objects["ep0"].lease.Active {
+				t.Fatal("invalid endpoint rearmed")
+			}
+			if advanced := k.objects["ep1"].lease.Deadline.After(before); advanced != (mode == "conflict") {
+				t.Fatal("independent lease decision disagrees with approval/storage certainty", mode, advanced)
+			}
+		})
+	}
+}
+
+type failedLeaseRecheckCache struct {
+	deploymentCache
+	calls int
+}
+
+func (c *failedLeaseRecheckCache) Status() (relaycache.DeploymentReport, error) {
+	c.calls++
+	r, err := c.deploymentCache.Status()
+	if c.calls == 2 {
+		return r, errors.New("read failed after cleanup conflict")
+	}
+	return r, err
 }
 
 func (b failedLeaseBackend) Lease(c context.Context, e DeploymentEntry, t, authenticatedAt time.Time) (DeploymentLease, error) {
@@ -155,6 +244,108 @@ func TestLeaseDeadlinesRemainBoundedAcrossClockAndResponseAge(t *testing.T) {
 			d, err := leaseDeadline(tc.active, tc.expiry, tc.received, now)
 			if (err != nil) != tc.want.IsZero() || !d.Equal(tc.want) {
 				t.Fatal(d, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLeaseRoundedRearmWindowIsRetryableExpiry(t *testing.T) {
+	now := time.Date(2026, 10, 1, 0, 0, 10, 200_000_000, time.UTC)
+	// The response is still younger than 5s, but the remaining 100ms cannot
+	// form a whole-second nft deadline. Preserve the closed peer for a newer
+	// response instead of classifying this as a kernel failure and taking it down.
+	_, err := leaseDeadline(false, now.Add(time.Hour), now.Add(-4900*time.Millisecond), now)
+	if !errors.Is(err, ErrLeaseExpired) {
+		t.Fatal("spent rearm window would force link teardown", err)
+	}
+	e, k, _, _, options, _ := deploymentFixture(t, 1)
+	if _, err := e.Apply(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second).Add(200 * time.Millisecond)
+	k.now = func() time.Time { return clock }
+	peer := k.objects[options.EndpointID]
+	peer.lease = DeploymentLease{}
+	k.objects[options.EndpointID] = peer
+	if out, err := e.Maintain(context.Background(), clock.Add(-4900*time.Millisecond)); !errors.Is(err, ErrLeaseExpired) || out.KernelReady {
+		t.Fatal("spent window accepted", out, err)
+	}
+	if peer := k.objects[options.EndpointID]; !peer.up || peer.lease.Active {
+		t.Fatal("closed peer was torn down or rearmed")
+	}
+	if out, err := e.Maintain(context.Background(), clock); err != nil || !out.KernelReady {
+		t.Fatal("new approval cannot rearm retained peer", out, err)
+	}
+}
+
+func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testing.T) {
+	engine, _, _, _, options, _ := deploymentFixture(t, 1)
+	approval, _ := engine.cache.Status()
+	entry, _ := desiredDeployment(approval, options.EndpointID, options.ListenPort)
+	entry.Alias, entry.Group, entry.LinkIndex, _ = token()
+	for _, mode := range []string{"active", "zero-countdown", "empty-set", "missing", "wrong-deadline", "wrong-owner"} {
+		t.Run(mode, func(t *testing.T) {
+			committed := false
+			deadline := time.Now().Add(-time.Second).Truncate(time.Second)
+			backend := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
+				if name != "nft" {
+					t.Fatal("unexpected command", name, args)
+				}
+				encode := func(rows []object) ([]byte, error) { return json.Marshal(object{"nftables": rows}) }
+				switch strings.Join(args, " ") {
+				case "-j -n -T list tables":
+					if committed && mode == "missing" {
+						return encode([]object{})
+					}
+					return encode(leaseExpected(entry, deadline)[:1])
+				case "-j -n -T list flowtables":
+					return encode([]object{})
+				case "-j -n -T list table inet " + leaseTable(entry):
+					observed := deadline
+					if committed && mode == "wrong-deadline" {
+						observed = observed.Add(time.Second)
+					}
+					rows := leaseExpected(entry, observed)
+					if committed && mode != "empty-set" {
+						left := 1
+						if mode == "zero-countdown" {
+							left = 0 // nft rounds a subsecond remaining timeout to zero.
+						}
+						rows[1]["set"].(object)["elem"] = []any{object{"elem": object{"val": entry.Interface, "expires": left}}}
+					}
+					if committed && mode == "wrong-owner" {
+						rows[5]["rule"].(object)["comment"] = "foreign"
+					}
+					return encode(rows)
+				case "-f /dev/stdin":
+					match := regexp.MustCompile(`meta time >= ([0-9]+)`).FindStringSubmatch(input)
+					if len(match) != 2 {
+						t.Fatal("missing lease cutoff")
+					}
+					seconds, err := strconv.ParseInt(match[1], 10, 64)
+					if err != nil {
+						t.Fatal(err)
+					}
+					deadline, committed = time.Unix(seconds, 0).UTC(), true
+					return nil, nil
+				default:
+					return nil, fmt.Errorf("unexpected nft command %v", args)
+				}
+			}}}
+			state, err := backend.Lease(context.Background(), entry, time.Now().Add(time.Hour), time.Now().UTC())
+			if !committed {
+				t.Fatal("lease commit not exercised", err)
+			}
+			if mode == "active" {
+				if err != nil || !state.Active {
+					t.Fatal("active lease rejected", state, err)
+				}
+			} else if mode == "zero-countdown" || mode == "empty-set" {
+				if !errors.Is(err, ErrLeaseExpired) || state.Active {
+					t.Fatal("normal expiry during readback would tear down the link", state, err)
+				}
+			} else if err == nil || errors.Is(err, ErrLeaseExpired) {
+				t.Fatal("invalid inventory treated as retryable expiry", mode, state, err)
 			}
 		})
 	}

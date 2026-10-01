@@ -41,6 +41,14 @@ type deploymentFake struct {
 	after, crash, foreign bool
 	hook                  func(string)
 	checkHook             func()
+	now                   func() time.Time
+}
+
+func (k *deploymentFake) currentTime() time.Time {
+	if k.now != nil {
+		return k.now()
+	}
+	return time.Now().UTC()
 }
 
 func (k *deploymentFake) Check(_ context.Context, e DeploymentEntry, fresh bool) (bool, error) {
@@ -92,7 +100,8 @@ func (k *deploymentFake) Down(_ context.Context, e DeploymentEntry) error {
 }
 func (k *deploymentFake) Lease(_ context.Context, e DeploymentEntry, until, authenticatedAt time.Time) (DeploymentLease, error) {
 	v := k.objects[e.Endpoint]
-	deadline, err := leaseDeadline(v.lease.Active && time.Now().Before(v.lease.Deadline), until, authenticatedAt, time.Now().UTC())
+	now := k.currentTime()
+	deadline, err := leaseDeadline(v.lease.Active && now.Before(v.lease.Deadline), until, authenticatedAt, now)
 	if err != nil {
 		return v.lease, err
 	}
@@ -102,7 +111,7 @@ func (k *deploymentFake) Lease(_ context.Context, e DeploymentEntry, until, auth
 }
 func (k *deploymentFake) LeaseStatus(_ context.Context, e DeploymentEntry) (DeploymentLease, error) {
 	v := k.objects[e.Endpoint].lease
-	v.Active = v.Active && time.Now().Before(v.Deadline)
+	v.Active = v.Active && k.currentTime().Before(v.Deadline)
 	return v, nil
 }
 func (k *deploymentFake) Remove(_ context.Context, e DeploymentEntry) error {
