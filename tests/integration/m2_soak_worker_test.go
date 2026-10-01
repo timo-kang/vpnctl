@@ -14,12 +14,14 @@ import (
 	"time"
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
+	"vpnctl/internal/execx"
 	"vpnctl/internal/history"
 	"vpnctl/internal/monitor"
 	"vpnctl/internal/pki"
 )
 
 type soakObservation struct {
+	PeerDiagnostic         *soakPeerDiagnostic   `json:"peer_diagnostic,omitempty"`
 	WGPeerNodes            []string              `json:"wireguard_peer_nodes"`
 	HeartbeatUnknown       int                   `json:"heartbeat_unknown"`
 	RecentEvents           []history.Event       `json:"recent_events"`
@@ -159,6 +161,15 @@ func readSoakObservation() error {
 			return nil
 		}); e != nil {
 			return e
+		}
+		if v.WGPeers != v.RegisteredNodes {
+			// Diagnose a population mismatch without replacing the measured WG
+			// history or weakening readiness. Keys and command output stay local.
+			_ = request("peer_diagnostic", func(ctx context.Context) error {
+				d := collectSoakPeerDiagnostic(ctx, c, *cfg.Node, execx.NewOSRunner(io.Discard, io.Discard).OutputContext)
+				v.PeerDiagnostic = &d
+				return nil
+			})
 		}
 		if e = request("events", func(ctx context.Context) error {
 			r, e := c.FleetEvents(ctx, cfg.Node.Name, "1h", 20)

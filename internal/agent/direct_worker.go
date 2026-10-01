@@ -96,13 +96,21 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 		case next := <-updates:
 			wasRunning := stop != nil
 			preserve := preservesDirectProbeRound(snapshot, next)
+			sameInputs := sameDirectProbeInputs(snapshot, next)
 			if !preserve {
 				drain()
 			}
 			snapshot = next
 			apply()
 			if wasRunning && !preserve {
-				timer.Reset(interval)
+				delay := interval
+				if sameInputs {
+					// A readiness withdrawal cancels stale results, but the same
+					// destinations can be remeasured immediately. Delaying a full
+					// cadence can compound with the remote round and collection lag.
+					delay = 0
+				}
+				timer.Reset(delay)
 			}
 		case <-done:
 			stop()
@@ -137,14 +145,23 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 // Withdrawals and any identity/address/input change retain the cancellation
 // barrier; outstanding measurements cannot survive a real configuration change.
 func preservesDirectProbeRound(before, after directSnapshot) bool {
+	if !sameDirectProbeInputs(before, after) {
+		return false
+	}
+	for i, old := range before.peers {
+		if old.P2PReady && !after.peers[i].P2PReady {
+			return false
+		}
+	}
+	return true
+}
+
+func sameDirectProbeInputs(before, after directSnapshot) bool {
 	if before.publicAddr != after.publicAddr || before.natType != after.natType || len(before.peers) != len(after.peers) {
 		return false
 	}
 	for i, old := range before.peers {
 		next := after.peers[i]
-		if old.P2PReady && !next.P2PReady {
-			return false
-		}
 		old.P2PReady, next.P2PReady = false, false
 		if old != next {
 			return false
