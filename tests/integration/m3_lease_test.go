@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -79,6 +80,11 @@ func serveLeaseIssuer() error {
 			http.Error(w, "denied", 403)
 			return
 		}
+		serial := r.TLS.PeerCertificates[0].SerialNumber.String()
+		if e := pki.WriteAtomic(filepath.Join(dir, "last-client-"+v.RelayID), []byte(serial), 0600); e != nil {
+			http.Error(w, "fixture observation unavailable", 503)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(v)
 	})}
@@ -130,6 +136,7 @@ type m3LeaseFixture struct {
 	response            leaseResponse
 	issuer              *planIssuer
 	sequence            int
+	clientSerial        string
 }
 
 func newM3LeaseFixture(t *testing.T, relays []string, private string, issuer *planIssuer) *m3LeaseFixture {
@@ -189,6 +196,15 @@ func (f *m3LeaseFixture) renewCredential() {
 	if err != nil {
 		t.Fatal(err)
 	}
+	block, _ := pem.Decode(cert)
+	if block == nil {
+		t.Fatal("fixture client certificate unavailable")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.clientSerial = leaf.SerialNumber.String()
 	caPEM, err := os.ReadFile(filepath.Join(f.dir, "ca.crt"))
 	if err != nil {
 		t.Fatal(err)
@@ -234,6 +250,10 @@ func (f *m3LeaseFixture) ready(r int) {
 		}
 		if json.Unmarshal([]byte(lines[len(lines)-1]), &v) != nil || !v.ObservedAt.After(after) || v.State != "watching" || v.Refresh != "success" || v.Kernel == nil || !v.Kernel.KernelReady {
 			return fmt.Errorf("supervisor not ready: %s", lines[len(lines)-1])
+		}
+		serial, err := os.ReadFile(filepath.Join(f.dir, fmt.Sprintf("last-client-r%d", r)))
+		if err != nil || string(serial) != f.clientSerial {
+			return fmt.Errorf("server has not observed current client certificate")
 		}
 		return nil
 	})
@@ -359,7 +379,7 @@ func (f *m3LeaseFixture) checkPause(robot string, r int, iface, mode string, pha
 	f.publish(200)
 	f.ready(r)
 	probe(true)
-	summary := map[string]any{"mode": mode, "relay": r, "fault_at": paused, "deadline": paused.Add(relayapply.DeploymentLeaseDuration), "old_tcp_blocked": true, "new_tcp_blocked": true, "cached_rearm_rejected": true, "fresh_approval_restored": true}
+	summary := map[string]any{"mode": mode, "relay": r, "fault_at": paused, "deadline": paused.Add(relayapply.DeploymentLeaseDuration), "old_tcp_blocked": true, "new_tcp_blocked": true, "cached_rearm_rejected": true, "fresh_approval_restored": true, "server_observed_client_serial": f.clientSerial}
 	data, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		t.Fatal(err)
