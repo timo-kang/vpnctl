@@ -185,6 +185,16 @@ func (k deploymentKernel) wire(ctx context.Context, e DeploymentEntry) (bool, er
 	return complete, nil
 }
 func (k deploymentKernel) Check(ctx context.Context, e DeploymentEntry, fresh bool) (bool, error) {
+	if fresh && e.LeaseVersion == 1 {
+		if _, exists, err := k.leaseRead(ctx, e); err != nil {
+			return false, err
+		} else if exists {
+			return false, ErrConflict
+		}
+		if err := k.noFlowtables(ctx); err != nil {
+			return false, err
+		}
+	}
 	s, l, exists, count, err := k.inventory(ctx, e, fresh)
 	if err != nil || fresh || !exists {
 		return false, err
@@ -196,6 +206,9 @@ func (k deploymentKernel) Check(ctx context.Context, e DeploymentEntry, fresh bo
 	return err == nil && complete && count == len(e.Peers) && hasFlag(l, "UP") && n(l, "mtu") == 1280 && str(l, "ifalias") == e.Alias, err
 }
 func (k deploymentKernel) Step(ctx context.Context, e DeploymentEntry, step, key string) error {
+	if step == "guard" {
+		return k.leaseCreate(ctx, e)
+	}
 	_, _, exists, _, err := k.inventory(ctx, e, step == "link")
 	if err != nil {
 		return err
@@ -238,23 +251,33 @@ func (k deploymentKernel) Step(ctx context.Context, e DeploymentEntry, step, key
 	return err
 }
 func (k deploymentKernel) Down(ctx context.Context, e DeploymentEntry) error {
+	var guardErr error
+	if e.LeaseVersion == 1 {
+		guardErr = k.leaseBlock(ctx, e)
+	}
 	_, l, exists, _, err := k.inventory(ctx, e, false)
 	if err != nil || !exists {
-		return err
+		return errors.Join(guardErr, err)
 	}
 	if _, err = k.wire(ctx, e); err != nil {
-		return err
+		return errors.Join(guardErr, err)
 	}
 	if !hasFlag(l, "UP") {
-		return nil
+		return guardErr
 	}
 	_, err = k.run(ctx, "", "ip", "link", "set", "dev", e.Interface, "down")
-	return err
+	return errors.Join(guardErr, err)
 }
 func (k deploymentKernel) Remove(ctx context.Context, e DeploymentEntry) error {
 	_, _, exists, _, err := k.inventory(ctx, e, false)
-	if err != nil || !exists {
+	if err != nil {
 		return err
+	}
+	if !exists {
+		if e.LeaseVersion == 1 {
+			return k.leaseRemove(ctx, e)
+		}
+		return nil
 	}
 	if _, err = k.wire(ctx, e); err != nil {
 		return err
@@ -262,6 +285,11 @@ func (k deploymentKernel) Remove(ctx context.Context, e DeploymentEntry) error {
 	// Removing the owned link removes only its already-checked /32 routes.
 	if _, err = k.run(ctx, "", "ip", "link", "del", "dev", e.Interface); err != nil {
 		return err
+	}
+	if e.LeaseVersion == 1 {
+		if err = k.leaseRemove(ctx, e); err != nil {
+			return err
+		}
 	}
 	_, err = k.Check(ctx, e, true)
 	return err

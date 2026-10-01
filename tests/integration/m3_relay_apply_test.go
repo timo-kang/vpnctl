@@ -31,12 +31,13 @@ func (f failedDeploymentIssuer) RelayDeployment(context.Context, string, string)
 	return relaycatalog.DeploymentView{}, f.err
 }
 
-func checkM3RelayApply(t *testing.T, relays []string, private, configPath string, keys []string, plan relayplan.Plan, issuer *planIssuer, phases *[]string) ([][]string, func()) {
+func checkM3RelayApply(t *testing.T, relays []string, private, configPath string, keys []string, plan relayplan.Plan, issuer *planIssuer, phases *[]string) ([][]string, func(), *m3LeaseFixture) {
 	t.Helper()
 	if err := os.Chmod(private, 0700); err != nil {
 		t.Fatal(err)
 	}
 	bin := integrationBinary(t)
+	lease := newM3LeaseFixture(t, relays, private, issuer)
 	interfaces := make([][]string, len(relays))
 	args := func(r int, action string, endpoint int) []string {
 		a := []string{bin, "relay", action, "--config", configPath, "--relay-id", fmt.Sprintf("r%d", r), "--cache-dir", filepath.Join(private, fmt.Sprintf("deploy-cache-%d", r))}
@@ -68,7 +69,7 @@ func checkM3RelayApply(t *testing.T, relays []string, private, configPath string
 		if err := json.Unmarshal([]byte(strings.SplitN(string(b), "\n", 2)[0]), &out); err != nil {
 			t.Fatalf("relay output: %v %s", err, b)
 		}
-		if out.UplinkHealth != "unknown" || out.ExpiryEnforcement != "on_command" {
+		if out.UplinkHealth != "unknown" || out.ExpiryEnforcement != "kernel_lease" {
 			t.Fatal("unsupported readiness claim", out)
 		}
 		return out
@@ -134,12 +135,19 @@ func checkM3RelayApply(t *testing.T, relays []string, private, configPath string
 		call(r, "inspect", -1, false)
 		call(r, "release", 0, false)
 		netOutput(t, ns, "wg", "set", iface, "peer", peer.PublicKey, "preshared-key", "/dev/null")
+		// A conflict blocks the lease even when ownership prevents deleting
+		// foreign configuration. Explicitly recreate after resolving it.
+		call(r, "release", 0, true)
+		call(r, "apply", 0, true)
 		if out := call(r, "inspect", -1, true); !out.KernelReady {
 			t.Fatal("relay did not recover after external conflict", out)
 		}
 		*phases = append(*phases, fmt.Sprintf("relay_%d_product_peers_idempotence_foreign_listener_route_peer_psk", r))
+		lease.start(r)
+		lease.ready(r)
 	}
 	return interfaces, func() {
+		lease.stop()
 		for r, ns := range relays {
 			refresh(r, &api.HTTPError{StatusCode: 403})
 			out := call(r, "inspect", -1, false)
@@ -163,7 +171,7 @@ func checkM3RelayApply(t *testing.T, relays []string, private, configPath string
 			if err := os.Mkdir(faultDir, 0700); err != nil {
 				t.Fatal(err)
 			}
-			for _, tool := range []string{"ip", "wg"} {
+			for _, tool := range []string{"ip", "wg", "nft"} {
 				real, err := exec.LookPath(tool)
 				if err != nil {
 					t.Fatal(err)
@@ -173,7 +181,7 @@ func checkM3RelayApply(t *testing.T, relays []string, private, configPath string
 					t.Fatal(err)
 				}
 			}
-			for i, pattern := range []string{"link add *", "link set dev * alias *", "setconf * /dev/stdin", "-4 -batch /dev/stdin", "link set dev * up"} {
+			for i, pattern := range []string{"-f /dev/stdin", "link add *", "link set dev * alias *", "setconf * /dev/stdin", "-4 -batch /dev/stdin", "link set dev * up"} {
 				marker := filepath.Join(private, fmt.Sprintf("relay-killed-%d-%d", r, i))
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				cmd := netCommand(ctx, ns, args(r, "apply", 0)...)
@@ -201,5 +209,5 @@ func checkM3RelayApply(t *testing.T, relays []string, private, configPath string
 			}
 			netOutput(t, ns, "ip", "link", "del", "relay-sentinel")
 		}
-	}
+	}, lease
 }

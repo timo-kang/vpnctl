@@ -85,8 +85,8 @@ CLI/API로 관리합니다. [로컬 장치 매핑과 경로 준비 계획](docs/
 릴레이 신원의 등록 ACK·인증서 갱신을 수행합니다.
 [릴레이 승인 cache](docs/architecture/relay-deployment-cache.md)는 `relay refresh|status`로
 갱신·재시작 후 검증합니다. [릴레이 peer 적용·복구](docs/architecture/relay-peer-apply.md)는
-`relay apply|inspect|release|recover`로 수행합니다. 상시 만료 차단, 목적지별 forwarding 권한과
-자동 전환은 후속 구현 단계입니다.
+`relay apply|inspect|release|recover`로 수행합니다. [상시 승인 감독과 커널 lease](docs/architecture/relay-lease.md)는
+`relay supervise`로 유지합니다. 목적지별 forwarding 권한과 자동 전환은 후속 구현 단계입니다.
 
 ## Architecture
 

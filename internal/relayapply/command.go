@@ -34,6 +34,9 @@ func command(ctx context.Context, input, name string, args ...string) ([]byte, e
 	defer cancel()
 	c := exec.CommandContext(ctx, name, args...)
 	c.Env = append(os.Environ(), "LC_ALL=C")
+	if name == "nft" {
+		c.Env = append(c.Env, "TZ=UTC")
+	}
 	c.Stdin = strings.NewReader(input)
 	out, stderr := &outputBuffer{max: 512 << 10}, &outputBuffer{max: 4096}
 	c.Stdout, c.Stderr = out, stderr

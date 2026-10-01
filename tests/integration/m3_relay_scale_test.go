@@ -104,6 +104,7 @@ func TestNetns_M3RelayDeploymentScale(t *testing.T) {
 					t.Fatal("private key leaked")
 				}
 				if err != nil {
+					t.Log(netOutput(t, ns, "nft", "-j", "list", "ruleset"))
 					t.Fatalf("scale %s: %v %s", action, err, b)
 				}
 				var out relayapply.DeploymentResult

@@ -1,0 +1,64 @@
+// Copyright 2026 Jonghyeok Kang
+// SPDX-License-Identifier: Apache-2.0
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"testing"
+	"time"
+)
+
+func TestRelaySupervisorContinuesAfterFailureAndBoundsCycles(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out bytes.Buffer
+	calls := 0
+	err := superviseRelay(ctx, &out, func(c context.Context, refresh bool) (relaySupervisionReport, error) {
+		calls++
+		deadline, ok := c.Deadline()
+		if !ok || time.Until(deadline) > 5*time.Second {
+			t.Fatal("unbounded supervision cycle")
+		}
+		if refresh != (calls == 1) {
+			t.Fatal("refresh cadence ignored", calls, refresh)
+		}
+		if calls == 2 {
+			cancel()
+		}
+		return relaySupervisionReport{SchemaVersion: 1, State: "degraded", Reason: "injected"}, errors.New("injected")
+	}, 20*time.Second)
+	if err != nil || calls != 2 {
+		t.Fatal("supervision stopped on a transient failure", calls, err)
+	}
+	d := json.NewDecoder(&out)
+	for n := 0; n < 2; n++ {
+		var r relaySupervisionReport
+		if err := d.Decode(&r); err != nil || r.State != "degraded" || r.ObservedAt.IsZero() {
+			t.Fatal(r, err)
+		}
+	}
+}
+
+type failedLeaseWriter struct{}
+
+func (failedLeaseWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestRelaySupervisorStopsRenewingWhenOutputFails(t *testing.T) {
+	calls := 0
+	err := superviseRelay(context.Background(), failedLeaseWriter{}, func(context.Context, bool) (relaySupervisionReport, error) {
+		calls++
+		return relaySupervisionReport{}, nil
+	}, time.Second)
+	if !errors.Is(err, io.ErrClosedPipe) || calls != 1 {
+		t.Fatal(calls, err)
+	}
+	for _, args := range [][]string{{"--refresh-interval", "0s"}, {"--refresh-interval", "21s"}, {"unexpected"}, {"--relay-id", "../invalid"}} {
+		if err := runRelaySupervise(args); err == nil {
+			t.Fatal("invalid supervisor options accepted", args)
+		}
+	}
+}

@@ -8,12 +8,15 @@ interface, 승인된 peer의 정확한 inner `/32` AllowedIPs, main table의 `/3
 ## 명령과 소유권
 
 [수신 주체 승인](relay-recipient.md)과 [cache 갱신](relay-deployment-cache.md)이 선행된다.
-Linux의 `ip`, `wg`, 대상 network namespace의 NET_ADMIN 권한이 필요하다. 동일 UID의
+Linux의 `ip`, `wg`, `nft`, 대상 network namespace의 NET_ADMIN 권한이 필요하다. 동일 UID의
 0700 디렉터리에 0600 단일 hardlink 일반 파일로 private key를 배포한다. symlink/FIFO,
 비신뢰 상위 디렉터리, 다른 공개키, 잘못된 key generation은 적용 전에 거절한다.
 
 ```sh
 vpnctl relay refresh --config relay.yaml --relay-id relay-a
+# 별도 서비스로 계속 실행한다.
+vpnctl relay supervise --config relay.yaml --relay-id relay-a
+# 다른 터미널에서 적용한다.
 vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
   --key-file /var/lib/vpnctl-relay/keys/relay.key --key-generation 1 --listen-port 51820
 vpnctl relay inspect --config relay.yaml --relay-id relay-a
@@ -43,10 +46,10 @@ apply만 key/port 인자를 받는다. private key의 X25519 공개값과 승인
 ## 승인 만료·철회·키 변경
 
 운영 정책은 **만료·철회를 확인하면 관리 중인 peer를 차단하고 새 유효 승인으로만 복구**다.
-이 단계의 구현 범위는 적용 명령 실행 중 관측한 승인이다. JSON에
-`expiry_enforcement: "on_command"`를 명시한다. 상시 daemon/커널 만료 장치는 아직 없으므로
-명령을 실행하지 않거나 프로세스가 죽은 동안의 차단 시점은 보장하지 않는다.
-따라서 이 구현만으로 무인 운영의 만료 차단 gate를 통과했다고 판단하지 않는다.
+새 적용은 [상시 감독과 커널 lease](relay-lease.md)를 필수로 사용한다. JSON의
+`expiry_enforcement: "kernel_lease"`와 endpoint별 lease 기한으로 확인한다.
+감독이 멈추면 마지막 허가가 최대 10초에 만료되며 승인 만료 시각을 넘겨 허가하지 않는다.
+구형 journal은 보호가 없는 기존 적용이므로 새 버전에서 회수 후 다시 적용한다.
 
 `apply|inspect|release|recover`는 작업 전 해당 relay의 **모든 관리 endpoint**를 확인한다.
 승인이 만료·철회됐거나 endpoint/peer/key 구성이 달라졌다면 기존 interface를 내리고 제거한다.
@@ -54,14 +57,14 @@ apply만 key/port 인자를 받는다. private key의 X25519 공개값과 승인
 승인을 확인한다. 빈 승인에는 peer를 유지하지 않는다. drain 상태의 기존 binding은 유지하며
 disabled/제거되어 승인 view에서 빠진 binding은 회수한다. 변경된 endpoint는 새 apply가 필요하다.
 
-`refresh|status`는 메타데이터만 처리한다. 배포 스케줄러는 **refresh가 실패해도 inspect를 실행**하고
-inspect 비정상 종료를 점검해야 한다. 통신 오류만이면 유효기간 내 승인으로 유지할 수 있지만,
+`refresh|status`는 메타데이터만 처리한다. `supervise`가 갱신 실패 뒤에도 차단을 처리한다.
+통신 오류만이면 활성 lease를 유효기간 내 승인으로 유지할 수 있지만,
 관측한 거절은 통신 복구만으로 해제되지 않는다. 새 승인 저장 후에도 apply의 로컬 키 검증을 거친다.
 인증서 갱신은 별도의 `sync-credentials`, TTL 연장은 관리자 catalog 갱신 책임이다.
 
 외부 자원 충돌·권한 부족·I/O 불확실성 때문에 회수가 실패하면 `kernel_ready=false`와 오류를
 반환한다. 이때 차단 완료로 간주하지 말고 운영자가 충돌/저장소를 해결해야 한다. metadata 오류로
-cache 자체를 열 수 없는 경우도 자동 회수를 보장하지 않는다. 이 한계의 보완은 후속 상시 감독 범위다.
+cache 자체를 열 수 없으면 자동 회수는 못해도 기존 커널 lease는 만료된다.
 
 ## Journal과 복구
 
@@ -70,9 +73,9 @@ cache 자체를 열 수 없는 경우도 자동 회수를 보장하지 않는다
 boot ID·network namespace device/inode에 고정하므로 다른 부팅·namespace의 자원을 추측해 삭제하지 않는다.
 
 1. 소유 ifindex/group/alias, 공개 peer, route 정보와 `preparing` intent를 fsync/rename/dir-fsync한다.
-2. link 생성 → alias → WG 설정 → link up → 반환 route 설치를 수행하고 실제 커널을 읽어 검증한다.
-3. `applied`를 영속 저장한다. 마지막 저장 실패 시 link를 내려 불확실한 성공을 방지한다.
-4. 회수는 소유 link down → `releasing` 저장 → link 삭제(소유 route 포함) → journal 제거 기록이다.
+2. 차단 guard 설치 → link 생성 → alias → WG 설정 → link up → 반환 route 설치를 수행하고 실제 커널을 읽어 검증한다.
+3. 현재 승인으로 lease를 허가하고 `applied`를 영속 저장한다. 마지막 저장 실패 시 guard를 닫고 link를 내린다.
+4. 회수는 guard 차단 → 소유 link down → `releasing` 저장 → link·guard 삭제 → journal 제거 기록이다.
    저장 실패 시 원래 intent와 내려간 link를 남겨 재개방 후 복구할 수 있게 한다.
 
 SIGKILL 뒤 `recover`는 미완성 intent를 제거한다. 이미 `applied`인데 내려간 link는 자동으로
@@ -82,7 +85,7 @@ SIGKILL 뒤 `recover`는 미완성 intent를 제거한다. 이미 `applied`인�
 
 ## 배포 경계와 검증
 
-제품 소유: WG interface/peer, inner `/32` 반환 route, 승인과 소유 journal.
+제품 소유: WG interface/peer, inner `/32` 반환 route, endpoint별 nft lease guard, 승인과 소유 journal.
 배포 소유: forwarding sysctl, rp_filter, 외부 endpoint/NAT mapping, source/target 제한 firewall,
 uplink route, SNAT 또는 서버의 명시적 반환 route. node의 앱 route 선택도 아직 후속 단계다.
 [배포 네트워크 계약](../deployment/relay-network.md)을 같이 적용한다.
@@ -94,7 +97,7 @@ uplink route, SNAT 또는 서버의 명시적 반환 route. node의 앱 route �
 단위/race 검사는 1/3/8/32 node × 4 path, 반복 적용·재개방, 저장 전후 실패, 각 단계 중단·만료,
 철회 후 통신 단절, 로컬 키 교체/권한/링크, journal 손상을 검사한다. 실제 namespace 테스트는
 두 relay × 두 underlay에서 제품 CLI peer·반환 route를 통한 WG/TCP 통신, 외부 자원 보존,
-철회·새 승인 복구, 5개 커널 단계 SIGKILL 후 다음 프로세스 복구를 검사한다.
+철회·새 승인 복구, guard를 포함한 6개 커널 단계 SIGKILL 후 다음 프로세스 복구를 검사한다.
 별도 커널 규모 시험은 1/3/8/32 node × 4 path(최대 128 peer)의 실제 설치 수와 반복 CLI
 재개방을 검증한다. 승인 발행과 forwarding/NAT/앱 route는 fixture이며 이 시험은
 32대 동시 통신이나 자동 failover/SLO 판정이 아니다.

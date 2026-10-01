@@ -33,6 +33,7 @@ type deployedFake struct {
 	entry DeploymentEntry
 	steps int
 	up    bool
+	lease DeploymentLease
 }
 type deploymentFake struct {
 	objects               map[string]deployedFake
@@ -50,7 +51,7 @@ func (k *deploymentFake) Check(_ context.Context, e DeploymentEntry, fresh bool)
 	if k.foreign || fresh && ok {
 		return false, ErrConflict
 	}
-	return ok && v.steps == 5 && v.up, nil
+	return ok && v.steps == 6 && v.up, nil
 }
 func (k *deploymentFake) Step(_ context.Context, e DeploymentEntry, step, key string) error {
 	if k.hook != nil {
@@ -76,6 +77,10 @@ func (k *deploymentFake) Step(_ context.Context, e DeploymentEntry, step, key st
 	return nil
 }
 func (k *deploymentFake) Down(_ context.Context, e DeploymentEntry) error {
+	if v, ok := k.objects[e.Endpoint]; ok {
+		v.lease = DeploymentLease{}
+		k.objects[e.Endpoint] = v
+	}
 	if k.foreign {
 		return ErrConflict
 	}
@@ -84,6 +89,21 @@ func (k *deploymentFake) Down(_ context.Context, e DeploymentEntry) error {
 		k.objects[e.Endpoint] = v
 	}
 	return nil
+}
+func (k *deploymentFake) Lease(_ context.Context, e DeploymentEntry, until, authenticatedAt time.Time) (DeploymentLease, error) {
+	v := k.objects[e.Endpoint]
+	deadline, err := leaseDeadline(v.lease.Active && time.Now().Before(v.lease.Deadline), until, authenticatedAt, time.Now().UTC())
+	if err != nil {
+		return v.lease, err
+	}
+	v.lease = DeploymentLease{Active: true, Deadline: deadline}
+	k.objects[e.Endpoint] = v
+	return v.lease, nil
+}
+func (k *deploymentFake) LeaseStatus(_ context.Context, e DeploymentEntry) (DeploymentLease, error) {
+	v := k.objects[e.Endpoint].lease
+	v.Active = v.Active && time.Now().Before(v.Deadline)
+	return v, nil
 }
 func (k *deploymentFake) Remove(_ context.Context, e DeploymentEntry) error {
 	if k.foreign {
@@ -161,7 +181,7 @@ func reopenDeployment(t *testing.T, e *DeploymentEngine, c *relaycache.Deploymen
 	return e, n
 }
 func TestRelayDeploymentEveryStepFailureAndCrash(t *testing.T) {
-	for _, step := range []string{"link", "tag", "wg", "routes", "up"} {
+	for _, step := range []string{"guard", "link", "tag", "wg", "routes", "up"} {
 		for _, mode := range []string{"before", "after", "crash"} {
 			t.Run(step+"/"+mode, func(t *testing.T) {
 				e, k, c, _, o, dir := deploymentFixture(t, 1)
@@ -383,7 +403,7 @@ func (c *expiringDeploymentCache) Status() (relaycache.DeploymentReport, error) 
 	return r, err
 }
 func TestRelayDeploymentExpiryDuringEveryStepAndInspection(t *testing.T) {
-	for _, step := range []string{"link", "tag", "wg", "routes", "up", "inspect"} {
+	for _, step := range []string{"guard", "link", "tag", "wg", "routes", "up", "inspect"} {
 		t.Run(step, func(t *testing.T) {
 			e, k, c, _, o, _ := deploymentFixture(t, 1)
 			if _, err := e.Apply(context.Background(), o); err != nil {

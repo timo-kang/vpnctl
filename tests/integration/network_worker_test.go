@@ -47,6 +47,10 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "lease-issuer":
+		err = serveLeaseIssuer()
+	case "lease-stream":
+		err = runLeaseStream()
 	case "m3-echo":
 		err = serveM3Echo()
 	case "m3-probe":

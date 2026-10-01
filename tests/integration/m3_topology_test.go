@@ -46,13 +46,15 @@ func serveM3Echo() error {
 		}
 		go func() {
 			defer c.Close()
-			c.SetDeadline(time.Now().Add(2 * time.Second))
-			b := make([]byte, 16)
-			if _, e := io.ReadFull(c, b); e != nil {
-				return
+			for {
+				c.SetDeadline(time.Now().Add(2 * time.Second))
+				b := make([]byte, 16)
+				if _, e := io.ReadFull(c, b); e != nil {
+					return
+				}
+				fmt.Fprintln(c, c.RemoteAddr().String())
+				c.Write(b)
 			}
-			fmt.Fprintln(c, c.RemoteAddr().String())
-			c.Write(b)
 		}()
 	}
 }

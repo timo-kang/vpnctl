@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"vpnctl/internal/relaycache"
 )
@@ -24,6 +25,8 @@ type deploymentBackend interface {
 	Step(context.Context, DeploymentEntry, string, string) error
 	Down(context.Context, DeploymentEntry) error
 	Remove(context.Context, DeploymentEntry) error
+	Lease(context.Context, DeploymentEntry, time.Time, time.Time) (DeploymentLease, error)
+	LeaseStatus(context.Context, DeploymentEntry) (DeploymentLease, error)
 }
 type DeploymentEngine struct {
 	mu        sync.Mutex
@@ -112,9 +115,12 @@ func (e *DeploymentEngine) persist() error {
 	return err
 }
 func (e *DeploymentEngine) result(state, reason string) DeploymentResult {
-	r := DeploymentResult{SchemaVersion: 1, State: state, Reason: reason, RelayID: e.journal.Relay, UplinkHealth: "unknown", ExpiryEnforcement: "on_command", Endpoints: []DeploymentEndpointResult{}}
+	r := DeploymentResult{SchemaVersion: 1, State: state, Reason: reason, RelayID: e.journal.Relay, UplinkHealth: "unknown", ExpiryEnforcement: "kernel_lease", Endpoints: []DeploymentEndpointResult{}}
 	for _, v := range e.journal.Entries {
-		r.Endpoints = append(r.Endpoints, DeploymentEndpointResult{v.Endpoint, v.Interface, v.Phase, len(v.Peers), false})
+		r.Endpoints = append(r.Endpoints, DeploymentEndpointResult{EndpointID: v.Endpoint, Interface: v.Interface, Phase: v.Phase, Peers: len(v.Peers)})
+		if v.LeaseVersion == 0 {
+			r.ExpiryEnforcement = "legacy_on_command"
+		}
 	}
 	return r
 }
@@ -222,7 +228,7 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 		return e.result("blocked", "journal_save_failed"), err
 	}
 	// Linux requires the link up before installing its unicast routes.
-	for _, step := range []string{"link", "tag", "wg", "up", "routes"} {
+	for _, step := range []string{"guard", "link", "tag", "wg", "up", "routes"} {
 		current, x := e.cache.Status()
 		want, y := desiredDeployment(current, o.EndpointID, o.ListenPort)
 		if x != nil || y != nil || !sameDeployment(want, v) || ctx.Err() != nil {
@@ -250,6 +256,8 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 		w, y := desiredDeployment(r, o.EndpointID, o.ListenPort)
 		if x != nil || y != nil || !sameDeployment(v, w) || ctx.Err() != nil {
 			err = errors.New("approval expired or changed before commit")
+		} else {
+			_, err = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, time.Now().UTC())
 		}
 	}
 	if err != nil {
@@ -286,6 +294,12 @@ func (e *DeploymentEngine) inspect(ctx context.Context) (DeploymentResult, error
 	}
 	for i, v := range e.journal.Entries {
 		ready, x := e.backend.Check(ctx, v, false)
+		lease, leaseErr := e.backend.LeaseStatus(ctx, v)
+		out.Endpoints[i].Lease = &lease
+		if leaseErr != nil || !lease.Active || r.Deployment == nil || lease.Deadline.After(r.Deployment.ExpiresAt) {
+			ready = false
+			x = errors.Join(x, leaseErr, errors.New("relay lease unavailable or expired"))
+		}
 		out.Endpoints[i].KernelReady = ready && x == nil && v.Phase == "applied"
 		if !out.Endpoints[i].KernelReady {
 			out.KernelReady = false
@@ -306,6 +320,44 @@ func (e *DeploymentEngine) inspect(ctx context.Context) (DeploymentResult, error
 		out.Reason = "kernel_conflict_or_recovery_required"
 	}
 	return out, err
+}
+
+// Maintain renews only already applied, still approved resources. A fresh
+// authenticated response is required to automatically rearm an expired lease.
+func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt time.Time) (DeploymentResult, error) {
+	if !e.mu.TryLock() {
+		return DeploymentResult{}, relaycache.ErrBusy
+	}
+	defer e.mu.Unlock()
+	if err := e.begin(); err != nil {
+		return e.result("blocked", "reopen_required"), err
+	}
+	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
+	defer cancel()
+	r, err := e.enforce(ctx)
+	if err != nil {
+		return e.result("blocked", "approval_or_cleanup_failed"), err
+	}
+	for _, v := range e.journal.Entries {
+		ready, x := e.backend.Check(ctx, v, false)
+		if x != nil || !ready || v.Phase != "applied" {
+			err = errors.Join(err, ErrRecovery, x, e.backend.Down(ctx, v))
+			continue
+		}
+		if !r.ApprovalValid || r.Deployment == nil {
+			err = errors.Join(err, ErrRecovery)
+			continue
+		}
+		_, x = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, authenticatedAt)
+		if x != nil && !errors.Is(x, ErrLeaseExpired) {
+			x = errors.Join(x, e.backend.Down(ctx, v))
+		}
+		err = errors.Join(err, x)
+	}
+	if err != nil {
+		return e.result("blocked", "lease_renewal_failed"), err
+	}
+	return e.inspect(ctx)
 }
 func (e *DeploymentEngine) Inspect(ctx context.Context) (DeploymentResult, error) {
 	if !e.mu.TryLock() {

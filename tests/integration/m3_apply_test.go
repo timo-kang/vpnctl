@@ -34,7 +34,7 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 		Completed     bool     `json:"completed"`
 		Scope         string   `json:"scope"`
 		Phases        []string `json:"phases"`
-	}{SchemaVersion: 1, Scope: "production candidate and relay WG peer/return-route apply/release/recover; fixture approval issuer, forwarding/NAT and app routes; on-command expiry only; no automatic failover/SLO qualification", Phases: []string{}}
+	}{SchemaVersion: 1, Scope: "production candidate/relay apply and kernel lease supervision; fixture mTLS approval issuer, forwarding/NAT and app routes; process/storage/expiry packet faults; no host clock/suspend/reboot or automatic failover/SLO qualification", Phases: []string{}}
 	defer func() {
 		report.Completed = report.Completed && !t.Failed()
 		b, err := json.MarshalIndent(report, "", "  ")
@@ -155,7 +155,7 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 	call("recover", "", true)
 	call("prepare", first.PathID, true)
 	report.Phases = append(report.Phases, "external_preshared_key_conflict_without_secret_disclosure")
-	relayInterfaces, releaseRelays := checkM3RelayApply(t, relays, private, configPath, relayKeys, plan, issuer, &report.Phases)
+	relayInterfaces, releaseRelays, lease := checkM3RelayApply(t, relays, private, configPath, relayKeys, plan, issuer, &report.Phases)
 	worker, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +188,14 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 			t.Fatal("outer UDP source differs", actual)
 		}
 		report.Phases = append(report.Phases, "wireguard_source_and_target_echo_"+p.PathID)
+		if i == 1 {
+			lease.checkPause(robot, 0, relayInterfaces[0][1], "stop", &report.Phases)
+		}
+		if i == 3 {
+			lease.checkPause(robot, 1, relayInterfaces[1][1], "kill", &report.Phases)
+			lease.checkPause(robot, 1, relayInterfaces[1][1], "enospc", &report.Phases)
+			lease.checkExpiry(robot, relayInterfaces, &report.Phases)
+		}
 		if i == 0 {
 			// A tempting main-table route on the other physical network must
 			// never receive marked packets when the candidate route disappears.

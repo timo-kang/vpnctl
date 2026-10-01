@@ -36,6 +36,7 @@ type DeploymentEntry struct {
 	PublicKey     string           `json:"public_key"`
 	KeyGeneration uint64           `json:"key_generation"`
 	ListenPort    int              `json:"listen_port"`
+	LeaseVersion  int              `json:"lease_version,omitempty"`
 	Peers         []DeploymentPeer `json:"peers"`
 	Alias         string           `json:"alias"`
 	LinkIndex     uint32           `json:"link_index"`
@@ -64,11 +65,12 @@ type DeploymentResult struct {
 	Endpoints         []DeploymentEndpointResult `json:"endpoints"`
 }
 type DeploymentEndpointResult struct {
-	EndpointID  string `json:"endpoint_id"`
-	Interface   string `json:"interface"`
-	Phase       string `json:"phase"`
-	Peers       int    `json:"peers"`
-	KernelReady bool   `json:"kernel_ready"`
+	EndpointID  string           `json:"endpoint_id"`
+	Interface   string           `json:"interface"`
+	Phase       string           `json:"phase"`
+	Peers       int              `json:"peers"`
+	KernelReady bool             `json:"kernel_ready"`
+	Lease       *DeploymentLease `json:"lease,omitempty"`
 }
 
 func deploymentHash(v any) string {
@@ -104,7 +106,7 @@ func desiredDeployment(r relaycache.DeploymentReport, endpoint string, port int)
 	if port < 1 || port > 65535 || !slices.ContainsFunc(relay.Endpoints, func(ep relaycatalog.Endpoint) bool { return ep.ID == endpoint }) {
 		return DeploymentEntry{}, errors.New("endpoint or local listen port invalid")
 	}
-	e := DeploymentEntry{Controller: v.ControllerID, Endpoint: endpoint, Interface: deploymentInterface(v.ControllerID, r.PrincipalID, r.RelayID, endpoint), PublicKey: relay.PublicKey, KeyGeneration: relay.KeyGeneration, ListenPort: port, Peers: []DeploymentPeer{}, Phase: "preparing"}
+	e := DeploymentEntry{Controller: v.ControllerID, Endpoint: endpoint, Interface: deploymentInterface(v.ControllerID, r.PrincipalID, r.RelayID, endpoint), PublicKey: relay.PublicKey, KeyGeneration: relay.KeyGeneration, ListenPort: port, LeaseVersion: 1, Peers: []DeploymentPeer{}, Phase: "preparing"}
 	paths := map[string]bool{}
 	for _, p := range v.Spec.Paths {
 		if p.EndpointID == endpoint {
@@ -127,6 +129,9 @@ func sameDeployment(a, b DeploymentEntry) bool {
 	return deploymentHash(a) == deploymentHash(b)
 }
 func validateDeploymentEntry(e DeploymentEntry, j deploymentJournal) error {
+	if e.LeaseVersion < 0 || e.LeaseVersion > 1 {
+		return errors.New("unsupported relay lease version")
+	}
 	id, err := hex.DecodeString(e.Controller)
 	if err != nil || len(id) != 16 || hex.EncodeToString(id) != e.Controller || relaycache.ValidateDeploymentIdentity(j.Principal, e.Endpoint) != nil || e.Interface != deploymentInterface(e.Controller, j.Principal, j.Relay, e.Endpoint) || relaycatalog.ValidatePublicKey(e.PublicKey) != nil || e.KeyGeneration == 0 || e.ListenPort < 1 || e.ListenPort > 65535 || e.Peers == nil || len(e.Peers) > relaycatalog.MaxNodes*relaycatalog.MaxPathsPerNode {
 		return errors.New("invalid deployment ownership journal")
