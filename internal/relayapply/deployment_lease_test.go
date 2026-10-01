@@ -6,6 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,6 +275,79 @@ func TestLeaseRoundedRearmWindowIsRetryableExpiry(t *testing.T) {
 	}
 	if out, err := e.Maintain(context.Background(), clock); err != nil || !out.KernelReady {
 		t.Fatal("new approval cannot rearm retained peer", out, err)
+	}
+}
+
+func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testing.T) {
+	engine, _, _, _, options, _ := deploymentFixture(t, 1)
+	approval, _ := engine.cache.Status()
+	entry, _ := desiredDeployment(approval, options.EndpointID, options.ListenPort)
+	entry.Alias, entry.Group, entry.LinkIndex, _ = token()
+	for _, mode := range []string{"active", "zero-countdown", "empty-set", "missing", "wrong-deadline", "wrong-owner"} {
+		t.Run(mode, func(t *testing.T) {
+			committed := false
+			deadline := time.Now().Add(-time.Second).Truncate(time.Second)
+			backend := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
+				if name != "nft" {
+					t.Fatal("unexpected command", name, args)
+				}
+				encode := func(rows []object) ([]byte, error) { return json.Marshal(object{"nftables": rows}) }
+				switch strings.Join(args, " ") {
+				case "-j -n -T list tables":
+					if committed && mode == "missing" {
+						return encode([]object{})
+					}
+					return encode(leaseExpected(entry, deadline)[:1])
+				case "-j -n -T list flowtables":
+					return encode([]object{})
+				case "-j -n -T list table inet " + leaseTable(entry):
+					observed := deadline
+					if committed && mode == "wrong-deadline" {
+						observed = observed.Add(time.Second)
+					}
+					rows := leaseExpected(entry, observed)
+					if committed && mode != "empty-set" {
+						left := 1
+						if mode == "zero-countdown" {
+							left = 0 // nft rounds a subsecond remaining timeout to zero.
+						}
+						rows[1]["set"].(object)["elem"] = []any{object{"elem": object{"val": entry.Interface, "expires": left}}}
+					}
+					if committed && mode == "wrong-owner" {
+						rows[5]["rule"].(object)["comment"] = "foreign"
+					}
+					return encode(rows)
+				case "-f /dev/stdin":
+					match := regexp.MustCompile(`meta time >= ([0-9]+)`).FindStringSubmatch(input)
+					if len(match) != 2 {
+						t.Fatal("missing lease cutoff")
+					}
+					seconds, err := strconv.ParseInt(match[1], 10, 64)
+					if err != nil {
+						t.Fatal(err)
+					}
+					deadline, committed = time.Unix(seconds, 0).UTC(), true
+					return nil, nil
+				default:
+					return nil, fmt.Errorf("unexpected nft command %v", args)
+				}
+			}}}
+			state, err := backend.Lease(context.Background(), entry, time.Now().Add(time.Hour), time.Now().UTC())
+			if !committed {
+				t.Fatal("lease commit not exercised", err)
+			}
+			if mode == "active" {
+				if err != nil || !state.Active {
+					t.Fatal("active lease rejected", state, err)
+				}
+			} else if mode == "zero-countdown" || mode == "empty-set" {
+				if !errors.Is(err, ErrLeaseExpired) || state.Active {
+					t.Fatal("normal expiry during readback would tear down the link", state, err)
+				}
+			} else if err == nil || errors.Is(err, ErrLeaseExpired) {
+				t.Fatal("invalid inventory treated as retryable expiry", mode, state, err)
+			}
+		})
 	}
 }
 

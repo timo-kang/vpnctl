@@ -5,6 +5,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -34,6 +35,31 @@ func TestNetns_M3SupervisionScale(t *testing.T) {
 				}
 				report := map[string]any{"schema_version": 1, "nodes": size, "paths_per_node": 4, "endpoints": endpoints, "completed": false, "scope": "real controller mTLS, installed peers/routes and supervisor cycle timing; no fleet traffic SLO"}
 				defer func() {
+					if t.Failed() {
+						// Capture public kernel state before process/namespace cleanup.
+						// Inspect would enforce approval and change the failure evidence.
+						inventory := map[string]any{"observed_at": time.Now().UTC()}
+						for name, args := range map[string][]string{
+							"links":  {"ip", "-j", "link", "show"},
+							"routes": {"ip", "-j", "route", "show", "table", "all"},
+							"peers":  {"wg", "show", "all", "peers"},
+							"guards": {"nft", "-j", "-n", "-T", "list", "ruleset"},
+						} {
+							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+							b, err := netCommand(ctx, ns[1], args...).CombinedOutput()
+							cancel()
+							truncated := len(b) > 512<<10
+							if truncated {
+								b = b[:512<<10]
+							}
+							result := map[string]any{"output": string(b), "truncated": truncated}
+							if err != nil {
+								result["error"] = err.Error()
+							}
+							inventory[name] = result
+						}
+						report["failure_kernel"] = inventory
+					}
 					b, err := json.MarshalIndent(report, "", "  ")
 					if err != nil {
 						t.Error(err)
