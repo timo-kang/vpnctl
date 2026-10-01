@@ -84,5 +84,8 @@ prepare/activate/rollback, revoke/remove/grant 철회와 재시작을 검사하�
 refresh/status의 JSON·종료값을 확인한다. 규모 시험은 1/3/8/32 node × 4 relay × 2 path에서
 relay별 정확한 peer 수, 반복 갱신·재개방과 철회를 검사한다.
 
-다음 단계는 로컬 WG key 검증, peer 적용 journal과 복구, peer 만료/철회 처리,
-forwarding/목적지 권한과 실제 서버 반환 경로다. #114의 전체 완료 판정은 이 단계까지 남아 있다.
+[로컬 WG key 검증·peer 적용 journal·복구](relay-peer-apply.md)는 별도 명령으로 구현했다.
+`refresh|status`는 메타데이터 명령이며 설치된 peer를 직접 회수하지 않는다. 운영자는
+refresh의 성공 여부와 관계없이 `relay inspect`를 실행해야 한다. 적용 명령이 관측한
+만료·철회는 차단하지만 프로세스 부재/중단 시 정해진 시각의 차단은 보장하지 않는다.
+상시 감독·목적지별 forwarding 권한·서버 반환 방식의 배포 통합이 #114에 남아 있다.

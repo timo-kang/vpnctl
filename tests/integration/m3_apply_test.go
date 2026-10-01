@@ -22,7 +22,7 @@ import (
 	"vpnctl/internal/relayplan"
 )
 
-func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, private, configPath string, relayKeys []string, plan relayplan.Plan) {
+func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, private, configPath string, relayKeys []string, plan relayplan.Plan, issuer *planIssuer) {
 	t.Helper()
 	bin := integrationBinary(t)
 	results, err := os.MkdirTemp(os.Getenv("VPNCTL_ARTIFACT_DIR"), "m3-prepare-")
@@ -34,7 +34,7 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 		Completed     bool     `json:"completed"`
 		Scope         string   `json:"scope"`
 		Phases        []string `json:"phases"`
-	}{SchemaVersion: 1, Scope: "production candidate prepare/release/recover; fixture relay deployment and app routes; no automatic failover/SLO qualification", Phases: []string{}}
+	}{SchemaVersion: 1, Scope: "production candidate and relay WG peer/return-route apply/release/recover; fixture approval issuer, forwarding/NAT and app routes; on-command expiry only; no automatic failover/SLO qualification", Phases: []string{}}
 	defer func() {
 		report.Completed = report.Completed && !t.Failed()
 		b, err := json.MarshalIndent(report, "", "  ")
@@ -155,18 +155,7 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 	call("recover", "", true)
 	call("prepare", first.PathID, true)
 	report.Phases = append(report.Phases, "external_preshared_key_conflict_without_secret_disclosure")
-	for r, ns := range relays {
-		keyfile := filepath.Join(private, fmt.Sprintf("prepare-relay-%d.key", r))
-		mustWrite(t, keyfile, relayKeys[r])
-		for u := 0; u < 2; u++ {
-			iface := fmt.Sprintf("wg%d", u)
-			p := plan.Paths[r*2+u]
-			netOutput(t, ns, "ip", "link", "add", iface, "type", "wireguard")
-			netOutput(t, ns, "wg", "set", iface, "private-key", keyfile, "listen-port", strconv.Itoa(51820+u), "peer", p.PublicKey, "allowed-ips", p.InnerAddress)
-			netOutput(t, ns, "ip", "link", "set", iface, "up")
-			netOutput(t, ns, "ip", "route", "add", p.InnerAddress, "dev", iface)
-		}
-	}
+	relayInterfaces, releaseRelays := checkM3RelayApply(t, relays, private, configPath, relayKeys, plan, issuer, &report.Phases)
 	worker, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +183,7 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 		if !probe.OK || probe.Source != fmt.Sprintf("198.18.0.%d", 11+i/2) {
 			t.Fatal("prepared candidate cannot reach target", p.PathID, probe)
 		}
-		actual := netOutput(t, relays[i/2], "wg", "show", fmt.Sprintf("wg%d", i%2), "endpoints")
+		actual := netOutput(t, relays[i/2], "wg", "show", relayInterfaces[i/2][i%2], "endpoints")
 		if !strings.Contains(actual, p.PublicKey) || !strings.Contains(actual, p.Pin.Source+":") {
 			t.Fatal("outer UDP source differs", actual)
 		}
@@ -275,11 +264,7 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 	call("release", first.PathID, true)
 	netOutput(t, robot, "ip", "route", "del", first.Pin.EndpointPrefix)
 	report.Phases = append(report.Phases, "gateway_install_readback_release")
-	for _, ns := range relays {
-		for u := 0; u < 2; u++ {
-			netOutput(t, ns, "ip", "link", "del", fmt.Sprintf("wg%d", u))
-		}
-	}
+	releaseRelays()
 	// Kill the real CLI at four boundaries after successful kernel mutations. The wrapper
 	// never reads stdin (the WG key), and the next process owns recovery.
 	faultDir := filepath.Join(private, "fault-bin")
@@ -326,5 +311,5 @@ func checkM3PreparedPaths(t *testing.T, robot string, relays []string, target, p
 	}
 	report.Phases = append(report.Phases, "original_routes_rules_and_sentinel_preserved")
 	report.Completed = true
-	t.Log("M3 prepare: production CLI prepares four candidates; fixture peer deployment and target route yield real WG/source/target proof; exact release")
+	t.Log("M3 prepare: production CLI prepares four candidates and relay peers/return routes; fixture forwarding/NAT and target route yield real WG/source/target proof; exact release")
 }

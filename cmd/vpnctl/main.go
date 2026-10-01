@@ -56,6 +56,9 @@ Usage:
   vpnctl relay catalog --config <enrolled-identity.yaml> --relay-id <id> [--timeout 20s]
   vpnctl relay sync-credentials --config <enrolled-identity.yaml> [--timeout 20s]
   vpnctl relay refresh|status --config <enrolled-identity.yaml> --relay-id <id> [--cache-dir <path>]
+  vpnctl relay apply --config <path> --relay-id <id> --endpoint-id <id> --key-file <private-key> --key-generation <n> --listen-port <port>
+  vpnctl relay inspect|recover --config <path> --relay-id <id> [--cache-dir <path>]
+  vpnctl relay release --config <path> --relay-id <id> --endpoint-id <id> [--cache-dir <path>]
   vpnctl controller history backup --config <path> --out <history.db>
   vpnctl controller history restore --config <path> --file <history.db>
   vpnctl controller history enable-jitter --config <path> --out <pre-jitter-backup.db>

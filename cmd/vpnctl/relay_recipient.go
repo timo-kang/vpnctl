@@ -46,14 +46,16 @@ func runControllerRelayRecipient(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(response)
 }
 
-// Relay commands bound approval reads and explicit PKI synchronization.
-// None applies local networking resources.
+// Relay commands separate approval reads, PKI synchronization and owned peers.
 func runRelayRecipient(args []string) error {
+	if len(args) > 0 && (args[0] == "apply" || args[0] == "inspect" || args[0] == "release" || args[0] == "recover") {
+		return runRelayPeerApply(args)
+	}
 	if len(args) > 0 && (args[0] == "refresh" || args[0] == "status") {
 		return runRelayDeploymentCache(args)
 	}
 	if len(args) == 0 || args[0] != "catalog" && args[0] != "sync-credentials" {
-		return fmt.Errorf("relay catalog|sync-credentials|refresh|status required")
+		return fmt.Errorf("relay catalog|sync-credentials|refresh|status|apply|inspect|release|recover required")
 	}
 	fs := flag.NewFlagSet("relay "+args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "enrolled identity YAML configuration")
