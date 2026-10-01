@@ -62,7 +62,7 @@ func runM3Probe() error {
 	began := time.Now()
 	r := m3Probe{}
 	probe := func() error {
-		c, e := net.DialTimeout("tcp4", m3Target+":9192", time.Second)
+		c, e := m3Dial(time.Second)
 		if e != nil {
 			return e
 		}
@@ -112,6 +112,15 @@ func runM3Probe() error {
 	return json.NewEncoder(os.Stdout).Encode(r)
 }
 
+// Source routing is installed explicitly by the four-path test fixture.
+func m3Dial(timeout time.Duration) (net.Conn, error) {
+	d := net.Dialer{Timeout: timeout}
+	if source := os.Getenv("VPNCTL_PROBE_SOURCE"); source != "" {
+		d.LocalAddr = &net.TCPAddr{IP: net.ParseIP(source)}
+	}
+	return d.Dial("tcp4", m3Target+":9192")
+}
+
 type m3Path struct {
 	relay, underlay                            int
 	iface, endpoint, source, inner, relayInner string
@@ -126,6 +135,13 @@ func TestNetns_M3PathTopology(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	robot, relays, target := newM3Topology(t)
+	checkM3Topology(t, worker, robot, relays, target)
+}
+
+// Only test-owned links, forwarding and NAT; callers supply production tunnels.
+func newM3Topology(t *testing.T) (string, []string, string) {
+	t.Helper()
 	suffix := fmt.Sprintf("%x", time.Now().UnixNano()&0xfffffff)
 	ns := make([]string, 4)
 	for i := range ns {
@@ -177,6 +193,10 @@ func TestNetns_M3PathTopology(t *testing.T) {
    }
   }`, addr))
 	}
+	return robot, relays, target
+}
+
+func checkM3Topology(t *testing.T, worker, robot string, relays []string, target string) {
 	private := t.TempDir()
 	results, e := os.MkdirTemp(os.Getenv("VPNCTL_ARTIFACT_DIR"), "m3-topology-")
 	if e != nil {

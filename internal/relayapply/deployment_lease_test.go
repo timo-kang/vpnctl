@@ -8,6 +8,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"vpnctl/internal/relaycache"
 )
 
 func TestLeaseRejectsAlteredRulesAndUnboundedCountdown(t *testing.T) {
@@ -61,6 +63,89 @@ func TestLeaseRejectsAlteredRulesAndUnboundedCountdown(t *testing.T) {
 type failedLeaseBackend struct {
 	deploymentBackend
 	failed string
+}
+
+type failedRemovalBackend struct {
+	deploymentBackend
+	failed string
+}
+
+func (b failedRemovalBackend) Down(ctx context.Context, e DeploymentEntry) error {
+	err := b.deploymentBackend.Down(ctx, e)
+	if e.Endpoint == b.failed {
+		return errors.Join(err, ErrConflict)
+	}
+	return err
+}
+
+func TestLeaseCleanupConflictDoesNotStarveApprovedEndpoint(t *testing.T) {
+	for _, mode := range []string{"conflict", "status-failure", "journal-uncertain"} {
+		t.Run(mode, func(t *testing.T) {
+			e, k, c, issuer, o, _ := deploymentFixture(t, 1)
+			for _, ep := range []string{"ep0", "ep1"} {
+				o.EndpointID = ep
+				if ep == "ep1" {
+					o.ListenPort = 51821
+				}
+				if _, err := e.Apply(context.Background(), o); err != nil {
+					t.Fatal(err)
+				}
+			}
+			issuer.view.Generation++
+			paths := issuer.view.Spec.Paths[:0]
+			removed := map[string]bool{}
+			for _, p := range issuer.view.Spec.Paths {
+				if p.EndpointID == "ep0" {
+					removed[p.ID] = true
+				} else {
+					paths = append(paths, p)
+				}
+			}
+			issuer.view.Spec.Paths = paths
+			bindings := issuer.view.Bindings[:0]
+			for _, b := range issuer.view.Bindings {
+				if !removed[b.PathID] {
+					bindings = append(bindings, b)
+				}
+			}
+			issuer.view.Bindings = bindings
+			if _, err := c.Refresh(context.Background(), issuer); err != nil {
+				t.Fatal(err)
+			}
+			before := k.objects["ep1"].lease.Deadline
+			e.backend = failedRemovalBackend{k, "ep0"}
+			if mode == "status-failure" {
+				e.cache = &failedLeaseRecheckCache{deploymentCache: c}
+			}
+			if mode == "journal-uncertain" {
+				e.backend = k
+				e.cache = &failingDeploymentCache{deploymentCache: c, failAt: 1}
+			}
+			if out, err := e.Maintain(context.Background(), time.Now().UTC()); err == nil || out.KernelReady {
+				t.Fatal("cleanup conflict hidden", out, err)
+			}
+			if k.objects["ep0"].lease.Active {
+				t.Fatal("invalid endpoint rearmed")
+			}
+			if advanced := k.objects["ep1"].lease.Deadline.After(before); advanced != (mode == "conflict") {
+				t.Fatal("independent lease decision disagrees with approval/storage certainty", mode, advanced)
+			}
+		})
+	}
+}
+
+type failedLeaseRecheckCache struct {
+	deploymentCache
+	calls int
+}
+
+func (c *failedLeaseRecheckCache) Status() (relaycache.DeploymentReport, error) {
+	c.calls++
+	r, err := c.deploymentCache.Status()
+	if c.calls == 2 {
+		return r, errors.New("read failed after cleanup conflict")
+	}
+	return r, err
 }
 
 func (b failedLeaseBackend) Lease(c context.Context, e DeploymentEntry, t, authenticatedAt time.Time) (DeploymentLease, error) {

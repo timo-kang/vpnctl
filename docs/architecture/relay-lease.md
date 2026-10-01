@@ -87,6 +87,9 @@ JSONL에는 `observed_at`, `cycle_ms`, `state`, `reason`, `refresh`, `approval_s
 외부 peer/route/PSK가 추가되어 interface 제거가 불가능해도 소유 guard를 먼저 닫는다.
 guard 자체가 변조되면 타인 규칙을 덮어쓰지 않고 소유 link 차단을 시도하며 실패를 노출한다.
 모든 endpoint를 순회하므로 한 충돌 때문에 다른 endpoint의 차단 시도를 생략하지 않는다.
+회수 실패가 있어도 최신 승인과 동일한 다른 endpoint의 lease 갱신은 계속한다.
+회수 실패로 journal에 남은 과거 endpoint를 갱신하지 않으며, cache 읽기 실패나 journal
+저장 불확실 상태에서는 갱신을 진행하지 않는다. 전체 결과는 계속 `degraded`로 보고한다.
 
 기존 journal은 `lease_version`이 없으므로 0이다. 새 버전이 이를 읽으면 이전 endpoint를
 차단·회수하고 새 apply를 요구한다. 구형 binary로 downgrade하여 새 journal을 열 수 없다.
@@ -117,9 +120,10 @@ go test -race ./internal/relayapply ./internal/relaycache ./cmd/vpnctl
 VPNCTL_RACE=0 scripts/test-netns.sh -test.run='^TestNetns_M3(PathTopology|RelayDeploymentScale)$'
 ```
 
-실제 host reboot·suspend·wall clock step 조합, 8 endpoint 상한의 동시 감독/악성 부하,
-모든 withdraw/disabled/key rotation의 4경로 패킷 matrix와 최악 지연/SLO는 #124의
-후속 qualification이다. 이 변경만으로 #124/#114/M3 최종 gate를 닫지 않는다.
+실제 controller 기반 네 경로 권한 전이, 1/8 endpoint 규모, 동시 요청 및 과부하 검증은
+[릴레이 승인 검증 계약](../testing/relay-lease-matrix.md)에 별도로 정의한다.
+실제 host reboot·suspend·wall clock step 조합은 #128, 운영 환경의 최악 지연/SLO는
+#124의 후속 qualification이다. 이 변경만으로 #124/#114/M3 최종 gate를 닫지 않는다.
 
 ## 다른 배포 저장소에서 사용하기
 

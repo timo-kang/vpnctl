@@ -47,6 +47,8 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "lease-lock":
+		err = holdM3KernelLock()
 	case "lease-issuer":
 		err = serveLeaseIssuer()
 	case "lease-stream":

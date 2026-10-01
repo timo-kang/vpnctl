@@ -343,10 +343,21 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt time.Ti
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
 	r, err := e.enforce(ctx)
+	// A foreign resource may prevent removing one obsolete endpoint. Keep
+	// renewing independent, still-approved endpoints instead of starving the
+	// whole relay. Never renew an obsolete entry left behind by failed cleanup.
 	if err != nil {
-		return e.result("blocked", "approval_or_cleanup_failed"), err
+		var statusErr error
+		r, statusErr = e.cache.Status()
+		if statusErr != nil || e.uncertain {
+			return e.result("blocked", "approval_or_cleanup_failed"), errors.Join(err, statusErr)
+		}
 	}
 	for _, v := range e.journal.Entries {
+		want, approvalErr := desiredDeployment(r, v.Endpoint, v.ListenPort)
+		if approvalErr != nil || !sameDeployment(v, want) {
+			continue // enforce has already attempted to quiesce this entry.
+		}
 		ready, x := e.backend.Check(ctx, v, false)
 		if x != nil || !ready || v.Phase != "applied" {
 			err = errors.Join(err, ErrRecovery, x, e.backend.Down(ctx, v))
