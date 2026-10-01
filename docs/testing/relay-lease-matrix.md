@@ -50,9 +50,11 @@ replacement identity를 새로 등록하고 별도로 grant한다. 인증서 갱
 - 감독의 목표 cadence는 1초, 작업 context는 5초다. 규모 보고서는 1초 초과 횟수와 최대
   cycle, JSON bytes, 프로세스 RSS/HWM을 보존한다. 시험의 5.5초 상한은 scheduler/결과
   기록을 포함한 검출 여유이며 제품의 context 예산을 늘리지 않는다.
-- cache/namespace lock은 대기열 없이 충돌을 즉시 거절한다. burst에서는 한 종류의 요청이
-  모두 거절될 수 있다. 성공률을 숨기지 않으며, 이것을 무중단 가용성 또는 공정한 스케줄링
-  보장으로 해석하지 않는다. 운영 호출자는 bounded retry/backoff를 사용한다.
+- CLI의 cache/namespace lock은 충돌을 즉시 거절한다. burst에서는 한 종류의 요청이
+  모두 거절될 수 있다. supervisor는 서로 같은 주기에 계속 충돌하는 것을 피하도록
+  **namespace lock 경합만** 25ms마다 기존 5초 예산 안에서 재시도한다. cache 오류나
+  journal/domain 오류는 재시도하지 않는다. 성공률을 숨기지 않으며 이것을 무중단 가용성
+  또는 공정한 스케줄링 보장으로 해석하지 않는다. 운영 CLI 호출자는 bounded retry/backoff를 사용한다.
 - lease만 만료되고 WG 장치·peer가 유지되었다면 새 검증 응답으로 재허가할 수 있다.
   장치를 회수·재생성하면 handshake 상태가 사라진다. 명시적 양쪽 설치 시험의 복구를
   기존 TCP 세션의 보존이나 relay-only 재시작의 즉각적인 복구 시간으로 해석하지 않는다.

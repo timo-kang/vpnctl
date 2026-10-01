@@ -63,7 +63,7 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	}
 	// Even a rejected refresh must reach enforcement. An I/O failure that
 	// prevents opening the engine cannot refresh the independent kernel lease.
-	e, openErr := relayapply.OpenDeployment(c)
+	e, openErr := openSupervisedDeployment(ctx, func() (*relayapply.DeploymentEngine, error) { return relayapply.OpenDeployment(c) })
 	if openErr != nil {
 		out.Reason = "enforcement_unavailable"
 		return out, errors.Join(err, openErr)
@@ -90,6 +90,28 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	// A transport outage with still-valid approval is a recoverable refresh
 	// failure. Maintain continues the existing lease until approval expires.
 	return out, nil
+}
+
+// Two periodic supervisors can otherwise collide at the same phase forever.
+// Retry only namespace contention, within the caller's existing cycle budget.
+// The independent kernel deadline still closes traffic if that budget runs out.
+func openSupervisedDeployment(ctx context.Context, open func() (*relayapply.DeploymentEngine, error)) (*relayapply.DeploymentEngine, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		e, err := open()
+		if !errors.Is(err, relayapply.ErrKernelBusy) {
+			return e, err
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func superviseRelay(ctx context.Context, w io.Writer, cycle func(context.Context, bool) (relaySupervisionReport, error), refreshInterval time.Duration) error {
