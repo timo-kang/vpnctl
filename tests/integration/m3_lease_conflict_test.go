@@ -98,7 +98,7 @@ func TestNetns_M3LeaseConflicts(t *testing.T) {
 			// Recreating a WG interface discards handshake state. Exercise
 			// explicit installation of both sides, not seamless session recovery.
 			for _, recipient := range f.recipients {
-				recipient.watch.stop()
+				recipient.watch.terminate(t)
 				recipient.require("refresh", -1, 0)
 				for ep := 0; ep < 2; ep++ {
 					recipient.require("release", ep, 0)

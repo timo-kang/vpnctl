@@ -134,7 +134,7 @@ func TestNetns_M3SupervisionScale(t *testing.T) {
 				} else {
 					t.Fatal(err)
 				}
-				r.watch.stop()
+				r.watch.terminate(t)
 				logs, err := filepath.Glob(filepath.Join(results, r.relay+"-supervise-*.jsonl"))
 				if err != nil {
 					t.Fatal(err)
@@ -207,7 +207,7 @@ func TestNetns_M3SupervisionScale(t *testing.T) {
 				if size == 32 && endpoints == 8 {
 					report["interrupted_refresh"] = checkM3InterruptedApproval(t, r)
 				}
-				r.watch.stop()
+				r.watch.terminate(t)
 				for ep := 0; ep < endpoints; ep++ {
 					r.require("release", ep, 0)
 				}

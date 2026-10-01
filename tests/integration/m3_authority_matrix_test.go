@@ -322,7 +322,7 @@ func TestNetns_M3AuthorityMatrix(t *testing.T) {
 			// Observe a denied approval, then a transport outage. Restarted
 			// supervision must not revive the cached pre-denial permissions.
 			for _, r := range f.recipients {
-				r.watch.stop()
+				r.watch.terminate(t)
 				(relayUplink{relay: r.ns}).nft(t, `table inet authority_outage {
  chain output { type filter hook output priority -310; policy accept;
  ip daddr 192.0.2.11 tcp dport 9443 counter drop
@@ -337,7 +337,7 @@ func TestNetns_M3AuthorityMatrix(t *testing.T) {
 				}
 			}
 			for _, r := range f.recipients {
-				r.watch.stop()
+				r.watch.terminate(t)
 				outage := netOutput(t, r.ns, "nft", "list", "table", "inet", "authority_outage")
 				if strings.Contains(outage, "counter packets 0 bytes 0") {
 					t.Fatal("controller outage was not exercised")

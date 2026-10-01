@@ -59,7 +59,7 @@ func TestNetns_M3LeasePressure(t *testing.T) {
 			evidence := map[string]any{}
 			report["fault_evidence"] = evidence
 			for _, r := range f.recipients {
-				r.watch.stop()
+				r.watch.terminate(t)
 				switch fault {
 				case "cache-lock":
 					c, err := relaycache.OpenDeployment(r.cache, relaycache.DeploymentOptions{PrincipalID: "agent", RelayID: r.relay})
@@ -170,7 +170,15 @@ func TestNetns_M3LeasePressure(t *testing.T) {
 				if got := netOutput(t, r.ns, "wg", "show", "interfaces"); len(strings.Fields(got)) != 2 {
 					t.Fatal("pressure test must retain managed links", got)
 				}
-				r.watch.stop()
+				if fault == "stdout-backpressure" {
+					// The completed cycle is blocked on its filled output pipe;
+					// graceful shutdown cannot drain a sink deliberately not read.
+					r.watch.stop()
+				} else {
+					// Preserve the completed approval state while removing the
+					// pressure. Interrupted refresh is exercised separately.
+					r.watch.terminate(t)
+				}
 				(relayUplink{relay: r.ns}).nft(t, `table inet pressure_outage {
  chain output { type filter hook output priority -310; policy accept;
  ip daddr 192.0.2.11 tcp dport 9443 counter drop
