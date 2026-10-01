@@ -1,8 +1,9 @@
 # 인증된 relay 수신 주체와 승인 배포 조회 (#114)
 
 이 단계는 controller가 **누구에게 어떤 relay의 peer 정보를 제공하는지**를 구현한다.
-`vpnctl relay catalog`는 온라인 승인 조회이며 로컬 peer 설치·영속 cache·forwarding 설정은
-후속 단계다. 조회 성공은 WireGuard handshake나 서버 uplink 도달 성공을 뜻하지 않는다.
+`vpnctl relay catalog`는 온라인 승인 조회이며 `relay refresh|status`는
+[영속 승인 cache](relay-deployment-cache.md)를 관리한다. 로컬 peer 설치·forwarding 설정은
+후속 단계다. 조회나 cache 갱신 성공은 WireGuard handshake나 서버 uplink 도달 성공을 뜻하지 않는다.
 
 ## 신원과 관리자 승인
 
@@ -96,15 +97,15 @@ grant가 없는 것으로 취급한다. node catalog schema와 node cache 파일
 구버전 바이너리는 v3 registry/backup을 거절한다. downgrade를 위해 버전 숫자나 grant
 필드를 수동 삭제하지 않는다. 업그레이드 전에 기존 backup을 보존하되, 과거 backup 복원은
 이미 철회한 권한과 과거 generation을 복원할 수 있다는 기존 복원 경계를 지켜야 한다.
-향후 relay cache는 controller identity 고정·세대 역행·같은 세대의 내용 변경을 검증해야 한다.
+relay cache는 controller identity 고정·세대 역행·같은 세대의 내용 변경을 검증한다.
 
 ## 후속 peer 적용 단계의 필수 조건
 
-현재 CLI는 영속 cache가 없으며 offline 승인이나 설치된 peer의 만료 처리를 제공하지 않는다.
+현재 CLI는 영속 cache의 offline 유효성 판정을 제공하지만 설치된 peer의 만료 처리는 제공하지 않는다.
 #114를 닫기 전에 다음을 구현하고 실제 커널에서 검증한다.
 
-- 영속 cache의 세대/신원 고정, 승인 만료 관측 및 인증 거절과 일시적 네트워크 오류 구분.
-  이미 설치한 peer의 만료/철회 시 차단 시점과 갱신 주기를 운영 계약으로 먼저 확정한다.
+- cache 판정을 실제 적용 경로에 연결한다. 이미 설치한 peer의 만료/철회 시 차단 시점,
+  갱신 주기와 감독 프로세스 자체가 중단될 때의 처리를 운영 계약으로 먼저 확정한다.
 - 로컬 WG key 검증, exact source `/32`, 목적지 제한, 소유 자원 journal/복구,
   외부 peer·route·firewall 보존. AllowedIPs만으로 target 접근 권한을 제한할 수 없다.
 - 2 relay × 2 underlay에서 제품 명령으로 peer를 설치하고 실제 별도 서버 TCP echo와

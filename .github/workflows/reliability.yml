@@ -107,7 +107,7 @@ jobs:
       # Concurrent SQLite race packages on two CPUs can starve live producers
       # past their unchanged 45s convergence budget. Every test still runs.
       - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
-      - run: go test -race -tags=integration ./tests/integration -run '^TestSoakReadiness' -count=1
+      - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic)' -count=1
       - run: go vet ./...
       - run: go build ./cmd/vpnctl
       - run: go build ./cmd/vpnctl-lab-report

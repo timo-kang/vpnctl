@@ -6,10 +6,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 	"vpnctl/internal/api"
+	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relaycatalog"
 	"vpnctl/internal/store"
 )
@@ -158,6 +160,8 @@ func TestRelayCatalogVariableScale(t *testing.T) {
 			for i, r := range spec.Relays {
 				principal := fmt.Sprintf("robot-%02d", i%count)
 				c = grantRecipient(t, s, r.ID, principal)
+				cacheDir := filepath.Join(relayCacheDirectory(t), "deployment")
+				opts := relaycache.DeploymentOptions{PrincipalID: principal, RelayID: r.ID, Create: true}
 				for retry := 0; retry < 4; retry++ {
 					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 					v, err := clients[principal].RelayDeployment(ctx, principal, r.ID)
@@ -165,10 +169,30 @@ func TestRelayCatalogVariableScale(t *testing.T) {
 					if err != nil || len(v.Bindings) != count*2 || len(v.Spec.Paths) != count*2 || len(v.Spec.Relays) != 1 || v.Generation != c.Generation {
 						t.Fatal("scoped relay deployment population/budget", err)
 					}
+					cache, err := relaycache.OpenDeployment(cacheDir, opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+					report, err := cache.Refresh(ctx, clients[principal])
+					cancel()
+					cache.Close()
+					if err != nil || !report.ApprovalValid || report.Deployment == nil || len(report.Deployment.Bindings) != count*2 {
+						t.Fatal("durable relay cache population/reopen", err)
+					}
 				}
 				grantRecipient(t, s, r.ID, "")
 				_, err := clients[principal].RelayDeployment(context.Background(), principal, r.ID)
 				assertRelayHTTP(t, err, 403, "relay_recipient_denied")
+				cache, err := relaycache.OpenDeployment(cacheDir, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				report, err := cache.Refresh(context.Background(), clients[principal])
+				cache.Close()
+				if err == nil || report.ApprovalValid || report.Refresh.Result != "denied" {
+					t.Fatal("withdrawal left cache valid")
+				}
 			}
 			t.Logf("nodes=%d relays=4 candidates=%d unique durable bindings=%d; concurrent legacy registration/catalog read <=2s; 4 replays/node + PKI sync", count, count*8, len(c.Bindings))
 		})

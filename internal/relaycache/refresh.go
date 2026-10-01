@@ -48,6 +48,11 @@ func (s *Store) Refresh(ctx context.Context, client Client) (Report, error) {
 		return s.fail("rejected", "clock_regressed", true, errors.New("local clock moved backwards; correct the clock before refreshing"))
 	}
 	next := cloneState(s.state)
+	// A prior refresh may have observed denial before its final state could be
+	// persisted. A transport failure is not evidence that approval is restored.
+	if next.Refresh.Result == "in_progress" && next.BlockedReason == "" {
+		next.BlockedReason = "refresh_interrupted"
+	}
 	next.Refresh.Result = "in_progress"
 	next.Refresh.Reason = "refresh_interrupted"
 	next.Refresh.AttemptedAt = s.now().UTC()

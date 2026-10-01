@@ -67,6 +67,7 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 	active := map[string]wireguard.Peer{}
 	var stop context.CancelFunc
 	var done chan struct{}
+	var lastRound time.Time
 	drain := func() {
 		if stop != nil {
 			stop()
@@ -94,15 +95,19 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 		case <-ctx.Done():
 			return
 		case next := <-updates:
-			wasRunning := stop != nil
 			preserve := preservesDirectProbeRound(snapshot, next)
 			if !preserve {
 				drain()
 			}
 			snapshot = next
 			apply()
-			if wasRunning && !preserve {
-				timer.Reset(interval)
+			if !preserve {
+				// New candidates and withdrawals need fresh measurements even
+				// while idle. A full production cadence can stack with the remote
+				// round and WG collection. Keep the cancellation barrier and cap
+				// churn at one round start per second (the minimum normal cadence).
+				// Base the delay on the last start, so more updates cannot postpone it.
+				timer.Reset(max(0, time.Until(lastRound.Add(time.Second))))
 			}
 		case <-done:
 			stop()
@@ -124,6 +129,7 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 			}
 			cursor = (cursor + count) % len(snapshot.peers)
 			work, cancel := context.WithCancel(ctx)
+			lastRound = time.Now()
 			stop = cancel
 			done = make(chan struct{})
 			completed, current := done, snapshot
@@ -137,14 +143,23 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 // Withdrawals and any identity/address/input change retain the cancellation
 // barrier; outstanding measurements cannot survive a real configuration change.
 func preservesDirectProbeRound(before, after directSnapshot) bool {
+	if !sameDirectProbeInputs(before, after) {
+		return false
+	}
+	for i, old := range before.peers {
+		if old.P2PReady && !after.peers[i].P2PReady {
+			return false
+		}
+	}
+	return true
+}
+
+func sameDirectProbeInputs(before, after directSnapshot) bool {
 	if before.publicAddr != after.publicAddr || before.natType != after.natType || len(before.peers) != len(after.peers) {
 		return false
 	}
 	for i, old := range before.peers {
 		next := after.peers[i]
-		if old.P2PReady && !next.P2PReady {
-			return false
-		}
 		old.P2PReady, next.P2PReady = false, false
 		if old != next {
 			return false

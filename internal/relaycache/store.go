@@ -1,7 +1,7 @@
 // Copyright 2026 Jonghyeok Kang
 // SPDX-License-Identifier: Apache-2.0
 
-// Package relaycache prepares durable node path keys and approved catalog
+// Package relaycache persists node path keys and scoped node/relay approval
 // snapshots. It performs no OS networking and does not assert uplink health.
 package relaycache
 
@@ -62,9 +62,9 @@ type diskState struct {
 // Store owns the cache's nonblocking process lock until Close. Public results
 // contain only Report, never diskState or private keys.
 type Store struct {
+	*files
 	wait       func(context.Context, int) error
 	mu         sync.Mutex
-	root       *os.Root
 	lock       *os.File
 	state      diskState
 	nodeID     string
@@ -72,7 +72,6 @@ type Store struct {
 	uncertain  bool
 	closed     bool
 	writeState func([]byte) error
-	syncDir    func() error
 	now        func() time.Time
 }
 
@@ -84,7 +83,7 @@ func Open(dir string, opts Options) (*Store, error) {
 	if e != nil {
 		return nil, e
 	}
-	s := &Store{root: root, nodeID: opts.NodeID, reserved: map[string]bool{}, now: time.Now, wait: backoff}
+	s := &Store{files: &files{root: root}, nodeID: opts.NodeID, reserved: map[string]bool{}, now: time.Now, wait: backoff}
 	success := false
 	defer func() {
 		if !success {

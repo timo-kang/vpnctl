@@ -127,6 +127,10 @@ func checkRelayRecipientCLI(t *testing.T, run func(...string) string, controller
 	t.Helper()
 	relay := catalog.Spec.Relays[0].ID
 	var response api.AdminResponse
+	var cached relaycache.DeploymentReport
+	if e := json.Unmarshal([]byte(run("relay", "status", "--config", nodePath, "--relay-id", relay)), &cached); e != nil || cached.Validity != "missing" || cached.ApprovalValid {
+		t.Fatal("CLI missing deployment cache", e)
+	}
 	for _, op := range []string{"grant", "withdraw", "grant"} {
 		args := []string{"controller", "relay", op, "--config", controllerPath, "--controller-id", catalog.ControllerID, "--generation", strconv.FormatUint(catalog.Generation, 10), "--relay-id", relay}
 		if op == "grant" {
@@ -141,10 +145,22 @@ func checkRelayRecipientCLI(t *testing.T, run func(...string) string, controller
 			if e := json.Unmarshal([]byte(run("relay", "catalog", "--config", nodePath, "--relay-id", relay)), &view); e != nil || len(view.Bindings) != 1 || view.PrincipalID != "a" || view.Generation != catalog.Generation {
 				t.Fatal("CLI scoped relay deployment", e)
 			}
+			for _, command := range []string{"refresh", "status"} {
+				if e := json.Unmarshal([]byte(run("relay", command, "--config", nodePath, "--relay-id", relay)), &cached); e != nil || !cached.ApprovalValid || cached.Deployment == nil || len(cached.Deployment.Bindings) != 1 || cached.ObservedGeneration != catalog.Generation {
+					t.Fatal("CLI durable deployment", command, e)
+				}
+			}
 		} else {
 			out, e := cliProcess(t, "relay", "catalog", "--config", nodePath, "--relay-id", relay).Output()
 			if e == nil || len(out) != 0 {
 				t.Fatal("CLI withdrawal returned peer metadata")
+			}
+			out, e = cliProcess(t, "relay", "refresh", "--config", nodePath, "--relay-id", relay).Output()
+			if e == nil || json.Unmarshal(out, &cached) != nil || cached.ApprovalValid || cached.Refresh.Result != "denied" {
+				t.Fatal("CLI cached approval survived withdrawal")
+			}
+			if e := json.Unmarshal([]byte(run("relay", "status", "--config", nodePath, "--relay-id", relay)), &cached); e != nil || cached.ApprovalValid || cached.BlockedReason == "" {
+				t.Fatal("CLI status lost withdrawal", e)
 			}
 		}
 	}
@@ -159,6 +175,11 @@ func TestRelayRecipientCLIRejectsInputs(t *testing.T) {
 	for _, args := range [][]string{{}, {"apply"}, {"catalog"}, {"catalog", "--relay-id", "r", "--timeout", "0s"}, {"catalog", "--relay-id", "r", "--timeout", "21s"}, {"catalog", "--relay-id", "r", "extra"}, {"sync-credentials", "--relay-id", "r"}, {"sync-credentials", "--timeout", "0s"}} {
 		if e := runRelayRecipient(args); e == nil {
 			t.Fatal("invalid relay command accepted", args)
+		}
+	}
+	for _, args := range [][]string{{"refresh"}, {"refresh", "--relay-id", "../escape"}, {"refresh", "--relay-id", ".."}, {"refresh", "--relay-id", "/tmp/r"}, {"refresh", "--relay-id", "r", "--timeout", "21s"}, {"refresh", "--relay-id", "r", "--timeout", "0s"}, {"status", "--relay-id", "r", "--timeout", "1s"}, {"status", "--relay-id", "r", "extra"}} {
+		if e := runRelayRecipient(args); e == nil {
+			t.Fatal("invalid cache command accepted", args)
 		}
 	}
 }
