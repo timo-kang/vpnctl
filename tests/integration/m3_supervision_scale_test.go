@@ -180,7 +180,10 @@ func TestNetns_M3SupervisionScale(t *testing.T) {
 }`)
 					r.start()
 					time.Sleep(3 * time.Second)
-					r.watch.stop()
+					// Drain the failed refresh. SIGKILL here would deliberately
+					// leave an interrupted-refresh marker and require reinstallation,
+					// which is a different case from rearming retained peers.
+					r.watch.terminate(t)
 					out, err := r.call("inspect", -1, 0)
 					report["cached_only_expired_inspection"] = json.RawMessage(out)
 					if err == nil {
@@ -193,6 +196,9 @@ func TestNetns_M3SupervisionScale(t *testing.T) {
 				}
 				r.start()
 				r.ready() // only a new authenticated response can rearm.
+				if size == 32 && endpoints == 8 {
+					report["interrupted_refresh"] = checkM3InterruptedApproval(t, r)
+				}
 				r.watch.stop()
 				for ep := 0; ep < endpoints; ep++ {
 					r.require("release", ep, 0)

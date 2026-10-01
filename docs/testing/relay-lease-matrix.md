@@ -36,6 +36,12 @@ path/endpoint/key는 이미 bound된 정의를 덮어쓸 수 없다. 경로를 �
 삭제한 뒤 새 path ID로 승인한다. identity remove는 이름의 tombstone을 남기므로
 replacement identity를 새로 등록하고 별도로 grant한다. 인증서 갱신과 권한 부여는 별개다.
 
+단순 HTTP 단절 시험은 진행 중인 refresh를 정상 종료한 뒤 캐시만으로 재허가하지 않는지
+확인한다. 별도로 32-node/8-endpoint 시험은 `in_progress`가 저장된 시점에 프로세스를
+정지·강제 종료한다. 이 경우 승인 불확실 상태가 유지되어 peer가 회수되어야 하며,
+새 응답만으로 peer를 자동 설치해서는 안 된다. `recover`로 미완료 회수를 마친 뒤
+로컬 key를 검증하는 명시적 `apply`로 복구한다.
+
 ## 시간과 가용성 해석
 
 - 커널의 절대 approval expiry 및 최대 10초 lease와 **시험이 실패를 관측한 시각**은 다르다.

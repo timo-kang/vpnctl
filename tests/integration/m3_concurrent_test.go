@@ -5,14 +5,18 @@
 package integration
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relaycatalog"
 )
 
@@ -96,4 +100,72 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 	}
 	first.ready()
 	return map[string]any{"attempts": 48, "successful": success, "busy_rejections": busy, "malformed_rejected": rejected, "duration_ms": time.Since(started).Milliseconds(), "relay_caches": 2, "namespace_count": 1, "installed_endpoints_before": 16, "real_peers": 128}
+}
+
+func checkM3InterruptedApproval(t *testing.T, r *m3Recipient) map[string]any {
+	t.Helper()
+	r.watch.terminate(t)
+	(relayUplink{relay: r.ns}).nft(t, `table inet interrupted_outage {
+ chain output { type filter hook output priority -310; policy accept;
+ ip daddr 192.0.2.1 tcp dport 9443 counter drop
+ }
+}`)
+	r.start()
+	readProgress := func() bool {
+		b, err := os.ReadFile(filepath.Join(r.cache, "state.json"))
+		if err != nil {
+			return false
+		}
+		var state struct {
+			Refresh struct {
+				Result string `json:"result"`
+			} `json:"refresh"`
+		}
+		return json.Unmarshal(b, &state) == nil && state.Refresh.Result == "in_progress"
+	}
+	eventually(t, 5*time.Second, "persisted in-progress refresh", func() error {
+		if !readProgress() {
+			return fmt.Errorf("not in progress")
+		}
+		return nil
+	})
+	if err := r.watch.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	if !readProgress() {
+		t.Fatal("refresh completed before interruption; injection not proven")
+	}
+	r.watch.stop()
+	b, err := r.call("status", -1, 0)
+	var status relaycache.DeploymentReport
+	if err != nil || json.Unmarshal(b, &status) != nil || status.ApprovalValid || status.BlockedReason != "refresh_interrupted" {
+		t.Fatal("interrupted approval accepted", err, string(b))
+	}
+	r.start()
+	eventually(t, 10*time.Second, "interrupted approval kernel cleanup", func() error {
+		if netOutput(t, r.ns, "wg", "show", "interfaces") != "" {
+			return fmt.Errorf("peers remain")
+		}
+		return nil
+	})
+	r.watch.terminate(t)
+	netOutput(t, r.ns, "nft", "delete", "table", "inet", "interrupted_outage")
+	r.require("refresh", -1, 0)
+	// A stop can land after the last link deletion but before the guard/journal
+	// cleanup commit. Finish that recorded operation before reinstalling.
+	if got := netOutput(t, r.ns, "wg", "show", "interfaces"); got != "" {
+		t.Fatal("fresh response unexpectedly installed peers", got)
+	}
+	r.require("recover", -1, 0)
+	if out := r.require("inspect", -1, 0); out.State != "empty" || len(out.Endpoints) != 0 {
+		t.Fatal("refresh unexpectedly installed peers", out)
+	}
+	for ep := 0; ep < 8; ep++ {
+		r.require("apply", ep, 51820+ep)
+		if ep == 0 {
+			r.start()
+		}
+	}
+	r.ready()
+	return map[string]any{"persisted_in_progress_proven": true, "approval_after_interrupt": status, "all_endpoints_removed_during_outage": true, "fresh_response_alone_did_not_install": true, "explicit_recover_completed_cleanup": true, "explicit_key_checked_reinstall": true}
 }
