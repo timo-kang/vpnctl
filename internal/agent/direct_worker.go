@@ -67,6 +67,7 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 	active := map[string]wireguard.Peer{}
 	var stop context.CancelFunc
 	var done chan struct{}
+	var lastRound time.Time
 	drain := func() {
 		if stop != nil {
 			stop()
@@ -94,23 +95,19 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 		case <-ctx.Done():
 			return
 		case next := <-updates:
-			wasRunning := stop != nil
 			preserve := preservesDirectProbeRound(snapshot, next)
-			sameInputs := sameDirectProbeInputs(snapshot, next)
 			if !preserve {
 				drain()
 			}
 			snapshot = next
 			apply()
-			if wasRunning && !preserve {
-				delay := interval
-				if sameInputs {
-					// A readiness withdrawal cancels stale results, but the same
-					// destinations can be remeasured immediately. Delaying a full
-					// cadence can compound with the remote round and collection lag.
-					delay = 0
-				}
-				timer.Reset(delay)
+			if !preserve {
+				// New candidates and withdrawals need fresh measurements even
+				// while idle. A full production cadence can stack with the remote
+				// round and WG collection. Keep the cancellation barrier and cap
+				// churn at one round start per second (the minimum normal cadence).
+				// Base the delay on the last start, so more updates cannot postpone it.
+				timer.Reset(max(0, time.Until(lastRound.Add(time.Second))))
 			}
 		case <-done:
 			stop()
@@ -132,6 +129,7 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 			}
 			cursor = (cursor + count) % len(snapshot.peers)
 			work, cancel := context.WithCancel(ctx)
+			lastRound = time.Now()
 			stop = cancel
 			done = make(chan struct{})
 			completed, current := done, snapshot
