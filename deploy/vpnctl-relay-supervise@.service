@@ -1,0 +1,25 @@
+[Unit]
+Description=vpnctl relay approval supervision (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Provision /etc/vpnctl/relay-%i.yaml and the existing private cache first.
+# Use the same UID and network namespace for refresh/apply/release/supervise.
+User=root
+UMask=0077
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/vpnctl relay supervise --config /etc/vpnctl/relay-%i.yaml --relay-id %i --cache-dir /var/lib/vpnctl-relay/%i/cache --refresh-interval 5s
+Restart=always
+RestartSec=1
+TimeoutStopSec=5
+KillMode=control-group
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

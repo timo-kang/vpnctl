@@ -86,6 +86,6 @@ relay별 정확한 peer 수, 반복 갱신·재개방과 철회를 검사한다.
 
 [로컬 WG key 검증·peer 적용 journal·복구](relay-peer-apply.md)는 별도 명령으로 구현했다.
 `refresh|status`는 메타데이터 명령이며 설치된 peer를 직접 회수하지 않는다. 운영자는
-refresh의 성공 여부와 관계없이 `relay inspect`를 실행해야 한다. 적용 명령이 관측한
-만료·철회는 차단하지만 프로세스 부재/중단 시 정해진 시각의 차단은 보장하지 않는다.
-상시 감독·목적지별 forwarding 권한·서버 반환 방식의 배포 통합이 #114에 남아 있다.
+[상시 감독 `relay supervise`](relay-lease.md)를 실행해 승인 갱신과 차단을 유지해야 한다.
+새 apply는 감독 중단 시에도 만료되는 커널 lease를 설치한다. 목적지별 forwarding 권한과
+서버 반환 방식의 배포 통합, 장비 수준 실패 qualification은 #114/#124에 남아 있다.
