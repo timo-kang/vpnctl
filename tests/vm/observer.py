@@ -190,7 +190,16 @@ class VM:
         self.record('explicit-recovery', self.call('fixture/recover'))
         until = time.monotonic() + 12
         while time.monotonic() < until:
-            rows = self.probes(('new',))
+            try:
+                rows = self.probes(('new',))
+            except (ConnectionError, TimeoutError, urllib.error.URLError) as error:
+                # A missing control response cannot qualify recovery. Record
+                # the gap and request fresh nonces within the original bound.
+                # Protocol/fixture failures remain fatal; no mutating action
+                # is retried and blocked-path observations stay strict.
+                self.record('recovery-control-gap', {'error': str(error)})
+                time.sleep(0.2)
+                continue
             if all(p['ok'] for p in rows):
                 return rows
             time.sleep(0.2)

@@ -76,6 +76,10 @@ KVM power matrix는 위 명령으로 명시적으로 실행하며 일반 network
 각 경로에서 새 TCP와 처음 연 뒤 재연결하지 않는 TCP를 별도로 검사한다.
 요청별 nonce와 서버가 관측한 source 주소를 검증한다. 제어 HTTP timeout이나 누락된
 probe 응답을 dataplane 차단 성공으로 계산하지 않는다.
+명시적 재설치가 끝난 뒤의 복구 확인에서는 시험 제어 연결 reset/timeout을 별도
+`recovery-control-gap`으로 기록하고, 기존 12초 예산 안에서 새 nonce로 다시 관측한다.
+그 응답이 실제 네 경로 모두 통과해야 복구다. 설치 명령을 자동 재실행하지 않으며,
+차단 증거 수집이나 잘못된 protocol 응답에는 이 재시도를 적용하지 않는다.
 
 | 사례 | 주입 및 판정 |
 | --- | --- |

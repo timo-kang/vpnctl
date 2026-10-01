@@ -67,6 +67,20 @@ class ObserverTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'invalid TCP echo'):
             vm.probes(('new',))
 
+    def test_recovery_records_transport_gap_and_requires_new_evidence(self):
+        vm = self.vm(lambda *a, **kw: {'explicit_reinstall': True})
+        vm.probes = mock.Mock(side_effect=[ConnectionResetError('control reset'), [{'ok': True}]])
+        self.assertEqual(vm.recover(), [{'ok': True}])
+        self.assertEqual(vm.probes.call_count, 2)
+        self.assertEqual(vm.record.call_args_list[1].args[0], 'recovery-control-gap')
+
+    def test_recovery_does_not_retry_invalid_probe_results(self):
+        vm = self.vm(lambda *a, **kw: {'explicit_reinstall': True})
+        vm.probes = mock.Mock(side_effect=RuntimeError('missing authenticated probe result'))
+        with self.assertRaises(RuntimeError):
+            vm.recover()
+        self.assertEqual(vm.probes.call_count, 1)
+
     def test_qmp_events_do_not_count_as_command_completion(self):
         vm = self.vm(None)
         class Stream:
