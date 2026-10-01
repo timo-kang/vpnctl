@@ -76,25 +76,36 @@ func exerciseMonitorHistory(t *testing.T, bin string, namespaces, paths []string
 		return r, body
 	}
 	wgInitial, wgBody := readWG()
-	if len(wgInitial.Snapshots) != 1 || len(wgInitial.Snapshots[0].Views) != 2 || wgInitial.Snapshots[0].Unmapped != 1 {
-		t.Fatal("missing controller or registered WG peer", wgInitial)
-	}
-	registered, native := false, false
-	for _, v := range wgInitial.Snapshots[0].Views {
-		if v.RX == nil {
-			t.Fatal("missing real kernel counter", v)
+	verifyWG := func(r history.WireGuardHistory) {
+		t.Helper()
+		if len(r.Snapshots) == 0 || r.Truncated {
+			t.Fatal("missing or truncated WG history", r)
 		}
-		if v.Peer.NodeID == "node-1" && v.Peer.PublicKey == b.Node.WGPublicKey {
-			registered = true
-		}
-		if v.Peer.NodeID == "" && v.Peer.Epoch == "" && v.Peer.PublicKey == a.Node.ServerPublicKey && v.Peer.VPNIP == "" && v.HandshakeState == "observed" && *v.RX > 0 && v.TX != nil && *v.TX > 0 {
-			native = true
+		seen := map[string]bool{}
+		for _, snapshot := range r.Snapshots {
+			if seen[snapshot.ID] || snapshot.ViewsTruncated || len(snapshot.Views) != 2 || snapshot.Unmapped != 1 {
+				t.Fatal("duplicate snapshot or missing controller/registered WG peer", snapshot)
+			}
+			seen[snapshot.ID] = true
+			registered, native := false, false
+			for _, v := range snapshot.Views {
+				if v.RX == nil {
+					t.Fatal("missing real kernel counter", v)
+				}
+				if v.Peer.NodeID == "node-1" && v.Peer.PublicKey == b.Node.WGPublicKey {
+					registered = true
+				}
+				if v.Peer.NodeID == "" && v.Peer.Epoch == "" && v.Peer.PublicKey == a.Node.ServerPublicKey && v.Peer.VPNIP == "" && v.HandshakeState == "observed" && *v.RX > 0 && v.TX != nil && *v.TX > 0 {
+					native = true
+				}
+			}
+			if !registered || !native {
+				t.Fatal("native controller peer identity was dropped or fabricated", snapshot)
+			}
 		}
 	}
-	if !registered || !native {
-		t.Fatal("native controller peer identity was dropped or fabricated", wgInitial)
-	}
-	mustWrite(t, filepath.Join(results, "wireguard-history-initial.json"), wgBody)
+	mustWrite(t, filepath.Join(results, "wireguard-history-live.json"), wgBody)
+	verifyWG(wgInitial)
 	netOutput(t, namespaces[2], "nft", "add", "table", "inet", "monitor_reject")
 	netOutput(t, namespaces[2], "nft", "add", "chain", "inet", "monitor_reject", "input", "{ type filter hook input priority -10; policy accept; }")
 	netOutput(t, namespaces[2], "nft", "add", "rule", "inet", "monitor_reject", "input", "iifname", "wg0", "ip", "saddr", "10.77.0.2", "udp", "dport", "51900", "reject")
@@ -132,14 +143,26 @@ func exerciseMonitorHistory(t *testing.T, bin string, namespaces, paths []string
 		return nil
 	})
 	process.terminate(t)
+	// Sampling uses UTC minute slots. Starting just before a minute boundary
+	// can legitimately produce multiple snapshots while this fixture runs.
+	// Capture the persistence baseline only after the producer has stopped.
+	wgInitial, wgBody = readWG()
+	mustWrite(t, filepath.Join(results, "wireguard-history-initial.json"), wgBody)
+	verifyWG(wgInitial)
 	r, body := readHistory()
 	attempts, successes := count(r)
 	mustWrite(t, filepath.Join(results, "monitor-history-initial.json"), body)
 	return func(phase string) {
 		t.Helper()
 		wgNow, wgBody := readWG()
-		if len(wgNow.Snapshots) != len(wgInitial.Snapshots) || wgNow.Snapshots[0].ID != wgInitial.Snapshots[0].ID {
+		verifyWG(wgNow)
+		if len(wgNow.Snapshots) != len(wgInitial.Snapshots) {
 			t.Fatal("WG history changed after restart", phase)
+		}
+		for i, snapshot := range wgNow.Snapshots {
+			if snapshot.ID != wgInitial.Snapshots[i].ID {
+				t.Fatal("WG snapshot changed after restart", phase, i)
+			}
 		}
 		mustWrite(t, filepath.Join(results, "wireguard-history-"+phase+".json"), wgBody)
 		r, body := readHistory()
