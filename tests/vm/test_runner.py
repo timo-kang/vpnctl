@@ -39,13 +39,23 @@ class ObserverTests(unittest.TestCase):
     def vm(self, call):
         vm = object.__new__(observer.VM)
         vm.paths = ['p00']
-        vm.call = call
+        def dispatch(action, data=None, **kw):
+            if action == 'probes':
+                return [call('fixture/probe', job, **kw) for job in data['probes']]
+            return call(action, data, **kw)
+        vm.call = dispatch
         vm.record = mock.Mock()
         return vm
 
     def test_control_failure_is_not_dataplane_blocked(self):
         vm = self.vm(lambda *a, **kw: {'ok': False, 'error': 'worker unavailable'})
         with self.assertRaisesRegex(RuntimeError, 'missing authenticated probe result'):
+            vm.probes(('new',))
+
+    def test_partial_batch_is_not_dataplane_blocked(self):
+        vm = self.vm(None)
+        vm.call = lambda *a, **kw: []
+        with self.assertRaisesRegex(RuntimeError, 'missing authenticated probe results'):
             vm.probes(('new',))
 
     def test_stale_nonce_and_wrong_source_rejected(self):

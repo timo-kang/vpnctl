@@ -124,6 +124,9 @@ syscall error + reboot는 모든 디스크 펌웨어의 torn-write/power-loss �
 1초 관측 여유가 있다. 마지막 응답 시각은 커널 hook의 정확한 통과 시각이 아니며
 이 수치를 11초짜리 제품 lease 또는 현장 최악 지연 보장으로 해석하지 않는다.
 새 TCP만 복구 판정에 사용하며 기존 TCP 세션 이동/보존을 보장하지 않는다.
+QEMU host forwarding의 작은 접속 대기열을 넘지 않도록 제어 요청은 한 batch로 보내고
+게스트 안에서 최대 8개 probe를 병렬 실행한다. 각 probe의 외부 시간 구간은 전체
+batch의 시작·종료로 보수적으로 감싸며, 누락된 결과나 nonce 불일치가 있으면 실패한다.
 
 - `run-*.txt`: suite commit/dirty, CLI·구형 CLI·시험 binary digest, runner image ID,
   host boot ID, 자원 제한, kernel/root disk digest.

@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -171,6 +172,15 @@ class Handler(BaseHTTPRequestHandler):
             later = None
             if action == 'health':
                 result = health()
+            elif action == 'probes':
+                jobs = req.get('probes')
+                if not isinstance(jobs, list) or not 1 <= len(jobs) <= 8:
+                    raise ValueError('one to eight probe requests required')
+                def probe(job):
+                    with urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:18081/probe', data=json.dumps(job).encode()), timeout=2) as r:
+                        return json.load(r)
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    result = list(pool.map(probe, jobs))
             elif action == 'start':
                 with LOCK:
                     if WORKER is not None and WORKER.poll() is None:

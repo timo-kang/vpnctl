@@ -12,7 +12,6 @@ import threading
 import urllib.error
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 class VM:
@@ -153,14 +152,20 @@ class VM:
             raise RuntimeError('baseline existing TCP unavailable')
 
     def probes(self, kinds=('new', 'existing')):
-        def probe(item):
-            path, kind = item
-            nonce = uuid.uuid4().hex[:16]
-            started = time.monotonic_ns()
-            result = self.call('fixture/probe', {'path': path, 'kind': kind, 'nonce': nonce}, timeout=2)
-            ended = time.monotonic_ns()
-            # Control-plane unavailability is not proof that the dataplane closed.
-            if result.get('nonce') != nonce or result.get('kind') != kind or type(result.get('ok')) is not bool:
+        # libslirp's host-forward listener has backlog 1. One control request
+        # carries the concurrent guest probes, avoiding a hostfwd SYN burst.
+        # The outside bracket conservatively covers every probe in the batch.
+        jobs = [{'path': path, 'kind': kind, 'nonce': uuid.uuid4().hex[:16]}
+                for path in self.paths for kind in kinds]
+        started = time.monotonic_ns()
+        results = self.call('probes', {'probes': jobs}, timeout=2)
+        ended = time.monotonic_ns()
+        if not isinstance(results, list) or len(results) != len(jobs):
+            raise RuntimeError('missing authenticated probe results')
+        for job, result in zip(jobs, results):
+            path, kind, nonce = job['path'], job['kind'], job['nonce']
+            # Control-plane unavailability is not proof that dataplane closed.
+            if not isinstance(result, dict) or result.get('nonce') != nonce or result.get('kind') != kind or type(result.get('ok')) is not bool:
                 raise RuntimeError('missing authenticated probe result: ' + str(result))
             if result.get('protocol_error'):
                 raise RuntimeError('invalid TCP echo, not proof of a blocked path: ' + str(result))
@@ -168,9 +173,7 @@ class VM:
                 raise RuntimeError('probe bypassed its relay: ' + str(result))
             result.update(path=path, started_monotonic_ns=started, finished_monotonic_ns=ended)
             self.record('probe', result)
-            return result
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            return list(pool.map(probe, [(p, k) for p in self.paths for k in kinds]))
+        return results
 
     def observe(self, seconds):
         rows = []
