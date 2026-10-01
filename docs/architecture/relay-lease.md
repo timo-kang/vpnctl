@@ -2,7 +2,9 @@
 
 `relay supervise`는 이미 적용한 relay peer를 감독한다. 새 `relay apply`는 peer를
 사용 가능하게 만들기 전에 endpoint 전용 nftables 차단 규칙을 설치한다. 감독이 없어도
-마지막 통과 허가는 최대 10초 뒤 만료된다. 명령을 한 번 실행한 뒤 무기한 사용하는
+정상적으로 진행하는 게스트 시계에서 마지막 커널 통과 허가는 최대 10초 뒤 만료된다.
+VM 전체 pause처럼 모든 게스트 시계가 멈추는 조건은 외부 시간 상한이 아니며,
+[VM 검증·사전 차단 계약](../testing/relay-vm-boundaries.md)을 따른다. 명령을 한 번 실행한 뒤 무기한 사용하는
 방식에서 상시 감독을 요구하는 방식으로 바뀐다.
 
 ```sh
@@ -18,7 +20,10 @@ vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
 요청마다 디스크의 mTLS credentials를 다시 읽으며, 인증서 갱신만으로 승인 TTL을
 연장하지 않는다. 최초 cache가 없으면 `refresh`로 초기화해야 한다.
 만료 lease의 재허가는 인증 응답 시각부터 최대 5초까지만 열며, 이후 정상 cycle이
-갱신한다. 응답을 받은 뒤 오래 정지한 프로세스가 오래된 성공 표시만으로 재개할 수 없다.
+갱신한다. 정상적으로 진행하는 wall clock에서는 응답 뒤 오래 정지한 프로세스의
+과거 성공 표시만으로 재개할 수 없다. 시계 역행과 지연 nft commit이 함께 발생하면
+만료 gate가 다시 열릴 수 있는 [#136](https://github.com/timo-kang/vpnctl/issues/136)이
+재현되어 이 조합의 최종 판정은 보류한다.
 재허가 창이 소진되거나 nft 재확인 중 잔여 시간이 0초/만료로 표시되면 정상 규칙의
 차단 상태와 link를 유지하고 다음 새 응답을 기다린다. 규칙 누락·소유자 변조·기한
 불일치는 정상 만료로 취급하지 않고 기존 차단/복구 오류를 유지한다.
@@ -64,7 +69,10 @@ nft batch로 lease를 허가한다. 두 조건 모두 통과해야 한다.
 역행 때문에 무기한 열리는 것을 막는다. 시계 역행과 갱신 명령이 겹치면 상대 timeout은
 커널 commit부터 10초다. 개별 명령 context는 3초지만 프로세스 전체가 멈춘 순간의
 스케줄링까지 실시간 상한으로 보장하지 않는다. cache의 영속 관측 시각과 30초 역행
-거절 정책도 유지한다. 실제 장비의 시계 변경·suspend 조합은 별도 VM/장비 gate가 필요하다.
+거절 정책도 유지한다. -31초 역행과 12초 지연 commit의 조합에서는 감독을 재개하기
+전에 새·기존 TCP가 통과하는 결함이 실제 VM에서 재현됐다(#136). VM 전체 pause에서
+게스트의 모든 clock이 정지하는 한계(#135)와 구분한다. 두 조건 모두 사전 외부 차단
+또는 관리 endpoint의 완전한 해제 없이 외부 시간 한도를 보장하지 않는다.
 
 nft 규칙의 property·순서·owner·set timeout을 모두 판독해 비교하고 소유 table만
 갱신/제거한다. host ruleset이나 다른 interface를 flush하지 않는다. 기존 TCP도 filter
@@ -128,7 +136,8 @@ VPNCTL_RACE=0 scripts/test-netns.sh -test.run='^TestNetns_M3(PathTopology|RelayD
 
 실제 controller 기반 네 경로 권한 전이, 1/8 endpoint 규모, 동시 요청 및 과부하 검증은
 [릴레이 승인 검증 계약](../testing/relay-lease-matrix.md)에 별도로 정의한다.
-실제 host reboot·suspend·wall clock step 조합은 #128, 운영 환경의 최악 지연/SLO는
+격리 VM reboot·suspend·wall clock step 조합과 재현 방법은
+[VM 경계 검증](../testing/relay-vm-boundaries.md), 운영 환경의 최악 지연/SLO는
 #124의 후속 qualification이다. 이 변경만으로 #124/#114/M3 최종 gate를 닫지 않는다.
 
 ## 다른 배포 저장소에서 사용하기

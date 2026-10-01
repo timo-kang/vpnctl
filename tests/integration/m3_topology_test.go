@@ -47,7 +47,13 @@ func serveM3Echo() error {
 		go func() {
 			defer c.Close()
 			for {
-				c.SetDeadline(time.Now().Add(2 * time.Second))
+				idle := 2 * time.Second
+				if os.Getenv("VPNCTL_VM_WORKER") == "1" {
+					// A VM pause must test the kernel gate, not the fixture's
+					// application idle timeout after the VM resumes.
+					idle = 30 * time.Minute
+				}
+				c.SetDeadline(time.Now().Add(idle))
 				b := make([]byte, 16)
 				if _, e := io.ReadFull(c, b); e != nil {
 					return

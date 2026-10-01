@@ -21,6 +21,9 @@ CI는 동일한 전용 job에서 실행하고 성공/실패 모두 `m3-lease-mat
 기존 network job은 이 네 시험만 제외하며 기존 topology/PKI 시험은 유지한다.
 M2 24시간 원본, 이전 실행의 컨테이너·namespace·artifact를 재사용하거나 정지하지 않는다.
 실제 host 시계 변경·절전·재부팅은 수행하지 않는다.
+게스트 전체 clock/power/영속 상태 경계는 별도
+[격리 VM runner](relay-vm-boundaries.md)로 실행한다. 일반 컨테이너 검증의 성공으로
+그 플랫폼 조건을 합격 처리하지 않는다.
 
 ## 판정 범위
 
