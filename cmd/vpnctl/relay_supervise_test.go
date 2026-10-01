@@ -77,6 +77,28 @@ func TestRelaySupervisorRetriesOnlyNamespaceContentionWithinBudget(t *testing.T)
 	}
 }
 
+func TestRelaySupervisorYieldsAfterOverrunningCadence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var completed time.Time
+	var idle time.Duration
+	calls := 0
+	err := superviseRelay(ctx, io.Discard, func(context.Context, bool) (relaySupervisionReport, error) {
+		calls++
+		if calls == 1 {
+			time.Sleep(1100 * time.Millisecond)
+			completed = time.Now()
+		} else {
+			idle = time.Since(completed)
+			cancel()
+		}
+		return relaySupervisionReport{SchemaVersion: 1}, nil
+	}, time.Second)
+	if err != nil || calls != 2 || idle < 50*time.Millisecond {
+		t.Fatal("overrunning supervisor monopolizes namespace", calls, idle, err)
+	}
+}
+
 type failedLeaseWriter struct{}
 
 func (failedLeaseWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }

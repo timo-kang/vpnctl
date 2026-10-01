@@ -40,6 +40,9 @@ vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
 해제하지는 못한다. 이 경우에도 lease는 갱신되지 않는다. cache lock은 cycle마다
 해제하고, namespace 적용 lock은 HTTP 호출이 끝난 뒤에만 얻는다. 동시 CLI의 busy
 오류는 무한 대기하지 않으며, 운영 작업은 짧은 backoff로 재시도한다.
+namespace 잠금 경합은 기존 cycle 예산 안에서 25ms마다 재시도한다. 작업이 1초보다
+길어져도 잠금을 해제한 뒤 다음 주기까지 최소 50ms를 두어 다른 supervisor에 획득
+기회를 준다. 공정한 FIFO 대기열이나 과부하 상태의 무중단을 보장하지는 않는다.
 
 정상 wall clock에서 통과 기한은 `min(승인 expires_at, 갱신 계산 시각+10초)`를 초 단위로
 내림한 값이다. 따라서 승인 시각보다 최대 1초 일찍 닫힐 수 있다. 새 패킷의 통과 여부를

@@ -33,6 +33,8 @@ type relaySupervisionReport struct {
 	Kernel            *relayapply.DeploymentResult `json:"kernel,omitempty"`
 }
 
+const relayKernelRetryInterval = 25 * time.Millisecond
+
 func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, client relaycache.DeploymentClient, refresh bool) (relaySupervisionReport, error) {
 	out := relaySupervisionReport{SchemaVersion: 1, ObservedAt: time.Now().UTC(), State: "degraded", Refresh: "not_due", ApprovalState: "unknown"}
 	c, err := relaycache.OpenDeployment(dir, relaycache.DeploymentOptions{PrincipalID: principal, RelayID: relay})
@@ -104,7 +106,7 @@ func openSupervisedDeployment(ctx context.Context, open func() (*relayapply.Depl
 		if !errors.Is(err, relayapply.ErrKernelBusy) {
 			return e, err
 		}
-		timer := time.NewTimer(25 * time.Millisecond)
+		timer := time.NewTimer(relayKernelRetryInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -134,8 +136,11 @@ func superviseRelay(ctx context.Context, w io.Writer, cycle func(context.Context
 			return err
 		}
 		wait := time.Until(started.Add(time.Second))
-		if wait < 0 {
-			wait = 0
+		// An overrun must still yield the namespace. Otherwise a supervisor
+		// taking just over one second can reacquire on every cycle before a
+		// competing process's bounded lock retry wakes up.
+		if wait < 2*relayKernelRetryInterval {
+			wait = 2 * relayKernelRetryInterval
 		}
 		timer := time.NewTimer(wait)
 		select {

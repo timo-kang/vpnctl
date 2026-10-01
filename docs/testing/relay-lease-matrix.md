@@ -40,6 +40,9 @@ replacement identity를 새로 등록하고 별도로 grant한다. 인증서 갱
 사용한다. burst 48개 요청 동안은 두 supervisor를 함께 실행하고 실제 성공/거절 수를
 기록한다. CLI가 반드시 잠금을 획득한다고 가정하지 않으며, 여러 프로세스의 감독 로그를
 합산해 maintenance restart가 최악 cycle 관측을 지우지 않게 한다.
+빠른 호스트에서도 두 번째 supervisor의 nft 호출에 10ms 지연을 주입해 실제 cycle이
+1초를 넘는 조건을 만든다. 호출 횟수·1초 초과 cycle·최대 작업 시간을 기록하고,
+두 supervisor가 함께 실행되는 동안 각각 새 승인으로 다시 준비 상태에 도달해야 한다.
 
 단순 HTTP 단절 시험은 진행 중인 refresh를 정상 종료한 뒤 캐시만으로 재허가하지 않는지
 확인한다. 별도로 32-node/8-endpoint 시험은 `in_progress`가 저장된 시점에 프로세스를
@@ -58,7 +61,8 @@ replacement identity를 새로 등록하고 별도로 grant한다. 인증서 갱
 - CLI의 cache/namespace lock은 충돌을 즉시 거절한다. burst에서는 한 종류의 요청이
   모두 거절될 수 있다. supervisor는 서로 같은 주기에 계속 충돌하는 것을 피하도록
   **namespace lock 경합만** 25ms마다 기존 5초 예산 안에서 재시도한다. cache 오류나
-  journal/domain 오류는 재시도하지 않는다. 성공률을 숨기지 않으며 이것을 무중단 가용성
+  journal/domain 오류는 재시도하지 않는다. 작업이 목표 cadence를 넘겨도 다음 주기 전
+  최소 50ms를 양보하여 반복 재선점을 막는다. 성공률을 숨기지 않으며 이것을 무중단 가용성
   또는 공정한 스케줄링 보장으로 해석하지 않는다. 운영 CLI 호출자는 bounded retry/backoff를 사용한다.
 - lease만 만료되고 WG 장치·peer가 유지되었다면 새 검증 응답으로 재허가할 수 있다.
   장치를 회수·재생성하면 handshake 상태가 사라진다. 명시적 양쪽 설치 시험의 복구를

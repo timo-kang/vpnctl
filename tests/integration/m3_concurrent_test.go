@@ -39,12 +39,23 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 	second.require("refresh", -1, 0)
 	for ep := 0; ep < 8; ep++ {
 		second.require("apply", ep, 52820+ep)
-		if ep == 0 {
-			second.start()
-		}
 	}
+	// Reproduce CI's >1s cycle even on a fast host. A zero-idle supervisor
+	// used to reacquire the namespace repeatedly, starving its competitor.
+	slow := filepath.Join(ctrl.private, "slow-supervisor")
+	if err := os.Mkdir(slow, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(slow, "invocations")
+	script := "#!/bin/sh\nprintf . >> '" + marker + "'\nsleep 0.01\nexec /usr/sbin/nft \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(slow, "nft"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	second.start("PATH=" + slow + ":" + os.Getenv("PATH"))
 	second.ready()
 	first.start()
+	first.ready()
+	second.ready()
 	first.ready()
 	type result struct {
 		action string
@@ -100,6 +111,28 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 	// a promise of fair queuing. Preserve the observed zero-success counts.
 	first.watch.terminate(t)
 	second.watch.terminate(t)
+	log, err := os.ReadFile(second.watch.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var overrunCycles int
+	var maxCycle int64
+	for _, line := range strings.Split(strings.TrimSpace(string(log)), "\n") {
+		var report m3SupervisorReport
+		if err := json.Unmarshal([]byte(line), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.CycleMS > 1000 {
+			overrunCycles++
+		}
+		if report.CycleMS > maxCycle {
+			maxCycle = report.CycleMS
+		}
+	}
+	invocations, err := os.ReadFile(marker)
+	if err != nil || len(invocations) == 0 || overrunCycles == 0 || maxCycle > 5500 {
+		t.Fatal("overrunning supervisor injection not exercised within budget", overrunCycles, maxCycle, err)
+	}
 	if _, err := second.call("apply", 99, 52999); err == nil {
 		t.Fatal("invalid endpoint accepted without contention")
 	}
@@ -114,7 +147,7 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 	}
 	first.start()
 	first.ready()
-	return map[string]any{"attempts": 48, "successful": success, "busy_rejections": busy, "malformed_rejected": rejected, "invalid_endpoint_rejected_without_contention": true, "maintenance_pauses_for_setup_and_recovery": true, "duration_ms": time.Since(started).Milliseconds(), "relay_caches": 2, "namespace_count": 1, "installed_endpoints_before": 16, "real_peers": 128}
+	return map[string]any{"attempts": 48, "successful": success, "busy_rejections": busy, "malformed_rejected": rejected, "invalid_endpoint_rejected_without_contention": true, "maintenance_pauses_for_setup_and_recovery": true, "delayed_supervisor": map[string]any{"nft_delay_ms": 10, "invocations": len(invocations), "over_1s_cycles": overrunCycles, "max_cycle_ms": maxCycle}, "duration_ms": time.Since(started).Milliseconds(), "relay_caches": 2, "namespace_count": 1, "installed_endpoints_before": 16, "real_peers": 128}
 }
 
 func checkM3InterruptedApproval(t *testing.T, r *m3Recipient) map[string]any {
