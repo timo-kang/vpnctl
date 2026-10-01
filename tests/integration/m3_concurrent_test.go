@@ -32,6 +32,9 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 	spec.Relays = append(spec.Relays, secondRelay)
 	ctrl.apply(spec, 3600)
 	ctrl.grant("second", "node-0")
+	// Build the second deployment in a maintenance window. Fair acquisition
+	// by a CLI is not promised while two long supervisor cycles hold caches.
+	first.watch.terminate(t)
 	second := &m3Recipient{t: t, ns: first.ns, config: first.config, relay: "second", cache: filepath.Join(ctrl.private, "second-cache"), key: keyfile, results: ctrl.results, generation: 1}
 	second.require("refresh", -1, 0)
 	for ep := 0; ep < 8; ep++ {
@@ -41,6 +44,7 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 		}
 	}
 	second.ready()
+	first.start()
 	first.ready()
 	type result struct {
 		action string
@@ -64,7 +68,7 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 			}
 		}(action)
 	}
-	success, busy, rejected := map[string]int{}, map[string]int{}, 0
+	success, busy, rejected := map[string]int{"refresh": 0, "apply": 0, "release": 0}, map[string]int{"refresh": 0, "apply": 0, "release": 0}, 0
 	for i := 0; i < 48; i++ {
 		r := <-out
 		if r.action == "malformed" {
@@ -91,15 +95,26 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 	if busy["refresh"]+busy["apply"]+busy["release"] == 0 {
 		t.Fatal("no lock contention observed")
 	}
+	// Both supervisors ran throughout the concurrent burst. Stop them for
+	// explicit operator recovery; never mistake fail-fast CLI starvation for
+	// a promise of fair queuing. Preserve the observed zero-success counts.
+	first.watch.terminate(t)
+	second.watch.terminate(t)
+	if _, err := second.call("apply", 99, 52999); err == nil {
+		t.Fatal("invalid endpoint accepted without contention")
+	}
 	second.require("apply", 7, 52827)
-	second.ready()
-	first.ready()
-	second.watch.stop()
+	second.start()
+	if out := second.ready(); len(out.Kernel.Endpoints) != 8 {
+		t.Fatal("second deployment not restored", out)
+	}
+	second.watch.terminate(t)
 	for ep := 0; ep < 8; ep++ {
 		second.require("release", ep, 0)
 	}
+	first.start()
 	first.ready()
-	return map[string]any{"attempts": 48, "successful": success, "busy_rejections": busy, "malformed_rejected": rejected, "duration_ms": time.Since(started).Milliseconds(), "relay_caches": 2, "namespace_count": 1, "installed_endpoints_before": 16, "real_peers": 128}
+	return map[string]any{"attempts": 48, "successful": success, "busy_rejections": busy, "malformed_rejected": rejected, "invalid_endpoint_rejected_without_contention": true, "maintenance_pauses_for_setup_and_recovery": true, "duration_ms": time.Since(started).Milliseconds(), "relay_caches": 2, "namespace_count": 1, "installed_endpoints_before": 16, "real_peers": 128}
 }
 
 func checkM3InterruptedApproval(t *testing.T, r *m3Recipient) map[string]any {

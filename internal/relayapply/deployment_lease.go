@@ -262,6 +262,9 @@ func leaseDeadline(active bool, expiry, authenticatedAt, now time.Time) (time.Ti
 	}
 	deadline = deadline.Truncate(time.Second)
 	if !now.Before(deadline) {
+		if !active {
+			return time.Time{}, ErrLeaseExpired
+		}
 		return time.Time{}, errors.New("relay approval has no remaining lease time")
 	}
 	return deadline, nil

@@ -245,6 +245,35 @@ func TestLeaseDeadlinesRemainBoundedAcrossClockAndResponseAge(t *testing.T) {
 	}
 }
 
+func TestLeaseRoundedRearmWindowIsRetryableExpiry(t *testing.T) {
+	now := time.Date(2026, 10, 1, 0, 0, 10, 200_000_000, time.UTC)
+	// The response is still younger than 5s, but the remaining 100ms cannot
+	// form a whole-second nft deadline. Preserve the closed peer for a newer
+	// response instead of classifying this as a kernel failure and taking it down.
+	_, err := leaseDeadline(false, now.Add(time.Hour), now.Add(-4900*time.Millisecond), now)
+	if !errors.Is(err, ErrLeaseExpired) {
+		t.Fatal("spent rearm window would force link teardown", err)
+	}
+	e, k, _, _, options, _ := deploymentFixture(t, 1)
+	if _, err := e.Apply(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second).Add(200 * time.Millisecond)
+	k.now = func() time.Time { return clock }
+	peer := k.objects[options.EndpointID]
+	peer.lease = DeploymentLease{}
+	k.objects[options.EndpointID] = peer
+	if out, err := e.Maintain(context.Background(), clock.Add(-4900*time.Millisecond)); !errors.Is(err, ErrLeaseExpired) || out.KernelReady {
+		t.Fatal("spent window accepted", out, err)
+	}
+	if peer := k.objects[options.EndpointID]; !peer.up || peer.lease.Active {
+		t.Fatal("closed peer was torn down or rearmed")
+	}
+	if out, err := e.Maintain(context.Background(), clock); err != nil || !out.KernelReady {
+		t.Fatal("new approval cannot rearm retained peer", out, err)
+	}
+}
+
 type leaseDeadlineBackend struct {
 	deploymentBackend
 	downDeadline time.Time

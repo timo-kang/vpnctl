@@ -36,6 +36,11 @@ path/endpoint/key는 이미 bound된 정의를 덮어쓸 수 없다. 경로를 �
 삭제한 뒤 새 path ID로 승인한다. identity remove는 이름의 tombstone을 남기므로
 replacement identity를 새로 등록하고 별도로 grant한다. 인증서 갱신과 권한 부여는 별개다.
 
+두 cache의 동시 부하 시험은 setup과 사후 CLI 복구에 명시적 supervisor 유지보수 정지를
+사용한다. burst 48개 요청 동안은 두 supervisor를 함께 실행하고 실제 성공/거절 수를
+기록한다. CLI가 반드시 잠금을 획득한다고 가정하지 않으며, 여러 프로세스의 감독 로그를
+합산해 maintenance restart가 최악 cycle 관측을 지우지 않게 한다.
+
 단순 HTTP 단절 시험은 진행 중인 refresh를 정상 종료한 뒤 캐시만으로 재허가하지 않는지
 확인한다. 별도로 32-node/8-endpoint 시험은 `in_progress`가 저장된 시점에 프로세스를
 정지·강제 종료한다. 이 경우 승인 불확실 상태가 유지되어 peer가 회수되어야 하며,

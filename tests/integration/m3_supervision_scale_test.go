@@ -135,9 +135,17 @@ func TestNetns_M3SupervisionScale(t *testing.T) {
 					t.Fatal(err)
 				}
 				r.watch.stop()
-				b, err := os.ReadFile(r.watch.log)
+				logs, err := filepath.Glob(filepath.Join(results, r.relay+"-supervise-*.jsonl"))
 				if err != nil {
 					t.Fatal(err)
+				}
+				var b []byte
+				for _, log := range logs {
+					part, err := os.ReadFile(log)
+					if err != nil {
+						t.Fatal(err)
+					}
+					b = append(b, part...)
 				}
 				var maxCycle int64
 				maxBytes, over1s, over5s, cycles := 0, 0, 0, 0

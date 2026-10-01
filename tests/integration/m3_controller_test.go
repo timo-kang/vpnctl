@@ -7,8 +7,10 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -157,6 +159,10 @@ func (r *m3Recipient) require(action string, ep, port int) relayapply.Deployment
 	eventually(r.t, 15*time.Second, "relay "+action, func() error {
 		b, err := r.call(action, ep, port)
 		if err != nil {
+			var exited *exec.ExitError
+			if errors.As(err, &exited) {
+				return fmt.Errorf("%s: %w %s %s", action, err, b, exited.Stderr)
+			}
 			return fmt.Errorf("%s: %w %s", action, err, b)
 		}
 		if action == "refresh" {
