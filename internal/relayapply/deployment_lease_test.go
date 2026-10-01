@@ -159,3 +159,43 @@ func TestLeaseDeadlinesRemainBoundedAcrossClockAndResponseAge(t *testing.T) {
 		})
 	}
 }
+
+type leaseDeadlineBackend struct {
+	deploymentBackend
+	downDeadline time.Time
+}
+
+func (b *leaseDeadlineBackend) Down(ctx context.Context, e DeploymentEntry) error {
+	b.downDeadline, _ = ctx.Deadline()
+	return b.deploymentBackend.Down(ctx, e)
+}
+
+func TestLeaseSupervisorFinalCleanupDoesNotExtendCycleBudget(t *testing.T) {
+	e, k, c, _, o, _ := deploymentFixture(t, 1)
+	if _, err := e.Apply(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	cache := &expiringDeploymentCache{deploymentCache: c}
+	e.cache = cache
+	backend := &leaseDeadlineBackend{deploymentBackend: k}
+	e.backend = backend
+	checks := 0
+	k.checkHook = func() {
+		checks++
+		if checks == 2 {
+			cache.expired = true
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	want, _ := ctx.Deadline()
+	if r, err := e.Maintain(ctx, time.Now().UTC()); err == nil || r.KernelReady {
+		t.Fatal(r, err)
+	}
+	if backend.downDeadline.IsZero() || backend.downDeadline.After(want) {
+		t.Fatal("supervisor inherited CLI recovery extension", backend.downDeadline, want)
+	}
+	if len(k.objects) != 0 {
+		t.Fatal("expired peers survived final recheck")
+	}
+}

@@ -280,6 +280,10 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 	return e.inspect(ctx)
 }
 func (e *DeploymentEngine) inspect(ctx context.Context) (DeploymentResult, error) {
+	return e.inspectWithCleanup(ctx, true)
+}
+
+func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCleanup bool) (DeploymentResult, error) {
 	r, err := e.enforce(ctx)
 	if err != nil {
 		return e.result("blocked", "approval_or_cleanup_failed"), err
@@ -307,9 +311,13 @@ func (e *DeploymentEngine) inspect(ctx context.Context) (DeploymentResult, error
 		}
 	}
 	// Kernel inventory may take several seconds. Recheck approval after it,
-	// with a separate cleanup budget if the caller's deadline has elapsed.
+	// with a separate cleanup budget for CLI calls only. Supervision retains
+	// its caller's deadline because the kernel independently expires traffic.
 	before := deploymentHash(e.journal)
-	cleanup, stop := context.WithTimeout(context.Background(), MaxDuration)
+	cleanup, stop := ctx, func() {}
+	if independentCleanup {
+		cleanup, stop = context.WithTimeout(context.Background(), MaxDuration)
+	}
 	defer stop()
 	latest, checkErr := e.enforce(cleanup)
 	if checkErr != nil || !latest.ApprovalValid || before != deploymentHash(e.journal) {
@@ -357,7 +365,9 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt time.Ti
 	if err != nil {
 		return e.result("blocked", "lease_renewal_failed"), err
 	}
-	return e.inspect(ctx)
+	// The supervisor already has an independent kernel expiry guard. Keep
+	// its cycle budget instead of inheriting a CLI's 60s cleanup extension.
+	return e.inspectWithCleanup(ctx, false)
 }
 func (e *DeploymentEngine) Inspect(ctx context.Context) (DeploymentResult, error) {
 	if !e.mu.TryLock() {
