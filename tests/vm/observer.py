@@ -264,6 +264,9 @@ def exercise(vm, case, mode, delta, result):
             result['before_pause_blocked'] = vm.closed()
         else:
             vm.record('supervision-frozen', vm.call('fixture/freeze'))
+            result['before_pause_probes'] = vm.probes()
+            if not all(p['ok'] for p in result['before_pause_probes']):
+                raise RuntimeError('pause requires live existing/new TCP after supervisors freeze')
         result['before'] = vm.call('health')
         if case != 'suspend':
             vm.command('stop')
