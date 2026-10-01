@@ -18,19 +18,31 @@ script = sys.stdin.buffer.read(512 * 1024 + 1)
 if len(script) > 512 * 1024:
     raise SystemExit('oversized nft input')
 directory = Path(os.environ['VPNCTL_VM_NFT_DELAY'])
-if b'add element inet vl' in script and not (directory / 'ready.json').exists():
+phase = os.environ.get('VPNCTL_VM_NFT_PHASE', 'activate')
+target = os.environ.get('VPNCTL_VM_NFT_TARGET', 'parent')
+selected = b'create set inet vl' in script if phase == 'prepare' else b'flush chain inet vl' in script
+if selected and not (directory / 'ready.json').exists():
     parent = os.getppid()
     if Path('/proc/' + str(parent) + '/exe').resolve() != Path('/opt/vpnctl-vm/vpnctl'):
         raise SystemExit('unexpected supervisor parent')
-    os.kill(parent, signal.SIGSTOP)
-    (directory / 'ready.json').write_text(json.dumps({'parent': parent, 'prepared_monotonic_ns': time.monotonic_ns(), 'script': script.decode()}))
+    if target != 'child':
+        os.kill(parent, signal.SIGSTOP)
+    (directory / 'ready.json').write_text(json.dumps({'parent': parent, 'child': os.getpid(), 'phase': phase, 'target': target, 'prepared_monotonic_ns': time.monotonic_ns(), 'script': script.decode()}))
+    if target == 'group':
+        os.killpg(os.getpgrp(), signal.SIGSTOP)
     until = time.monotonic() + 60
     while not (directory / 'release').exists():
         if time.monotonic() > until:
             raise SystemExit('injection release timeout')
         time.sleep(0.02)
-    p = subprocess.run([real] + sys.argv[1:], input=script)
-    (directory / 'done.json').write_text(json.dumps({'exit': p.returncode, 'committed_monotonic_ns': time.monotonic_ns()}))
+    p = subprocess.run([real] + sys.argv[1:], input=script, capture_output=True)
+    committed = time.monotonic_ns()
+    replay = []
+    if phase == 'activate':
+        for _ in range(2):
+            q = subprocess.run([real] + sys.argv[1:], input=script, capture_output=True)
+            replay.append({'exit': q.returncode, 'committed_monotonic_ns': time.monotonic_ns()})
+    (directory / 'done.json').write_text(json.dumps({'exit': p.returncode, 'committed_monotonic_ns': committed, 'stderr': p.stderr[:8192].decode(errors='replace'), 'replay': replay}))
     raise SystemExit(p.returncode)
 p = subprocess.run([real] + sys.argv[1:], input=script)
 raise SystemExit(p.returncode)

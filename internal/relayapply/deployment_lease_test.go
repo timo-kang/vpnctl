@@ -286,6 +286,8 @@ func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testi
 	for _, mode := range []string{"active", "zero-countdown", "empty-set", "missing", "wrong-deadline", "wrong-owner"} {
 		t.Run(mode, func(t *testing.T) {
 			committed := false
+			selected := "lease_00000000000000000000000000000000"
+			pending := ""
 			deadline := time.Now().Add(-time.Second).Truncate(time.Second)
 			backend := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
 				if name != "nft" {
@@ -305,7 +307,7 @@ func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testi
 					if committed && mode == "wrong-deadline" {
 						observed = observed.Add(time.Second)
 					}
-					rows := leaseExpected(entry, observed)
+					rows := stagedLeaseTestRows(entry, observed, selected, pending)
 					if committed && mode != "empty-set" {
 						left := 1
 						if mode == "zero-countdown" {
@@ -318,6 +320,15 @@ func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testi
 					}
 					return encode(rows)
 				case "-f /dev/stdin":
+					if strings.Contains(input, "create set") {
+						match := regexp.MustCompile(`create set inet [^ ]+ (lease_[0-9a-f]{32})`).FindStringSubmatch(input)
+						if len(match) != 2 {
+							t.Fatal("missing preparation", input)
+						}
+						pending = match[1]
+						return nil, nil
+					}
+					selected, pending = pending, ""
 					match := regexp.MustCompile(`meta time >= ([0-9]+)`).FindStringSubmatch(input)
 					if len(match) != 2 {
 						t.Fatal("missing lease cutoff")

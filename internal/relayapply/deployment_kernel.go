@@ -185,7 +185,7 @@ func (k deploymentKernel) wire(ctx context.Context, e DeploymentEntry) (bool, er
 	return complete, nil
 }
 func (k deploymentKernel) Check(ctx context.Context, e DeploymentEntry, fresh bool) (bool, error) {
-	if fresh && e.LeaseVersion == 1 {
+	if fresh && e.LeaseVersion >= 1 {
 		if _, exists, err := k.leaseRead(ctx, e); err != nil {
 			return false, err
 		} else if exists {
@@ -252,7 +252,7 @@ func (k deploymentKernel) Step(ctx context.Context, e DeploymentEntry, step, key
 }
 func (k deploymentKernel) Down(ctx context.Context, e DeploymentEntry) error {
 	var guardErr error
-	if e.LeaseVersion == 1 {
+	if e.LeaseVersion >= 1 {
 		guardErr = k.leaseBlock(ctx, e)
 	}
 	_, l, exists, _, err := k.inventory(ctx, e, false)
@@ -274,7 +274,7 @@ func (k deploymentKernel) Remove(ctx context.Context, e DeploymentEntry) error {
 		return err
 	}
 	if !exists {
-		if e.LeaseVersion == 1 {
+		if e.LeaseVersion >= 1 {
 			return k.leaseRemove(ctx, e)
 		}
 		return nil
@@ -286,7 +286,7 @@ func (k deploymentKernel) Remove(ctx context.Context, e DeploymentEntry) error {
 	if _, err = k.run(ctx, "", "ip", "link", "del", "dev", e.Interface); err != nil {
 		return err
 	}
-	if e.LeaseVersion == 1 {
+	if e.LeaseVersion >= 1 {
 		if err = k.leaseRemove(ctx, e); err != nil {
 			return err
 		}

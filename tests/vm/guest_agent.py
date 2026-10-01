@@ -32,7 +32,7 @@ def guard():
 @lru_cache(maxsize=1)
 def binary_hashes():
     result = {}
-    for name in ('vpnctl', 'integration.test', 'vpnctl-legacy'):
+    for name in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1'):
         with (Path('/opt/vpnctl-vm') / name).open('rb') as f:
             result[name] = hashlib.file_digest(f, 'sha256').hexdigest()
     return result

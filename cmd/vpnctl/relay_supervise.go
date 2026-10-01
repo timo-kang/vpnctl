@@ -46,11 +46,12 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	authenticatedAt := time.Time{}
 	var report relaycache.DeploymentReport
 	if refresh {
+		authenticatedStart := time.Now() // Keep the monotonic clock across refresh/storage/inspection.
 		request, stop := context.WithTimeout(ctx, time.Second)
 		report, err = c.Refresh(request, client)
 		stop()
 		if err == nil && report.ApprovalValid {
-			authenticatedAt = report.Refresh.LastSuccessAt
+			authenticatedAt = authenticatedStart
 		}
 		out.Refresh = report.Refresh.Result
 	} else {

@@ -59,7 +59,8 @@ scripts/test-vm.sh --case lease
 패키지를 변경해 별도로 검증한다. suite 소스, runner image, CLI를 함께 버전 고정한다.
 기본 CLI는 checkout에서 빌드하며 외부 binary의 출처와 SHA-256을 따로 기록한다.
 실제 구형 CLI 비교에는 lease 도입 전 커밋
-`6e2da45c89de2d3ad2e4c930f1037472e6440692`의 git object가 필요하다.
+`6e2da45c89de2d3ad2e4c930f1037472e6440692`(v0)와
+`fb0ca2e9684af827ac2afc4dd0cb9afcb0ca3e8b`(v1)의 git object가 필요하다.
 새 journal/marker를 삭제하여 downgrade가 되게 만들지 않는다.
 
 `VPNCTL_KEEP_VM_WORK=1`이면 성공해도 이번 private 디스크를 보존한다. 이 디렉터리에는
@@ -173,11 +174,11 @@ Linux의 모든 clock이 멈췄다. RTC device가 진행하는 것과 Linux real
    이전 gate를 자동 복원하도록 배포하지 않는다.
 
 관리자 계약을 우회하는 무통보 VM freeze/live snapshot restore는 지원하지 않는다.
-별도로 -31초 clock step과 12초 지연 nft commit을 겹치면 이미 만료한 경로가 다시
-열리는 결함도 재현했다(#136). 상대 timeout은 commit 시점부터 시작하고, 정지된
-부모의 context timeout은 child의 늦은 commit을 취소하지 못한다. 따라서 앞뒤의
-userspace freshness 검사 또는 재개 후 cleanup을 hard realtime 차단 보장으로
-사용하지 않는다. 이 조합도 사전 fence 없이 배포 조건을 충족했다고 판단할 수 없다.
+lease v1에서는 -31초 clock step과 12초 지연 nft commit을 겹치면 이미 만료한 경로가
+다시 열리는 결함도 재현했다(#136). 상대 timeout이 선택 commit에서 시작하고, 정지된
+부모의 context timeout이 child의 늦은 commit을 취소하지 못했기 때문이다. lease v2는
+아래 회귀에서 준비된 timer의 만료가 선택과 분리되는지 검사한다. userspace의 앞뒤
+freshness 검사나 재개 후 cleanup만으로 이 조건을 합격 처리하지 않는다.
 cache와 controller 원장을 모두 과거로 되돌리고 외부 revision 증거도 잃는 rollback은
 로컬 high-water만으로 검출할 수 없다. 외부 fence/revision anchor가 필요하다.
 VM의 S3 성공은 물리 장비, 다른 kernel/QEMU, hibernate, 이동된 snapshot의 성공을
@@ -186,3 +187,39 @@ VM의 S3 성공은 물리 장비, 다른 kernel/QEMU, hibernate, 이동된 snaps
 현재 탐색 검증 환경은 Ubuntu 24.04, Linux 6.8.0-146-generic, nftables 1.0.9,
 systemd 255, QEMU 8.2 계열이다. 정확한 package/image 값은 실행 manifest에 남긴다.
 최종 증거와 미해결 조건은 #128/#135/#136에 연결하며 #124/#114/M3 gate를 자동으로 닫지 않는다.
+
+## 지연된 커널 반영 회귀 (#136, lease v2)
+
+`--case delayed-prepare delayed-commit delayed-rearm delayed-child delayed-group
+ delayed-continuation --delta -31`로 실행한다. 정상 시계 비교는 `--delta 0`이다.
+각 실행은 별도 VM에서 실제 controller 응답·제품 CLI·nft·두 relay × 두 underlay의
+새/기존 TCP를 사용한다. 호스트 전원이나 clock은 조작하지 않는다.
+
+| case | 주입과 판정 |
+| --- | --- |
+| delayed-prepare | 부모 감독을 정지하고 새 timer 생성 batch를 12초 보류. 준비만으로 경로가 열리지 않아야 한다. |
+| delayed-commit | 부모를 정지하고 timer를 참조하는 선택 batch를 12초 보류. 만료 후보로 새/기존 TCP가 통과하면 실패. |
+| delayed-rearm | 먼저 모든 기존 lease 만료를 확인. 새 인증 응답 뒤 선택을 12초 보류하여 오래된 응답의 재허가를 거절. |
+| delayed-group | 부모와 명령 자식 그룹을 정지. 12초 뒤 자식 그룹만 재개하여 같은 차단을 확인. |
+| delayed-child | 부모는 실행하고 자식만 지연. 4초 뒤 실제 자식 소멸·commit 부재를 확인한 후 감독을 중지하고 lease 만료를 관측. 다른 정상 endpoint의 갱신과 혼동하지 않는다. |
+| delayed-suspend | 게스트 S3와 선택 지연을 결합. 정상 시계는 12초, −31초 역행은 35초 절전으로 WG 재핸드셰이크가 결함을 가리는 조건도 검사(#138). |
+| delayed-continuation | controller 단절 중 아직 활성인 이전 lease를 연장 준비한 뒤 6초 보류. 기존 lease가 만료되면 새 응답 없이 연장할 수 없어야 한다. |
+
+선택 batch는 두 번 더 재전송하며 결과를 기록한다. 커널의 조건부 delete가 만료 원소를
+거절하는 exit 1과, 만료된 후보를 참조하여 차단을 유지하는 exit 0을 구분한다. 명령 종료
+상태만으로 차단을 판정하지 않고 부모 재개 전 실제 TCP와 선택된 nft set/cutoff를 함께 확인한다.
+커널 guard가 아직 허용 상태라면 다른 계층에서 TCP가 timeout이어도 합격이 아니다. 정상 clock 복원,
+새 승인과 명시적 재설치 후 새 TCP 복구도 요구한다. 원래 TCP socket은 재연결하지 않는다.
+
+`lease-v1-upgrade`와 `lease-v1-downgrade`는 실제 이전 binary
+`fb0ca2e9684af827ac2afc4dd0cb9afcb0ca3e8b`를 빌드한다. v1 설치가 새 감독에서 회수되는지,
+v2 journal을 v1 binary가 변경 없이 거절하는지 확인한다. legacy(v0) 검증도 유지한다.
+manifest와 guest health에 네 binary의 SHA256을 기록한다. `matrix`는 총 44개 경우다.
+#135의 외부 시간 한계 세 경우는 완료 여부와 지원 판정을 계속 분리한다.
+
+S3와 wall rollback을 결합한 [#138](https://github.com/timo-kang/vpnctl/issues/138)은
+lease v2에서도 남는 결함이다. S3 동안 nft 상대 timer는 진행하지 않고, 역행 때문에
+절대 cutoff도 과거 경과를 나타내지 못한다. 이때 CLOCK_BOOTTIME은 진행하므로 모든
+게스트 clock이 멈추는 #135와 구별한다. 게스트 전원/시계의 이런 결합 작업도 사전 외부
+차단 없이 지원 완료로 판정하지 않는다. 커널 절전 포함 시계 보호 또는 실제 강제되는
+외부 fence가 검증될 때까지 관련 최종 gate를 유지한다.

@@ -21,6 +21,8 @@ var ErrLeaseExpired = errors.New("relay lease expired; fresh controller approval
 type DeploymentLease struct {
 	Active   bool      `json:"active"`
 	Deadline time.Time `json:"deadline"`
+	set      string
+	staged   []string
 }
 
 func leaseTable(e DeploymentEntry) string { return "vl" + e.Interface[2:] }
@@ -209,7 +211,12 @@ func (k deploymentKernel) leaseRead(ctx context.Context, e DeploymentEntry) (Dep
 	if err != nil {
 		return DeploymentLease{}, true, err
 	}
-	s, err := validateLease(rows, e)
+	var s DeploymentLease
+	if e.LeaseVersion == 2 {
+		s, err = validateStagedLease(rows, e)
+	} else {
+		s, err = validateLease(rows, e)
+	}
 	return s, true, err
 }
 
@@ -227,6 +234,9 @@ func (k deploymentKernel) noFlowtables(ctx context.Context) error {
 }
 
 func (k deploymentKernel) leaseCreate(ctx context.Context, e DeploymentEntry) error {
+	if e.LeaseVersion == 2 {
+		return k.stagedLeaseCreate(ctx, e)
+	}
 	if _, exists, err := k.leaseRead(ctx, e); err != nil {
 		return err
 	} else if exists {
@@ -271,59 +281,26 @@ func leaseDeadline(active bool, expiry, authenticatedAt, now time.Time) (time.Ti
 }
 
 func (k deploymentKernel) Lease(ctx context.Context, e DeploymentEntry, approvalExpiry, authenticatedAt time.Time) (DeploymentLease, error) {
-	state, exists, err := k.leaseRead(ctx, e)
-	if err != nil {
-		return state, err
+	if e.LeaseVersion != 2 {
+		return DeploymentLease{}, errors.New("relay lease upgrade requires release and apply")
 	}
-	if !exists {
-		return state, errors.New("relay lease missing")
-	}
-	if err = k.noFlowtables(ctx); err != nil {
-		return state, err
-	}
-	deadline, err := leaseDeadline(state.Active, approvalExpiry, authenticatedAt, time.Now().UTC())
-	if err != nil {
-		return state, err
-	}
-	// A backward wall-clock step cannot turn a nearly expired approval into
-	// another full lease period. Both clocks are bounded by remaining approval.
-	timeoutMS := time.Until(deadline).Milliseconds()
-	if timeoutMS < 1 && !state.Active {
-		return state, ErrLeaseExpired // The already-closed rearm window elapsed before commit.
-	}
-	if timeoutMS < 1 || timeoutMS > DeploymentLeaseDuration.Milliseconds() {
-		return state, errors.New("relay lease clock changed before commit")
-	}
-	table := leaseTable(e)
-	script := fmt.Sprintf("flush set inet %s alive\nadd element inet %s alive { %d timeout %dms }\n", table, table, e.LinkIndex, timeoutMS)
-	for _, hook := range []string{"input", "forward", "output"} {
-		script += fmt.Sprintf("flush chain inet %s %s\n", table, hook)
-	}
-	script += leaseRules(e, deadline)
-	if _, err = k.run(ctx, script, "nft", "-f", "/dev/stdin"); err != nil {
-		return state, err
-	}
-	state, exists, err = k.leaseRead(ctx, e)
-	if err == nil {
-		if !exists || !state.Deadline.Equal(deadline) {
-			err = errors.New("relay lease readback incomplete")
-		} else if !state.Active {
-			// The short rearm lease may expire (or round to a zero-second
-			// countdown) between commit and readback. Its guard is intact and
-			// closed; keep the link for a fresh response instead of tearing it
-			// down as though the validated kernel inventory were corrupt.
-			err = ErrLeaseExpired
-		}
-	}
-	return state, err
+	return k.stagedLease(ctx, e, approvalExpiry, authenticatedAt)
 }
 
 func (k deploymentKernel) leaseBlock(ctx context.Context, e DeploymentEntry) error {
-	_, exists, err := k.leaseRead(ctx, e)
+	state, exists, err := k.leaseRead(ctx, e)
 	if err != nil || !exists {
 		return err
 	}
-	_, err = k.run(ctx, "flush set inet "+leaseTable(e)+" alive\n", "nft", "-f", "/dev/stdin")
+	sets := []string{"alive"}
+	if e.LeaseVersion == 2 {
+		sets = append([]string{state.set}, state.staged...)
+	}
+	script := ""
+	for _, set := range sets {
+		script += "flush set inet " + leaseTable(e) + " " + set + "\n"
+	}
+	_, err = k.run(ctx, script, "nft", "-f", "/dev/stdin")
 	return err
 }
 func (k deploymentKernel) leaseRemove(ctx context.Context, e DeploymentEntry) error {

@@ -19,11 +19,13 @@ vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
 `relay sync-credentials`, 승인 TTL 연장은 관리자 catalog 갱신이 맡는다. 감독은
 요청마다 디스크의 mTLS credentials를 다시 읽으며, 인증서 갱신만으로 승인 TTL을
 연장하지 않는다. 최초 cache가 없으면 `refresh`로 초기화해야 한다.
-만료 lease의 재허가는 인증 응답 시각부터 최대 5초까지만 열며, 이후 정상 cycle이
-갱신한다. 정상적으로 진행하는 wall clock에서는 응답 뒤 오래 정지한 프로세스의
-과거 성공 표시만으로 재개할 수 없다. 시계 역행과 지연 nft commit이 함께 발생하면
-만료 gate가 다시 열릴 수 있는 [#136](https://github.com/timo-kang/vpnctl/issues/136)이
-재현되어 이 조합의 최종 판정은 보류한다.
+만료 lease의 재허가는 새 인증 요청 시작부터 최대 5초까지만 열며, 이후 정상 cycle이
+갱신한다. 게스트의 상대 clock이 진행하는 프로세스 지연 조건에서 요청 시각은
+monotonic 성분을 보존해 저장/검사 지연과 작은
+wall clock 역행으로 재허가 창이 늘어나지 않게 한다. nft 타이머 준비와 경로 선택을
+분리하여 지연된 선택 명령은 이미 만료된 타이머를 다시 시작할 수 없다(#136).
+S3와 시계 역행이 겹쳐 timer 자체가 만료되지 않는 추가 결함
+[#138](https://github.com/timo-kang/vpnctl/issues/138)은 별도 커널 보호 또는 외부 차단이 필요하다.
 재허가 창이 소진되거나 nft 재확인 중 잔여 시간이 0초/만료로 표시되면 정상 규칙의
 차단 상태와 link를 유지하고 다음 새 응답을 기다린다. 규칙 누락·소유자 변조·기한
 불일치는 정상 만료로 취급하지 않고 기존 차단/복구 오류를 유지한다.
@@ -58,21 +60,39 @@ namespace 잠금 경합은 기존 cycle 예산 안에서 25ms마다 재시도한
 
 endpoint마다 `vl` + interface hash의 `inet` table을 만들고 소유 alias를 각 rule에 기록한다.
 input/iif, forward/iif·oif, output/oif에 소유 ifindex 조건을 붙인다. 처음에는 timed set이
-비어 있고 cutoff가 과거이므로 차단된다. WG·route 설정, 현재 승인 검증 후에만 원자적
-nft batch로 lease를 허가한다. 두 조건 모두 통과해야 한다.
+비어 있고 cutoff가 과거이므로 차단된다. 두 조건 모두 통과해야 한다.
 
 1. 실제 wall time이 절대 cutoff보다 작다.
-2. 최대 10초 timeout의 `iface_index` set에 소유 ifindex가 살아 있다. 원소의 상대
-   timeout도 절대 cutoff까지 남은 시간 이하로 제한한다.
+2. 선택된 `iface_index` timed set에 소유 ifindex가 살아 있다.
 
-절대 cutoff는 suspend/시계 전진 뒤 오래된 lease 사용을 막고, 상대 timeout은 시계
-역행 때문에 무기한 열리는 것을 막는다. 시계 역행과 갱신 명령이 겹치면 상대 timeout은
-커널 commit부터 10초다. 개별 명령 context는 3초지만 프로세스 전체가 멈춘 순간의
-스케줄링까지 실시간 상한으로 보장하지 않는다. cache의 영속 관측 시각과 30초 역행
-거절 정책도 유지한다. -31초 역행과 12초 지연 commit의 조합에서는 감독을 재개하기
-전에 새·기존 TCP가 통과하는 결함이 실제 VM에서 재현됐다(#136). VM 전체 pause에서
-게스트의 모든 clock이 정지하는 한계(#135)와 구분한다. 두 조건 모두 사전 외부 차단
-또는 관리 endpoint의 완전한 해제 없이 외부 시간 한도를 보장하지 않는다.
+`lease_version=2` 갱신은 다음 두 트랜잭션으로 나뉜다.
+
+1. 매번 난수 128bit 이름의 새 set을 생성하고 timeout 원소를 넣는다. 이 set은 아직
+   어떤 경로에서도 참조하지 않으므로 준비 명령만 지연되거나 재실행되어도 통신을 열지 않는다.
+2. 준비 ACK 후 `max(monotonic 경과, CLOCK_BOOTTIME 경과) + timeout + 100ms`가
+   최초에 계산한 잔여 승인/재허가 시간 이내인지 검사한다. 준비 비용으로 1초를 미리
+   남긴다. 따라서 보통 timer는 절대 cutoff보다 약 1초 먼저 닫히며, 준비가 약 900ms를
+   초과하면 후보를 선택하지 않는다. 안전 여유를 제외한 가용성을 보장하는 실시간 SLO는 아니다.
+3. 별도 nft batch는 기존 규칙을 새 set 참조로 바꾸고 이전 set을 삭제한다. timeout을
+   설정하거나 원소를 추가하지 않는다. 기존 활성 lease의 연장에서는 먼저 기존 원소의
+   조건부 delete를 요구하므로 이미 만료된 연장을 새 허가로 바꾸지 않는다. 새로운 승인
+   없이 실패한 연장을 재허가로 재시도하지 않는다.
+
+경로 선택 batch가 오래 지연되면 후보 timer 자체가 먼저 만료된다. 따라서 wall clock을
+뒤로 돌려도 늦은 commit이 timer를 새로 시작하지 못한다. 이전 set 삭제는 오래된 batch의
+재전송도 거절하며, 다음 갱신은 새로운 난수 이름을 사용한다. 검사 직후 프로세스가
+정지하더라도 선택 batch에는 수명을 연장할 연산이 없다. 같은 namespace의 적용 잠금도
+유지한다. 중단 후 남은 준비 set은 최대 하나까지 엄격히 검증하고 다음 준비에서 회수한다.
+차단은 선택 set과 준비 set 모두 비워 지연된 선택이 빈 set을 열지 못하게 한다.
+
+절대 cutoff는 suspend/시계 전진을, timed set은 시계 역행을 각각 제한한다. set은 kernel
+jiffies로 만료를 판단하므로 tick 오차 100ms 미만인 플랫폼을 요구한다(검증 Linux HZ≥100).
+Linux nft transaction 처리 자체에 대한 hard realtime 보장은 하지 않는다. 전체 게스트
+clock이 멈추는 VM pause/스냅샷 복원 한계(#135)는 그대로이며 외부 사전 차단 계약을 따른다.
+S3와 wall rollback을 결합하면 BOOTTIME만 진행하고 두 packet guard clock은
+기한을 표현하지 못할 수 있다(#138). 준비 ACK 시 BOOTTIME을 읽는 것으로 그 이후의
+절전까지 보호하지는 못한다. 이런 전원/시간 변경은 사전 외부 차단 없이 지원 완료가 아니다.
+cache의 영속 관측 시각과 30초 역행 거절 정책도 유지한다.
 
 nft 규칙의 property·순서·owner·set timeout을 모두 판독해 비교하고 소유 table만
 갱신/제거한다. host ruleset이나 다른 interface를 flush하지 않는다. 기존 TCP도 filter
@@ -81,12 +101,14 @@ hook을 통과하므로 lease를 적용받는다. flowtable은 forwarding hook�
 운영자는 XDP/TC/hardware offload 등 별도 우회 경로를 사용하지 않아야 한다.
 root/CAP_NET_ADMIN이 규칙을 삭제하는 상황을 격리하는 보안 경계는 아니다.
 
-지원 기준은 Linux nftables의 `meta time`, timed `iface_index` set, JSON listing이다.
+지원 기준은 Linux `CLOCK_BOOTTIME`, nftables `meta time`, comment가 있는 timed
+`iface_index` set, 조건부 원소 삭제, JSON listing이다.
 실제 검증은 test-netns 이미지의 Debian bookworm nftables 1.0.6과 실행 호스트 커널에서
 수행한다. 다른 nft/kernel 조합은 동일 시험으로 확인한다. 시간은 UTC로 판독한다.
 규칙 표현이 다르거나 지원되지 않으면 보호 없이 적용하지 않고 실패한다.
 [nftables 공식 매뉴얼](https://www.netfilter.org/projects/nftables/manpage.html),
-[Linux timekeeping](https://docs.kernel.org/core-api/timekeeping.html).
+[Linux timekeeping](https://docs.kernel.org/core-api/timekeeping.html),
+[Linux 6.8의 set 만료 검사](https://github.com/torvalds/linux/blob/v6.8/include/net/netfilter/nf_tables.h).
 
 ## 관측과 복구
 
@@ -105,7 +127,7 @@ guard 자체가 변조되면 타인 규칙을 덮어쓰지 않고 소유 link �
 회수 실패로 journal에 남은 과거 endpoint를 갱신하지 않으며, cache 읽기 실패나 journal
 저장 불확실 상태에서는 갱신을 진행하지 않는다. 전체 결과는 계속 `degraded`로 보고한다.
 
-기존 journal은 `lease_version`이 없으므로 0이다. 새 버전이 이를 읽으면 이전 endpoint를
+이전 journal의 `lease_version`은 0(lease 없음) 또는 1(단일 갱신 batch)이다. 새 버전이 이를 읽으면 이전 endpoint를
 차단·회수하고 새 apply를 요구한다. 구형 binary로 downgrade하여 새 journal을 열 수 없다.
 업그레이드 전 기존 endpoint release, 새 binary 설치, refresh/supervise/apply 순서를 권장한다.
 rollback은 새 binary로 endpoint를 release한 후 이전 배포로 복귀한다. guard/journal만

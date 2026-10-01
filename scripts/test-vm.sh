@@ -62,6 +62,10 @@ legacy_commit=6e2da45c89de2d3ad2e4c930f1037472e6440692
 mkdir "$work/legacy-src"
 git archive "$legacy_commit" | tar -x -C "$work/legacy-src"
 GOMAXPROCS=2 go -C "$work/legacy-src" build -p=2 -o "$work/input/vpnctl-legacy" ./cmd/vpnctl
+v1_commit=fb0ca2e9684af827ac2afc4dd0cb9afcb0ca3e8b
+mkdir "$work/v1-src"
+git archive "$v1_commit" | tar -x -C "$work/v1-src"
+GOMAXPROCS=2 go -C "$work/v1-src" build -p=2 -o "$work/input/vpnctl-lease-v1" ./cmd/vpnctl
 # The legacy builder honors these per-container bounds during apt/kernel setup.
 if [[ -n "${VPNCTL_VM_IMAGE:-}" ]]; then
     image=$(docker image inspect "$VPNCTL_VM_IMAGE" --format '{{.Id}}')
@@ -81,8 +85,8 @@ manifest="$results/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
         "suite_dirty=$(test -z "$(git status --porcelain)" && echo false || echo true)" \
         'runner=qemu-in-container' 'cpus=1' 'memory=2g' 'guest_memory=768M' \
         'container_network=none' 'container_capabilities=none' "image_id=$image" \
-        "host_boot_id=$boot_before" "binary_origin=$binary_origin" "legacy_commit=$legacy_commit" 'suite_race=0'
-    sha256sum "$work/input/vpnctl" "$work/input/integration.test" "$work/input/vpnctl-legacy"
+        "host_boot_id=$boot_before" "binary_origin=$binary_origin" "legacy_commit=$legacy_commit" "lease_v1_commit=$v1_commit" 'suite_race=0'
+    sha256sum "$work/input/vpnctl" "$work/input/integration.test" "$work/input/vpnctl-legacy" "$work/input/vpnctl-lease-v1"
     printf 'test_argument=%s\n' "$@"
     cat "$work/image/image.json"
 } > "$manifest"

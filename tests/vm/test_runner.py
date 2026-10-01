@@ -36,6 +36,22 @@ class IsolationTests(unittest.TestCase):
         self.guard('guest-boot', 'guest-uuid')
 
 class ObserverTests(unittest.TestCase):
+    def test_permissive_gate_is_detected_even_when_tcp_is_blocked_elsewhere(self):
+        rows = [{'table': {'name': 'vltest'}},
+                {'set': {'table': 'vltest', 'name': 'lease_test', 'elem': [{'elem': {'expires': 4}}]}},
+                {'rule': {'table': 'vltest', 'expr': [
+                    {'match': {'left': {'meta': {'key': 'time'}}, 'op': '>=', 'right': '2026-10-01 00:00:10'}},
+                    {'match': {'left': {'meta': {'key': 'iif'}}, 'op': '!=', 'right': '@lease_test'}}]}}]
+        def snapshot():
+            return {'kernel': {'at': '2026-10-01T00:00:01Z', 'r0': {'nft -j -n -T list ruleset': json.dumps({'nftables': rows})},
+                               'r1': {'nft -j -n -T list ruleset': json.dumps({'nftables': []}), 'wg show all allowed-ips': ''}}}
+        self.assertEqual(len(observer.open_lease_guards(snapshot())), 1)
+        rows[1]['set']['elem'] = []
+        self.assertEqual(observer.open_lease_guards(snapshot()), [])
+        rows[2]['rule']['expr'].pop()
+        with self.assertRaisesRegex(RuntimeError, 'incomplete lease guard evidence'):
+            observer.open_lease_guards(snapshot())
+
     def vm(self, call):
         vm = object.__new__(observer.VM)
         vm.paths = ['p00']

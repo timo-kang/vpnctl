@@ -120,6 +120,8 @@ func (e *DeploymentEngine) result(state, reason string) DeploymentResult {
 		r.Endpoints = append(r.Endpoints, DeploymentEndpointResult{EndpointID: v.Endpoint, Interface: v.Interface, Phase: v.Phase, Peers: len(v.Peers)})
 		if v.LeaseVersion == 0 {
 			r.ExpiryEnforcement = "legacy_on_command"
+		} else if v.LeaseVersion == 1 {
+			r.ExpiryEnforcement = "legacy_upgrade_required"
 		}
 	}
 	return r
@@ -257,7 +259,7 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 		if x != nil || y != nil || !sameDeployment(v, w) || ctx.Err() != nil {
 			err = errors.New("approval expired or changed before commit")
 		} else {
-			_, err = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, time.Now().UTC())
+			_, err = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, time.Now())
 		}
 	}
 	if err != nil {

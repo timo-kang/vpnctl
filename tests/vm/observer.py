@@ -14,6 +14,41 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+def open_lease_guards(snapshot):
+    """A TCP timeout alone can be caused by WireGuard rekeying after sleep.
+
+    Independently detect a still-permissive owned nft gate. A positive rounded
+    countdown proves it is live; zero is ambiguous and is not an active proof.
+    """
+    kernel = snapshot['kernel']
+    now = datetime.datetime.fromisoformat(kernel['at'].replace('Z', '+00:00'))
+    opened = []
+    for relay in ('r0', 'r1'):
+        rows = json.loads(kernel[relay]['nft -j -n -T list ruleset'])['nftables']
+        tables = [r['table']['name'] for r in rows if 'table' in r and r['table']['name'].startswith('vl')]
+        if not tables and kernel[relay]['wg show all allowed-ips'].strip():
+            raise RuntimeError('relay peers exist without lease guard evidence')
+        for table in tables:
+            sets, cutoffs, selected = {}, set(), set()
+            for row in rows:
+                if 'set' in row and row['set']['table'] == table:
+                    sets[row['set']['name']] = row['set']
+                if 'rule' not in row or row['rule']['table'] != table:
+                    continue
+                for expr in row['rule']['expr']:
+                    match = expr.get('match', {})
+                    if match.get('left') == {'meta': {'key': 'time'}} and match.get('op') == '>=':
+                        cutoffs.add(match['right'])
+                    if isinstance(match.get('right'), str) and match['right'].startswith('@'):
+                        selected.add(match['right'][1:])
+            if len(cutoffs) != 1 or len(selected) != 1 or next(iter(selected)) not in sets:
+                raise RuntimeError('incomplete lease guard evidence')
+            cutoff = datetime.datetime.fromisoformat(next(iter(cutoffs))).replace(tzinfo=datetime.timezone.utc)
+            timer = sets[next(iter(selected))]
+            if now < cutoff and any(e['elem'].get('expires', 0) > 0 for e in timer.get('elem', [])):
+                opened.append({'relay': relay, 'table': table, 'selected': timer['name'], 'cutoff': cutoff.isoformat(), 'elements': timer['elem']})
+    return opened
+
 class VM:
     def __init__(self, work, results, rtc='host'):
         self.work, self.results = Path(work), Path(results)
@@ -310,21 +345,50 @@ def exercise(vm, case, mode, delta, result):
         if case == 'pause-fenced':
             vm.record('external-clock-sync-before-reapproval', vm.call('clock', {'unix_ns': time.time_ns()}))
         result['recovery'] = vm.recover()
-    elif case == 'delayed-commit':
-        result['prepared'] = vm.call('fixture/delay-start')
+    elif case in ('delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend'):
+        if case == 'delayed-continuation':
+            vm.call('fixture/stop')
+            vm.call('fixture/outage')
+            time.sleep(2)
+        if case == 'delayed-rearm':
+            vm.call('fixture/stop')
+            time.sleep(12)
+            if any(p['ok'] for p in vm.probes(('new',))):
+                raise RuntimeError('rearm fixture was not expired before the fresh response')
+        result['prepared'] = vm.call('fixture/delay-start', {
+            'phase': 'prepare' if case == 'delayed-prepare' else 'activate',
+            'target': 'child' if case == 'delayed-child' else 'group' if case == 'delayed-group' else 'parent'})
         vm.record('renewal-prepared-supervisors-stopped', result['prepared'])
         result['fault_monotonic_ns'] = time.monotonic_ns()
         if delta:
             result['clock_step'] = vm.call('clock', {'delta': delta})
         # Do not write to the existing stream while the gate is closed: retain
         # that exact TCP connection for the first post-commit probe.
-        time.sleep(12)
+        if case == 'delayed-child':
+            time.sleep(4)
+            result['child_cancellation'] = vm.call('fixture/delay-release')
+            vm.call('fixture/stop')
+        if case == 'delayed-suspend':
+            result['before_suspend'] = vm.call('health')
+            vm.call('suspend')
+            until = time.monotonic() + 15
+            while vm.command('query-status')['status'] != 'suspended':
+                if time.monotonic() > until:
+                    raise RuntimeError('guest did not suspend during delayed activation')
+                time.sleep(0.1)
+            time.sleep(35 if delta == -31 else 12)
+            vm.command('system_wakeup')
+            result['after_suspend'] = vm.wait_health()
+        else:
+            time.sleep(6 if case == 'delayed-continuation' else 12)
         result['before_commit'] = vm.call('fixture/snapshot')
-        result['commit'] = vm.call('fixture/delay-release')
+        result['commit'] = result.get('child_cancellation') or vm.call('fixture/delay-release')
         vm.record('delayed-commit', result['commit'])
+        result['after_commit'] = vm.call('fixture/snapshot')
+        result['open_guards_after_commit'] = open_lease_guards(result['after_commit'])
         result['first_post_commit_probes'] = vm.probes()
-        if any(p['ok'] for p in result['first_post_commit_probes']):
-            result['defect_reason'] = 'delayed_commit_reopened_expired_gate'
+        if result['open_guards_after_commit'] or any(p['ok'] for p in result['first_post_commit_probes']):
+            result['defect_reason'] = 'delayed_commit_left_expired_guard_permissive' if result['open_guards_after_commit'] else 'delayed_commit_reopened_expired_gate'
             result['qualified'] = False
         else:
             vm.cached_only()
@@ -384,10 +448,10 @@ def exercise(vm, case, mode, delta, result):
         result['fresh_install'] = vm.probes(('new',))
         if not all(p['ok'] for p in result['fresh_install']):
             raise RuntimeError('fresh installation after storage failure/reboot failed')
-    elif case in ('downgrade', 'legacy-upgrade'):
+    elif case in ('downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade'):
         result['version_check'] = vm.call('fixture/' + case)
         vm.record('journal-version-check', result['version_check'])
-        if case == 'legacy-upgrade':
+        if case in ('legacy-upgrade', 'lease-v1-upgrade'):
             result['legacy_blocked'] = vm.closed()
             result['upgrade_recovery'] = vm.recover()
             vm.call('fixture/stop')
@@ -404,7 +468,7 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'delayed-commit', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
@@ -438,8 +502,8 @@ def main():
         cases += [('clock', mode, delta, 'host') for mode in ('stopped', 'running') for delta in (-2, -31, -600, 2, 600)]
         cases += [('pause', 'stopped', 0, rtc) for rtc in ('host', 'vm')]
         cases += [('pause-fenced', 'stopped', 0, rtc) for rtc in ('host', 'vm')]
-        cases += [(case, 'stopped', 0, 'host') for case in ('suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'pause-expired')]
-        cases += [('delayed-commit', 'stopped', delta, 'host') for delta in (0, -31)]
+        cases += [(case, 'stopped', 0, 'host') for case in ('suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'pause-expired')]
+        cases += [(case, 'stopped', delta, 'host') for case in ('delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend') for delta in (0, -31)]
     verdicts = []
     host_before = host_clock()
     for case, mode, delta, rtc in cases:
