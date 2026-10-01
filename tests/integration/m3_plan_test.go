@@ -30,6 +30,13 @@ type planIssuer struct {
 func (p *planIssuer) RelayCatalog(_ context.Context, node string) (relaycatalog.View, error) {
 	return p.state.NodeView(node), nil
 }
+func (p *planIssuer) RelayDeployment(_ context.Context, principal, relay string) (relaycatalog.DeploymentView, error) {
+	v, ok := p.state.DeploymentFor(principal, relay)
+	if !ok {
+		return v, fmt.Errorf("fixture recipient not authorized")
+	}
+	return v, nil
+}
 func (p *planIssuer) BindRelayPath(_ context.Context, r relaycatalog.BindRequest) (relaycatalog.View, error) {
 	n, e := relaycatalog.Bind(p.state, r, p.env, time.Now().UTC())
 	if e == nil {
@@ -56,12 +63,19 @@ func checkM3LocalPlans(t *testing.T, robot string, relays []string, target, priv
 	if e != nil {
 		t.Fatal(e)
 	}
+	for _, relay := range spec.Relays {
+		state, e = relaycatalog.SetRecipient(state, relaycatalog.RecipientUpdate{ControllerID: state.ControllerID, ExpectedGeneration: state.Generation, RelayID: relay.ID, PrincipalID: "robot"}, env)
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	issuer := &planIssuer{state, env}
 	dir := filepath.Join(private, "plan-cache")
 	cache, e := relaycache.Open(dir, relaycache.Options{NodeID: "robot", Create: true})
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = cache.Refresh(context.Background(), &planIssuer{state, env}); e != nil {
+	if _, e = cache.Refresh(context.Background(), issuer); e != nil {
 		cache.Close()
 		t.Fatal(e)
 	}
@@ -184,6 +198,6 @@ func checkM3LocalPlans(t *testing.T, robot string, relays []string, target, priv
 	plan("eligible", 2)
 	netOutput(t, robot, "ip", "link", "set", "renamed0", "name", "wan0")
 	plan("eligible", 4)
-	checkM3PreparedPaths(t, robot, relays, target, private, configPath, relayKeys, plan("eligible", 4))
+	checkM3PreparedPaths(t, robot, relays, target, private, configPath, relayKeys, plan("eligible", 4), issuer)
 	t.Log("M3 plan: two real underlays/four approved paths, no LTE or default route, repeated device/address changes; kernel configuration unchanged by CLI")
 }

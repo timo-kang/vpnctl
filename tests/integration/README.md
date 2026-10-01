@@ -67,3 +67,10 @@ server, mark-based outer route selection and three rounds of staged outages and
 recovery. The PKI mesh matrix also runs automatic uplink collection on each node
 and saves `node-*-automatic-uplink.json` artifacts. No modem hardware or host
 network mutation is required; missing optional collectors remain unknown.
+
+`TestNetns_M3PathTopology`는 두 relay × 두 underlay에서 제품 CLI의 node 후보와 relay peer·
+반환 route를 설치하고 TCP echo/source, 충돌 보존, 철회 차단과 SIGKILL 복구를 검증한다.
+승인 발행·forwarding/NAT·앱 route 선택은 fixture다. 결과는 `m3-prepare-*/report.json`에 남긴다.
+`TestNetns_M3RelayDeploymentScale`는 1/3/8/32 node 승인 × 4 path의 정확한 peer·route 수를
+실제 커널과 반복 CLI 실행으로 검사하고 `m3-relay-scale-*/nodes-*.json`에 기록한다.
+이는 32대 동시 통신이나 자동 전환 SLO 검증을 의미하지 않는다.

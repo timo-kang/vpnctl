@@ -107,9 +107,10 @@ VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 VPNCTL_TEST_MEMORY=2g \
 
 단위 검증은 8개 변경 단계의 전/후 실패·중단, 저장 실패·소유권 충돌,
 1/3/8/32개의 독립 node와 최대 8 후보의 재실행·재오픈을 검사한다.
-실제 netns 검증은 제품 CLI로 4개 후보를 준비하고 fixture가 relay peer와 임시 앱 route를
-설치한 뒤 WG 암호화 source와 별도 서버 TCP echo를 대조한다. main table의 다른 통신망에
+실제 netns 검증은 제품 CLI로 4개 후보와 [relay peer·반환 route](relay-peer-apply.md)를 준비하고
+fixture가 forwarding/NAT와 임시 앱 route를 설치한 뒤 WG 암호화 source와 별도 서버 TCP echo를
+대조한다. main table의 다른 통신망에
 대체 경로를 넣어도 endpoint route 삭제/link down 시 UDP가 새지 않는지 검사한다.
 실제 CLI의 생성 직후/rule 설치/WG 설정/link up 뒤 SIGKILL을 확인하고 다음 프로세스로 복구한다.
-gateway는 설치/readback 범위를 검증한다. 자동 선택·relay 배포 제품과 전환 SLO는 #21/#23/#24 후속 gate다.
+gateway는 설치/readback 범위를 검증한다. 자동 선택·relay forwarding 권한·상시 만료 차단과 전환 SLO는 후속 gate다.
 완료 여부와 통과한 단계는 별도 `m3-prepare-*/report.json` artifact에 남기며 cache·journal·개인키는 포함하지 않는다.

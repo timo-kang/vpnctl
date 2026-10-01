@@ -2,8 +2,9 @@
 
 이 단계는 controller가 **누구에게 어떤 relay의 peer 정보를 제공하는지**를 구현한다.
 `vpnctl relay catalog`는 온라인 승인 조회이며 `relay refresh|status`는
-[영속 승인 cache](relay-deployment-cache.md)를 관리한다. 로컬 peer 설치·forwarding 설정은
-후속 단계다. 조회나 cache 갱신 성공은 WireGuard handshake나 서버 uplink 도달 성공을 뜻하지 않는다.
+[영속 승인 cache](relay-deployment-cache.md)를 관리한다. 로컬 peer는
+[별도의 적용 명령](relay-peer-apply.md)이 설치한다. 목적지별 forwarding 권한 적용은 후속 단계다.
+조회나 cache 갱신 성공은 WireGuard handshake나 서버 uplink 도달 성공을 뜻하지 않는다.
 
 ## 신원과 관리자 승인
 
