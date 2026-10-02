@@ -74,3 +74,9 @@ network mutation is required; missing optional collectors remain unknown.
 `TestNetns_M3RelayDeploymentScale`는 1/3/8/32 node 승인 × 4 path의 정확한 peer·route 수를
 실제 커널과 반복 CLI 실행으로 검사하고 `m3-relay-scale-*/nodes-*.json`에 기록한다.
 이는 32대 동시 통신이나 자동 전환 SLO 검증을 의미하지 않는다.
+
+`./scripts/test-m3-control-isolation.sh`는 실제 controller를 relay0과 같은 namespace에
+두는 배치와 별도 namespace에 두는 배치를 모두 시험한다. 두 relay의 독립 mTLS 신원,
+controller 단절 중 유효 승인 유지, supervisor 사망·offline 재시작, 실제 승인 만료와
+새 승인 복구를 별도 uplink TCP로 검사한다. [구성과 판정](../../docs/validation/m3-control-isolation.md)에
+fixture 경로 선택과 제품 자동전환의 경계, 재사용 입력·결과를 명시한다.

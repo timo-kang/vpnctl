@@ -25,14 +25,14 @@ import (
 // Real controller process, local authenticated admin IPC and enrolled mTLS clients.
 // All secrets stay under private, never under the exported result directory.
 type m3Controller struct {
-	t                               *testing.T
-	private, results, data, address string
-	process                         *networkProcess
+	t                                   *testing.T
+	private, results, data, address, ns string
+	process                             *networkProcess
 }
 
 func newM3Controller(t *testing.T, ns, address, private, results string) *m3Controller {
 	t.Helper()
-	f := &m3Controller{t: t, private: private, results: results, data: filepath.Join(private, "controller"), address: address}
+	f := &m3Controller{t: t, private: private, results: results, ns: ns, data: filepath.Join(private, "controller"), address: address}
 	_, public := wgKeyPair(t)
 	cfg := config.Config{Controller: &config.ControllerConfig{
 		Listen: address + ":9443", DataDir: f.data, VPNCIDR: "10.77.0.0/24",
@@ -43,13 +43,7 @@ func newM3Controller(t *testing.T, ns, address, private, results string) *m3Cont
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatal(err)
 	}
-	f.process = startNetworkProcess(t, ns, filepath.Join(private, "controller.log"), nil, integrationBinary(t), "controller", "init", "--config", path)
-	eventually(t, 8*time.Second, "real controller IPC", func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_, err := api.Admin(ctx, f.data, api.AdminRequest{Operation: "pki.status"})
-		return err
-	})
+	f.start()
 	t.Cleanup(func() {
 		// Controller logs contain a bootstrap token; export only redacted lines.
 		b, _ := os.ReadFile(f.process.log)
@@ -64,6 +58,21 @@ func newM3Controller(t *testing.T, ns, address, private, results string) *m3Cont
 		}
 	})
 	return f
+}
+
+// Reuse the persisted identity/catalog on restart, including expired approvals.
+func (f *m3Controller) start() {
+	f.t.Helper()
+	if f.process != nil && !f.process.stopped {
+		f.t.Fatal("controller already running")
+	}
+	f.process = startNetworkProcess(f.t, f.ns, filepath.Join(f.private, "controller.log"), nil, integrationBinary(f.t), "controller", "init", "--config", filepath.Join(f.private, "controller.yaml"))
+	eventually(f.t, 8*time.Second, "real controller IPC", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := api.Admin(ctx, f.data, api.AdminRequest{Operation: "pki.status"})
+		return err
+	})
 }
 
 func (f *m3Controller) admin(req api.AdminRequest) api.AdminResponse {

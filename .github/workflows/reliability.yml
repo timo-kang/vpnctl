@@ -178,13 +178,34 @@ jobs:
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-network-results
           VPNCTL_RACE: '0'
           VPNCTL_TEST_PREVIOUS_BINARY: ${{ runner.temp }}/vpnctl-previous
-        run: ./scripts/test-netns.sh -test.skip='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale)$'
+        run: ./scripts/test-netns.sh -test.skip='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale|ControlIsolation)$'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: wireguard-measurements
           path: ${{ runner.temp }}/vpnctl-network-results
           if-no-files-found: warn
+          retention-days: 14
+
+  m3-control-isolation:
+    name: M3 separate and colocated controller faults
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Real mTLS, two relays, two underlays and offline expiry
+        env:
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-control-isolation
+        run: ./scripts/test-m3-control-isolation.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: m3-control-isolation
+          path: ${{ runner.temp }}/vpnctl-control-isolation
+          if-no-files-found: error
           retention-days: 14
 
   m3-lease-matrix:

@@ -20,6 +20,8 @@
 도달할 수 있으면 VPN을 사용한다. 이용 가능한 물리 경로가 모두 없으면 `no_uplink`다.
 controller는 identity/승인/설정 발행, relay는 패킷 전달, node는 로컬 경로 적용을 맡는다.
 controller와 relay는 같은 호스트에 배치할 수 있지만 장애 상태와 관측 identity는 분리한다.
+[Controller 배치 통합 시험](../validation/m3-control-isolation.md)은 동일·별도 namespace
+배치에서 실제 인증 API와 uplink 경로를 각각 중단하여 독립성과 승인 만료를 검사한다.
 
 ```mermaid
 flowchart LR
