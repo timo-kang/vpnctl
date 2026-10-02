@@ -109,10 +109,10 @@ func TestAdminRemovalOverUnixAndTLSRevokesIdentityAcrossRestart(t *testing.T) {
 	a, oldIP, aTLS := enrollTestClient(t, h, bootstrap, tlsCfg, tokens[0], "a")
 	b, _, _ := enrollTestClient(t, h, bootstrap, tlsCfg, tokens[0], "b")
 	ctx := context.Background()
-	if err := a.SubmitDirectResult(ctx, api.DirectResultRequest{NodeID: "a", PeerID: "b", Success: true}); err != nil {
+	if err := a.SubmitDirectResult(ctx, directRequestForTest(t, s, "a", "b", true)); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.SubmitDirectResult(ctx, api.DirectResultRequest{NodeID: "b", PeerID: "a", Success: true}); err != nil {
+	if err := b.SubmitDirectResult(ctx, directRequestForTest(t, s, "b", "a", true)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := api.Admin(ctx, dir, api.AdminRequest{Operation: "node.remove", NodeID: "a"}); err != nil {
@@ -453,7 +453,7 @@ func TestRemovedPlainNodeCannotRecreateDirectState(t *testing.T) {
 	h := httptest.NewServer(s.httpHandler())
 	defer h.Close()
 	client := api.NewClient(h.URL)
-	if err := client.SubmitDirectResult(context.Background(), api.DirectResultRequest{NodeID: "a", PeerID: "b", Success: true}); err != nil {
+	if err := client.SubmitDirectResult(context.Background(), directRequestForTest(t, s, "a", "b", true)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.removeNode("a"); err != nil {

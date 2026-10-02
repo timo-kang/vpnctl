@@ -72,7 +72,7 @@ func TestCancelledDirectResultCannotOverwriteNewDesiredState(t *testing.T) {
 			t.Error("worker failed to drain")
 		}
 	}()
-	peer := api.PeerCandidate{ID: "peer", PubKey: "peer-key", VPNIP: "10.7.0.3/32", Endpoint: "127.0.0.1:51821", PublicAddr: remote.LocalAddr(), ProbePort: addr.Port, P2PReady: true}
+	peer := api.PeerCandidate{ID: "peer", PubKey: "peer-key", DirectGeneration: "generation-1", ProbeToken: "ticket-1", VPNIP: "10.7.0.3/32", Endpoint: "127.0.0.1:51821", PublicAddr: remote.LocalAddr(), ProbePort: addr.Port, P2PReady: true}
 	updates <- directSnapshot{peers: []api.PeerCandidate{peer}}
 	select {
 	case peers := <-applied:

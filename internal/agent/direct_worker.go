@@ -161,6 +161,12 @@ func sameDirectProbeInputs(before, after directSnapshot) bool {
 	for i, old := range before.peers {
 		next := after.peers[i]
 		old.P2PReady, next.P2PReady = false, false
+		// Tickets/generations authorize results, not UDP measurements. A failure
+		// on one pair must not cancel every unrelated probe in this round.
+		// Keep the original ticket: the controller rejects superseded results.
+		// Actual input changes and readiness withdrawals still cancel below.
+		old.ProbeToken, next.ProbeToken = "", ""
+		old.DirectGeneration, next.DirectGeneration = "", ""
 		if old != next {
 			return false
 		}
@@ -174,7 +180,7 @@ func desiredDirectPeers(cfg config.NodeConfig, candidates []api.PeerCandidate) m
 	for _, peer := range candidates {
 		allowed := normalizeHostIP(peer.VPNIP)
 		// The WG endpoint must never be replaced by the STUN probe socket address.
-		if !peer.P2PReady || allowed == "" || peer.PubKey == "" || peer.Endpoint == "" {
+		if !peer.P2PReady || peer.DirectGeneration == "" || peer.ProbeToken == "" || allowed == "" || peer.PubKey == "" || peer.Endpoint == "" {
 			continue
 		}
 		if owner, ok := allowedOwner[allowed]; ok && owner != peer.ID {
@@ -228,7 +234,7 @@ func measureDirect(ctx context.Context, client *api.Client, cfg config.NodeConfi
 					}
 					// Keep the existing conservative readiness decision independent of
 					// the history denominator: local errors still invalidate readiness.
-					result := api.DirectResultRequest{NodeID: nodeID, PeerID: peer.ID, Success: err == nil}
+					result := api.DirectResultRequest{NodeID: nodeID, PeerID: peer.ID, Success: err == nil, ProbeToken: peer.ProbeToken}
 					if err != nil {
 						result.Reason = err.Error()
 					} else {

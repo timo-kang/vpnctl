@@ -1100,26 +1100,37 @@ func directTest(args []string) {
 		fatal(fmt.Errorf("peer %q not found or missing probe address (need probe_port and either public_addr or wg_endpoint)", *peer))
 	}
 
+	probeToken := ""
+	for _, candidate := range candidates.Peers {
+		if candidate.ID == peerID {
+			probeToken = candidate.ProbeToken
+			break
+		}
+	}
 	rtt, err := direct.ProbePeer(ctx, *localAddr, peerAddr, *timeout)
 	if err != nil {
 		_ = client.SubmitDirectResult(ctx, api.DirectResultRequest{
-			NodeID:  cfg.Node.Name,
-			PeerID:  peerID,
-			Success: false,
-			RTTMs:   0,
-			Reason:  err.Error(),
+			ProbeToken: probeToken,
+			NodeID:     cfg.Node.Name,
+			PeerID:     peerID,
+			Success:    false,
+			RTTMs:      0,
+			Reason:     err.Error(),
 		})
 		fatal(err)
 	}
 
+	if err := client.SubmitDirectResult(ctx, api.DirectResultRequest{
+		ProbeToken: probeToken,
+		NodeID:     cfg.Node.Name,
+		PeerID:     peerID,
+		Success:    true,
+		RTTMs:      float64(rtt.Microseconds()) / 1000.0,
+		Reason:     "",
+	}); err != nil {
+		fatal(err)
+	}
 	fmt.Fprintf(os.Stdout, "direct probe ok peer=%s rtt=%s\n", peerAddr, rtt)
-	_ = client.SubmitDirectResult(ctx, api.DirectResultRequest{
-		NodeID:  cfg.Node.Name,
-		PeerID:  peerID,
-		Success: true,
-		RTTMs:   float64(rtt.Microseconds()) / 1000.0,
-		Reason:  "",
-	})
 }
 
 func handleDiscover(args []string) {

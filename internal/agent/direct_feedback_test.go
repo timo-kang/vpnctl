@@ -49,6 +49,9 @@ func TestDirectReadinessPromotionDoesNotCancelProbeFeedback(t *testing.T) {
 			return
 		}
 		io.Copy(io.Discard, r.Body)
+		if report.ProbeToken != "ticket-1" {
+			t.Errorf("measurement replaced its original ticket: %q", report.ProbeToken)
+		}
 		if report.PeerID == "peer-a" {
 			w.WriteHeader(http.StatusNoContent)
 			close(accepted)
@@ -77,7 +80,7 @@ func TestDirectReadinessPromotionDoesNotCancelProbeFeedback(t *testing.T) {
 		runDirect(ctx, client, cfg, "node", shared, updates, func(p []wireguard.Peer) error { applied <- len(p); return nil })
 	}()
 	defer func() { cancel(); <-done }()
-	peer := api.PeerCandidate{ID: "peer-a", PubKey: "peer-a-key", VPNIP: "10.7.0.3/32", Endpoint: "127.0.0.1:51821", PublicAddr: remote.LocalAddr(), ProbePort: addr.Port}
+	peer := api.PeerCandidate{ID: "peer-a", PubKey: "peer-a-key", DirectGeneration: "generation-1", ProbeToken: "ticket-1", VPNIP: "10.7.0.3/32", Endpoint: "127.0.0.1:51821", PublicAddr: remote.LocalAddr(), ProbePort: addr.Port}
 	other := peer
 	other.ID, other.PubKey, other.VPNIP = "peer-b", "peer-b-key", "10.7.0.4/32"
 	updates <- directSnapshot{peers: []api.PeerCandidate{peer, other}}
@@ -92,6 +95,9 @@ func TestDirectReadinessPromotionDoesNotCancelProbeFeedback(t *testing.T) {
 		t.Fatal("first peer was not accepted")
 	}
 	peer.P2PReady = true
+	// The unrelated pair changed authorization while its original report was
+	// pending. Preserve the measurement, without substituting the new ticket.
+	other.DirectGeneration, other.ProbeToken = "generation-2", "ticket-2"
 	updates <- directSnapshot{peers: []api.PeerCandidate{peer, other}}
 	select {
 	case n := <-applied:
@@ -114,5 +120,30 @@ func TestDirectReadinessPromotionDoesNotCancelProbeFeedback(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("probe feedback did not finish")
+	}
+}
+
+func TestDirectTicketFeedbackDoesNotStarveUnchangedMeasurements(t *testing.T) {
+	peer := api.PeerCandidate{ID: "peer", DirectGeneration: "g1", ProbeToken: "ticket1", P2PReady: true}
+	before := directSnapshot{peers: []api.PeerCandidate{peer}}
+	peer.ProbeToken = "ticket2"
+	if !preservesDirectProbeRound(before, directSnapshot{peers: []api.PeerCandidate{peer}}) {
+		t.Fatal("new ticket canceled same-generation work")
+	}
+	peer.DirectGeneration = "g2"
+	if !preservesDirectProbeRound(before, directSnapshot{peers: []api.PeerCandidate{peer}}) {
+		t.Fatal("authorization-only change canceled unchanged UDP measurements")
+	}
+}
+
+func TestDirectLegacyReadinessCannotInstallPeer(t *testing.T) {
+	peer := api.PeerCandidate{ID: "peer", PubKey: "key", VPNIP: "10.7.0.3/32", Endpoint: "192.0.2.2:51820", P2PReady: true}
+	if peers := desiredDirectPeers(config.NodeConfig{}, []api.PeerCandidate{peer}); len(peers) != 0 {
+		t.Fatal("legacy controller readiness installed direct peer")
+	}
+	peer.DirectGeneration = "g1"
+	peer.ProbeToken = "ticket1"
+	if peers := desiredDirectPeers(config.NodeConfig{}, []api.PeerCandidate{peer}); len(peers) != 1 {
+		t.Fatal("generation-bound readiness lost")
 	}
 }
