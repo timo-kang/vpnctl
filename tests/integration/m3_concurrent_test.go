@@ -39,7 +39,15 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 	second.require("refresh", -1, 0)
 	for ep := 0; ep < 8; ep++ {
 		second.require("apply", ep, 52820+ep)
+		if ep == 0 {
+			second.start()
+			// Cross the initial five-second grant while setup is still in progress.
+			// The supervisor must keep the first endpoint live for later Apply inspection.
+			time.Sleep(6 * time.Second)
+		}
 	}
+	second.ready()
+	second.watch.terminate(t)
 	// Reproduce CI's >1s cycle even on a fast host. A zero-idle supervisor
 	// used to reacquire the namespace repeatedly, starving its competitor.
 	slow := filepath.Join(ctrl.private, "slow-supervisor")
