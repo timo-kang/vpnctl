@@ -54,6 +54,23 @@ func (f *m3AuthorityFixture) snapshot() map[string]any {
 				state[key+" error"] = err.Error()
 			}
 		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		cmd := netCommand(ctx, r.ns, f.worker, "-test.run=^TestNetworkWorker$")
+		cmd.Env = append(os.Environ(), "VPNCTL_WORKER=boot-guard-snapshot")
+		b, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			state["bpf_error"] = err.Error()
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(line, "BOOTTIME_GUARDS=") {
+				var guards map[string]any
+				if json.Unmarshal([]byte(strings.TrimPrefix(line, "BOOTTIME_GUARDS=")), &guards) == nil {
+					state["bpf_guards"] = guards
+				}
+			}
+		}
 		out[r.relay] = state
 	}
 	return out

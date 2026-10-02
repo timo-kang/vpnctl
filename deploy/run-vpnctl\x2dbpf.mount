@@ -1,0 +1,12 @@
+[Unit]
+Description=Private vpnctl relay BPF object storage
+
+[Mount]
+What=bpf
+Where=/run/vpnctl-bpf
+Type=bpf
+Options=mode=0700,nosuid,nodev,noexec
+DirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

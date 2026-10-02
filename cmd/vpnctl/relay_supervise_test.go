@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"testing"
 	"time"
 
 	"vpnctl/internal/relayapply"
+	"vpnctl/internal/relaycache"
 )
 
 func TestRelaySupervisorContinuesAfterFailureAndBoundsCycles(t *testing.T) {
@@ -116,5 +118,42 @@ func TestRelaySupervisorStopsRenewingWhenOutputFails(t *testing.T) {
 		if err := runRelaySupervise(args); err == nil {
 			t.Fatal("invalid supervisor options accepted", args)
 		}
+	}
+}
+
+func TestRelaySupervisorRetriesActualCacheLockWithinCycle(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	opts := relaycache.DeploymentOptions{PrincipalID: "agent", RelayID: "r", Create: true}
+	holder, err := relaycache.OpenDeployment(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	// Hold a real flock across several retry opportunities, then release it.
+	timer := time.AfterFunc(80*time.Millisecond, func() { holder.Close() })
+	defer timer.Stop()
+	started := time.Now()
+	store, err := openSupervisedCache(ctx, func() (*relaycache.DeploymentStore, error) { return relaycache.OpenDeployment(dir, opts) })
+	if err != nil {
+		holder.Close()
+		t.Fatal("supervisor missed released cache", err)
+	}
+	defer store.Close()
+	if time.Since(started) < 70*time.Millisecond {
+		t.Fatal("cache contention not exercised")
+	}
+	short, stop := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer stop()
+	if _, err := openSupervisedCache(short, func() (*relaycache.DeploymentStore, error) { return relaycache.OpenDeployment(dir, opts) }); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("lock wait escaped cycle budget", err)
+	}
+	calls := 0
+	denied := errors.New("unsafe cache")
+	if _, err := openSupervisedCache(ctx, func() (*relaycache.DeploymentStore, error) { calls++; return nil, denied }); !errors.Is(err, denied) || calls != 1 {
+		t.Fatal("non-contention retried", calls, err)
 	}
 }

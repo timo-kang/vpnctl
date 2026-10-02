@@ -98,10 +98,10 @@ func (k *deploymentFake) Down(_ context.Context, e DeploymentEntry) error {
 	}
 	return nil
 }
-func (k *deploymentFake) Lease(_ context.Context, e DeploymentEntry, until, authenticatedAt time.Time) (DeploymentLease, error) {
+func (k *deploymentFake) Lease(_ context.Context, e DeploymentEntry, until time.Time, authenticatedAt FreshApproval) (DeploymentLease, error) {
 	v := k.objects[e.Endpoint]
 	now := k.currentTime()
-	deadline, err := leaseDeadline(v.lease.Active && now.Before(v.lease.Deadline), until, authenticatedAt, now)
+	deadline, err := leaseDeadline(v.lease.Active && now.Before(v.lease.Deadline), until, authenticatedAt.At, now)
 	if err != nil {
 		return v.lease, err
 	}

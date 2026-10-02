@@ -45,6 +45,7 @@ func TestVMWorker(t *testing.T) {
 	}
 	var mu sync.Mutex
 	delays := map[string]string{}
+	delayTarget := ""
 	stop := func() {
 		for _, r := range f.recipients {
 			if r.watch != nil && !r.watch.stopped {
@@ -145,6 +146,11 @@ func TestVMWorker(t *testing.T) {
 			}
 			result = snapshot()
 		case "/delay-start":
+			var fault struct{ Phase, Target string }
+			if err := json.NewDecoder(req.Body).Decode(&fault); err != nil || (fault.Phase != "prepare" && fault.Phase != "activate") || (fault.Target != "parent" && fault.Target != "child" && fault.Target != "group") {
+				t.Fatal("invalid delay fault", err)
+			}
+			delayTarget = fault.Target
 			stop()
 			rows := []map[string]any{}
 			for _, r := range f.recipients {
@@ -156,7 +162,7 @@ func TestVMWorker(t *testing.T) {
 					t.Fatal(err)
 				}
 				delays[r.relay] = dir
-				r.start("PATH="+dir+":"+os.Getenv("PATH"), "VPNCTL_VM_NFT_DELAY="+dir)
+				r.start("PATH="+dir+":"+os.Getenv("PATH"), "VPNCTL_VM_NFT_DELAY="+dir, "VPNCTL_VM_NFT_PHASE="+fault.Phase, "VPNCTL_VM_NFT_TARGET="+fault.Target)
 				var ready map[string]any
 				eventually(t, 8*time.Second, "renewal prepared before nft commit", func() error {
 					b, err := os.ReadFile(filepath.Join(dir, "ready.json"))
@@ -165,7 +171,12 @@ func TestVMWorker(t *testing.T) {
 					}
 					return json.Unmarshal(b, &ready)
 				})
-				vmRequireStopped(t, r.watch.cmd.Process.Pid)
+				if delayTarget != "child" {
+					vmRequireStopped(t, r.watch.cmd.Process.Pid)
+				}
+				if delayTarget == "group" {
+					vmRequireStopped(t, int(ready["child"].(float64)))
+				}
 				rows = append(rows, ready)
 			}
 			result = rows
@@ -175,10 +186,44 @@ func TestVMWorker(t *testing.T) {
 			}
 			for _, dir := range delays {
 				mustWrite(t, filepath.Join(dir, "release"), "release")
+				if delayTarget == "group" {
+					b, err := os.ReadFile(filepath.Join(dir, "ready.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var ready map[string]any
+					if err := json.Unmarshal(b, &ready); err != nil {
+						t.Fatal(err)
+					}
+					child := int(ready["child"].(float64))
+					vmRequireStopped(t, child)
+					if err := syscall.Kill(-child, syscall.SIGCONT); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			rows := []map[string]any{}
 			for _, r := range f.recipients {
 				var done map[string]any
+				if delayTarget == "child" {
+					b, err := os.ReadFile(filepath.Join(delays[r.relay], "ready.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var ready map[string]any
+					if err := json.Unmarshal(b, &ready); err != nil {
+						t.Fatal(err)
+					}
+					child := int(ready["child"].(float64))
+					if err := syscall.Kill(child, 0); err != syscall.ESRCH {
+						t.Fatal("bounded command left delayed child alive", child, err)
+					}
+					if _, err := os.Stat(filepath.Join(delays[r.relay], "done.json")); !os.IsNotExist(err) {
+						t.Fatal("child unexpectedly committed", err)
+					}
+					rows = append(rows, map[string]any{"child": child, "killed_before_commit": true})
+					continue
+				}
 				eventually(t, 5*time.Second, "delayed nft completed", func() error {
 					b, err := os.ReadFile(filepath.Join(delays[r.relay], "done.json"))
 					if err != nil {
@@ -186,8 +231,10 @@ func TestVMWorker(t *testing.T) {
 					}
 					return json.Unmarshal(b, &done)
 				})
-				if done["exit"] != float64(0) {
-					t.Fatal("delayed nft failed", done)
+				// A conditional continuation may be rejected by the kernel. Record
+				// the actual exit and prove blocked TCP independently below.
+				if done["exit"] != float64(0) && done["exit"] != float64(1) {
+					t.Fatal("unexpected nft execution failure", done)
 				}
 				vmRequireStopped(t, r.watch.cmd.Process.Pid)
 				rows = append(rows, done)
@@ -221,7 +268,7 @@ func TestVMWorker(t *testing.T) {
 				f.controller.grant(r.relay, "")
 			}
 			result = map[string]any{"withdrawn": true}
-		case "/downgrade":
+		case "/downgrade", "/lease-v1-downgrade", "/lease-v2-downgrade":
 			stop()
 			rows := []map[string]any{}
 			for _, r := range f.recipients {
@@ -232,6 +279,12 @@ func TestVMWorker(t *testing.T) {
 				links := netOutput(t, r.ns, "ip", "-j", "link", "show")
 				a := r.args("inspect", "")
 				a[0] = "/opt/vpnctl-vm/vpnctl-legacy"
+				if strings.HasPrefix(req.URL.Path, "/lease-v1-") {
+					a[0] = "/opt/vpnctl-vm/vpnctl-lease-v1"
+				}
+				if strings.HasPrefix(req.URL.Path, "/lease-v2-") {
+					a[0] = "/opt/vpnctl-vm/vpnctl-lease-v2"
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				out, err := netCommand(ctx, r.ns, a...).CombinedOutput()
 				cancel()
@@ -242,7 +295,7 @@ func TestVMWorker(t *testing.T) {
 				rows = append(rows, map[string]any{"relay": r.relay, "rejected": true, "journal_sha256": fmt.Sprintf("%x", sha256.Sum256(before)), "reason": string(out)})
 			}
 			result = rows
-		case "/legacy-upgrade":
+		case "/legacy-upgrade", "/lease-v1-upgrade", "/lease-v2-upgrade":
 			stop()
 			rows := []map[string]any{}
 			for _, r := range f.recipients {
@@ -256,6 +309,12 @@ func TestVMWorker(t *testing.T) {
 				for ep := 0; ep < 2; ep++ {
 					a := r.args("apply", fmt.Sprintf("ep%d", ep))
 					a[0] = "/opt/vpnctl-vm/vpnctl-legacy"
+					if strings.HasPrefix(req.URL.Path, "/lease-v1-") {
+						a[0] = "/opt/vpnctl-vm/vpnctl-lease-v1"
+					}
+					if strings.HasPrefix(req.URL.Path, "/lease-v2-") {
+						a[0] = "/opt/vpnctl-vm/vpnctl-lease-v2"
+					}
 					a = append(a, "--key-file", r.key, "--key-generation", "1", "--listen-port", fmt.Sprint(51820+ep))
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					out, err := netCommand(ctx, r.ns, a...).CombinedOutput()
@@ -265,7 +324,14 @@ func TestVMWorker(t *testing.T) {
 					}
 				}
 				old, err := os.ReadFile(filepath.Join(r.cache, "peers.json"))
-				if err != nil || bytes.Contains(old, []byte("lease_version")) || len(strings.Fields(netOutput(t, r.ns, "wg", "show", "interfaces"))) != 2 {
+				validOld := !bytes.Contains(old, []byte("lease_version"))
+				if req.URL.Path == "/lease-v1-upgrade" {
+					validOld = bytes.Contains(old, []byte(`"lease_version":1`)) && !bytes.Contains(old, []byte(`"lease_version":2`))
+				}
+				if req.URL.Path == "/lease-v2-upgrade" {
+					validOld = bytes.Contains(old, []byte(`"lease_version":2`)) && !bytes.Contains(old, []byte(`"lease_version":3`))
+				}
+				if err != nil || !validOld || len(strings.Fields(netOutput(t, r.ns, "wg", "show", "interfaces"))) != 2 {
 					t.Fatal("legacy peer fixture not installed", err)
 				}
 				r.start()

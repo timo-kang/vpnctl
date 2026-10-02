@@ -25,7 +25,7 @@ type deploymentBackend interface {
 	Step(context.Context, DeploymentEntry, string, string) error
 	Down(context.Context, DeploymentEntry) error
 	Remove(context.Context, DeploymentEntry) error
-	Lease(context.Context, DeploymentEntry, time.Time, time.Time) (DeploymentLease, error)
+	Lease(context.Context, DeploymentEntry, time.Time, FreshApproval) (DeploymentLease, error)
 	LeaseStatus(context.Context, DeploymentEntry) (DeploymentLease, error)
 }
 type DeploymentEngine struct {
@@ -48,7 +48,7 @@ func OpenDeployment(cache *relaycache.DeploymentStore) (*DeploymentEngine, error
 		unlock()
 		return nil, err
 	}
-	e, err := openDeploymentEngine(cache, d, deploymentKernel{kernel{run: command}})
+	e, err := openDeploymentEngine(cache, d, bootDeploymentKernel{deploymentKernel{kernel{run: command}}})
 	if err != nil {
 		unlock()
 		return nil, err
@@ -120,6 +120,8 @@ func (e *DeploymentEngine) result(state, reason string) DeploymentResult {
 		r.Endpoints = append(r.Endpoints, DeploymentEndpointResult{EndpointID: v.Endpoint, Interface: v.Interface, Phase: v.Phase, Peers: len(v.Peers)})
 		if v.LeaseVersion == 0 {
 			r.ExpiryEnforcement = "legacy_on_command"
+		} else if v.LeaseVersion < 3 {
+			r.ExpiryEnforcement = "legacy_upgrade_required"
 		}
 	}
 	return r
@@ -257,7 +259,12 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 		if x != nil || y != nil || !sameDeployment(v, w) || ctx.Err() != nil {
 			err = errors.New("approval expired or changed before commit")
 		} else {
-			_, err = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, time.Now().UTC())
+			fresh, clockErr := ObserveApproval()
+			if clockErr != nil {
+				err = clockErr
+			} else {
+				_, err = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, fresh)
+			}
 		}
 	}
 	if err != nil {
@@ -332,7 +339,7 @@ func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCl
 
 // Maintain renews only already applied, still approved resources. A fresh
 // authenticated response is required to automatically rearm an expired lease.
-func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt time.Time) (DeploymentResult, error) {
+func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshApproval) (DeploymentResult, error) {
 	if !e.mu.TryLock() {
 		return DeploymentResult{}, relaycache.ErrBusy
 	}
