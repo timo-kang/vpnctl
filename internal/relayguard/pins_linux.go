@@ -6,12 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/cilium/ebpf"
-	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cilium/ebpf"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // Provisioned by deployment, never mounted by the relay process. Operations

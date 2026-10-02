@@ -511,6 +511,7 @@ def main():
         cases += [('pause-fenced', 'stopped', 0, rtc) for rtc in ('host', 'vm')]
         cases += [(case, 'stopped', 0, 'host') for case in ('suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'pause-expired')]
         cases += [(case, 'stopped', delta, 'host') for case in ('delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend') for delta in (0, -31)]
+        cases += [('delayed-suspend', 'stopped', delta, 'host') for delta in (-2, -600)]
     verdicts = []
     host_before = host_clock()
     for case, mode, delta, rtc in cases:

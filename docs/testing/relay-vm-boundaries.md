@@ -153,7 +153,7 @@ dirty 실행은 탐색 증거이며 최종 commit의 결과로 주장하지 않�
 QMP stop은 S3가 아니다. 현재 QEMU 조합에서는 `rtc clock=host`여도 QMP pause 동안
 Linux의 모든 clock이 멈췄다. RTC device가 진행하는 것과 Linux realtime이 재개 전에
 동기화되는 것은 다르다. 12초 및 실제 승인 기한을 넘는 pause 뒤에도 기존·새 TCP가
-통과했다. 게스트 내부의 두 timer만으로 외부 경과 시간을 알아낼 수 없다.
+통과했다. 게스트 내부의 realtime·monotonic·BOOTTIME만으로 외부 경과 시간을 알아낼 수 없다.
 [QEMU RTC 설정](https://www.qemu.org/docs/master/system/qemu-manpage.html),
 [QMP power/state 명령](https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html).
 
@@ -218,7 +218,7 @@ systemd 255, QEMU 8.2 계열이다. 정확한 package/image 값은 실행 manife
 v3에서는 `lease-v2-upgrade`/`lease-v2-downgrade`를 추가하고 실제 v2 커밋
 `b4ba9e7793b123e4b47bd2fc5acfdf9b2698a26b`도 별도로 빌드한다. v0/v1 검증을 유지하고
 세 구버전 모두 새 journal을 변경 없이 거절하는지 확인한다.
-manifest와 guest health에 다섯 binary의 SHA256을 기록한다. `matrix`는 총 46개 경우다.
+manifest와 guest health에 다섯 binary의 SHA256을 기록한다. `matrix`는 총 48개 경우다.
 #135의 외부 시간 한계 세 경우는 완료 여부와 지원 판정을 계속 분리한다.
 
 S3와 wall rollback을 결합한 [#138](https://github.com/timo-kang/vpnctl/issues/138)은
@@ -232,7 +232,8 @@ lease v2에서도 남는 결함이다. S3 동안 nft 상대 timer는 진행하�
 
 v3는 WireGuard TC ingress/egress의 BPF 프로그램에서 절전 시간을 포함한 기한을
 검사한다. `delayed-suspend --delta -31`은 v2에서 실패한 실제 35초 S3+시계 역행을
-그대로 재현한다. 호스트의 절전·재부팅·시간 변경 명령은 실행하지 않는다.
+그대로 재현한다. 12초 S3와 0/−2/−600초 이동도 검사한다.
+호스트의 절전·재부팅·시간 변경 명령은 실행하지 않는다.
 
 snapshot은 별도 읽기 전용 netns worker로 TC 두 부착점, 프로그램 명령어 태그,
 map 소유자와 원시 BOOTTIME 기한을 확인한다. nft가 여전히 통과 가능해도 검증한 BPF
