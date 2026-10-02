@@ -55,8 +55,14 @@ func convergeCATransition(ctx context.Context, call func(context.Context, api.Ad
 	same := func(a, b *pki.AuthorityStatus) bool {
 		return a.Generation == b.Generation && a.Phase == b.Phase && a.Active == b.Active && a.Previous == b.Previous && a.Pending == b.Pending
 	}
-	current := before
-	var last error
+	current, observed := before, before
+	var last, mutationErr error
+	failed := func(err error) (*pki.AuthorityStatus, error) {
+		if mutationErr != nil {
+			err = errors.Join(err, fmt.Errorf("last %s attempt: %w", operation, mutationErr))
+		}
+		return observed, err
+	}
 	for ctx.Err() == nil {
 		if current != nil {
 			if same(current, &want) {
@@ -66,6 +72,7 @@ func convergeCATransition(ctx context.Context, call func(context.Context, api.Ad
 				return nil, fmt.Errorf("unexpected CA transition: generation=%d phase=%s", current.Generation, current.Phase)
 			}
 			current, last = request(operation)
+			mutationErr = last
 			if last == nil {
 				if !same(current, &want) {
 					return nil, errors.New("successful CA command returned an unexpected transition")
@@ -75,16 +82,18 @@ func convergeCATransition(ctx context.Context, call func(context.Context, api.Ad
 		}
 		select {
 		case <-ctx.Done():
-			return nil, errors.Join(ctx.Err(), last)
+			return failed(errors.Join(ctx.Err(), last))
 		case <-time.After(100 * time.Millisecond):
 		}
 		current, err = request("pki.status")
 		if err != nil {
 			current = nil // Never retry a mutation while its outcome is unknown.
 			last = err
+		} else {
+			observed = current
 		}
 	}
-	return nil, errors.Join(ctx.Err(), last)
+	return failed(errors.Join(ctx.Err(), last))
 }
 
 func TestCATransitionLostResponse(t *testing.T) {
@@ -152,5 +161,30 @@ func TestCATransitionRejectsUnrelatedState(t *testing.T) {
 				t.Fatal("uncommitted or unrelated transition accepted")
 			}
 		})
+	}
+}
+
+func TestCATransitionPreservesRejectionAfterStatusTimeout(t *testing.T) {
+	state := pki.AuthorityStatus{Generation: 3, Phase: "overlap", Active: "new", Previous: "old"}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	reads, mutations := 0, 0
+	rejected := errors.New("node-17 has not acknowledged current trust/certificate")
+	call := func(attempt context.Context, req api.AdminRequest) (api.AdminResponse, error) {
+		if req.Operation == "pki.status" {
+			reads++
+			if reads > 1 {
+				<-attempt.Done()
+				return api.AdminResponse{}, attempt.Err()
+			}
+			copy := state
+			return api.AdminResponse{PKI: &copy}, nil
+		}
+		mutations++
+		return api.AdminResponse{}, rejected
+	}
+	status, err := convergeCATransition(ctx, call, "ca.retire")
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, rejected) || status == nil || status.Generation != 3 || status.Phase != "overlap" || reads != 2 || mutations != 1 {
+		t.Fatalf("status=%+v err=%v reads=%d mutations=%d", status, err, reads, mutations)
 	}
 }

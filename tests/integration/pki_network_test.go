@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,8 @@ import (
 	"vpnctl/internal/pki"
 	uplinkobs "vpnctl/internal/uplink"
 )
+
+var pkiHistoryWarmup = flag.Duration("pki-history-warmup", 0, "accumulate real renewal history before CA transitions (0..5m)")
 
 type kernelSnapshot struct {
 	Link       string `json:"link"`
@@ -54,6 +57,9 @@ func snapshotKernel(t *testing.T, ns string) kernelSnapshot {
 
 func TestNetns_PKILifecycleUplink(t *testing.T) {
 	requireNetwork(t)
+	if *pkiHistoryWarmup < 0 || *pkiHistoryWarmup > 5*time.Minute {
+		t.Fatal("pki-history-warmup must be in [0,5m]")
+	}
 	bin := integrationBinary(t)
 	sizes := os.Getenv("VPNCTL_NETNS_SIZES")
 	if sizes == "" {
@@ -265,6 +271,12 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	for n := range before {
 		before[n] = snapshotKernel(t, namespaces[n+1])
 	}
+	if *pkiHistoryWarmup > 0 {
+		// Keep the same probe cadence and real certificate lifetimes. Only
+		// extend ordinary traffic before the unchanged 15s CA deadline.
+		phase("history_warmup")
+		time.Sleep(*pkiHistoryWarmup)
+	}
 	phase("renewal")
 	time.Sleep(time.Second)
 	eventually(t, 20*time.Second, "automatic client/server renewal over WG", func() error {
@@ -290,10 +302,19 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		trace := caTransitionTrace{Operation: op, StartedAt: time.Now().UTC()}
+		defer func() {
+			writeM3Report(t, filepath.Join(results, fmt.Sprintf("ca-%s-%d.json", op, trace.StartedAt.UnixNano())), trace)
+		}()
 		status, err := convergeCATransition(ctx, func(ctx context.Context, req api.AdminRequest) (api.AdminResponse, error) {
-			return api.Admin(ctx, ctrlDir, req)
+			began := time.Now()
+			r, e := api.Admin(ctx, ctrlDir, req)
+			trace.record(req.Operation, began, r.PKI, e, size)
+			return r, e
 		}, op)
+		trace.DurationMS = time.Since(trace.StartedAt).Milliseconds()
 		if err != nil {
+			trace.Error = err.Error()
 			t.Fatalf("%s did not converge within 15s: %v", op, err)
 		}
 		return status
@@ -551,8 +572,12 @@ func evaluateNetworkEvents(t *testing.T, dir string, size int) {
 	data, _ := json.MarshalIndent(summaries, "", "  ")
 	mustWrite(t, filepath.Join(dir, "summary.json"), string(data))
 	total, failed := 0, 0
+	planned := []string{"renewal", "revocation", "rotation", "rollback", "slow_reconcile", "recovered"}
+	if *pkiHistoryWarmup > 0 {
+		planned = append(planned, "history_warmup")
+	}
 	for n := 0; n < size; n++ {
-		for _, phase := range []string{"renewal", "revocation", "rotation", "rollback", "slow_reconcile", "recovered"} {
+		for _, phase := range planned {
 			for _, kind := range []string{"udp", "tcp", "https"} {
 				key := fmt.Sprintf("node-%d/%s/%s", n, phase, kind)
 				s := summaries[key]
