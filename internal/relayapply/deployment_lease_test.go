@@ -124,6 +124,10 @@ func TestLeaseCleanupConflictDoesNotStarveApprovedEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := k.objects["ep1"].lease.Deadline
+			// Compare renewal across distinct whole-second deadlines instead of
+			// relying on the initial short grant being the first recorded lease.
+			clock := time.Now().Add(2 * time.Second)
+			k.now = func() time.Time { return clock }
 			e.backend = failedRemovalBackend{k, "ep0"}
 			if mode == "status-failure" {
 				e.cache = &failedLeaseRecheckCache{deploymentCache: c}
@@ -450,5 +454,56 @@ func TestLeaseSupervisionRereadsFinalLease(t *testing.T) {
 	e.backend = backend
 	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Now()}); err == nil || r.KernelReady || len(r.Endpoints) != 1 || r.Endpoints[0].Lease == nil || r.Endpoints[0].Lease.Active {
 		t.Fatal("reported renewed lease without reading its final state", r, err)
+	}
+}
+
+type continuationBackend struct {
+	deploymentBackend
+	fake  *deploymentFake
+	fresh []FreshApproval
+	delay time.Duration
+	clock time.Time
+}
+
+func (b *continuationBackend) Lease(ctx context.Context, e DeploymentEntry, expiry time.Time, fresh FreshApproval) (DeploymentLease, error) {
+	b.fresh = append(b.fresh, fresh)
+	if len(b.fresh) == 2 {
+		b.clock = b.clock.Add(b.delay)
+		b.fake.now = func() time.Time { return b.clock }
+	}
+	return b.deploymentBackend.Lease(ctx, e, expiry, fresh)
+}
+func TestRearmedLeaseContinuationCannotUseFreshApprovalAgain(t *testing.T) {
+	for _, delay := range []time.Duration{0, 6 * time.Second} {
+		t.Run(delay.String(), func(t *testing.T) {
+			e, k, _, _, options, _ := deploymentFixture(t, 1)
+			if _, err := e.Apply(context.Background(), options); err != nil {
+				t.Fatal(err)
+			}
+			v := k.objects[options.EndpointID]
+			v.lease = DeploymentLease{}
+			k.objects[options.EndpointID] = v
+			clock := time.Now().UTC()
+			k.now = func() time.Time { return clock }
+			backend := &continuationBackend{deploymentBackend: k, fake: k, delay: delay, clock: clock}
+			e.backend = backend
+			out, err := e.Maintain(context.Background(), FreshApproval{At: clock, BootNS: 123})
+			if len(backend.fresh) != 2 || !backend.fresh[1].At.IsZero() || backend.fresh[1].BootNS != 0 {
+				t.Fatal("continuation reused a fresh approval", backend.fresh)
+			}
+			if delay == 0 {
+				if err != nil || !out.KernelReady || !out.Endpoints[0].Lease.Deadline.After(clock.Add(DeploymentRearmWindow)) {
+					t.Fatal("live short grant did not continue", out, err)
+				}
+			} else {
+				if !errors.Is(err, ErrLeaseExpired) || out.KernelReady {
+					t.Fatal("expired short grant was rearmed", out, err)
+				}
+				status, _ := k.LeaseStatus(context.Background(), v.entry)
+				if status.Active {
+					t.Fatal("delayed continuation reopened expired lease")
+				}
+			}
+		})
 	}
 }

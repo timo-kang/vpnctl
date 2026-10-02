@@ -157,6 +157,7 @@ func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, ex
 	if boot != nil {
 		state.Active = state.Active && boot.Active
 	}
+	rearmed := !state.Active
 	authenticatedAt := authenticated.At
 	deadline, err := leaseDeadline(state.Active, expiry, authenticatedAt, started.UTC())
 	if err != nil {
@@ -251,5 +252,6 @@ func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, ex
 			err = ErrLeaseExpired
 		}
 	}
+	state.rearmed = rearmed && err == nil && state.Active
 	return state, err
 }

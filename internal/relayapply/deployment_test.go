@@ -101,11 +101,12 @@ func (k *deploymentFake) Down(_ context.Context, e DeploymentEntry) error {
 func (k *deploymentFake) Lease(_ context.Context, e DeploymentEntry, until time.Time, authenticatedAt FreshApproval) (DeploymentLease, error) {
 	v := k.objects[e.Endpoint]
 	now := k.currentTime()
-	deadline, err := leaseDeadline(v.lease.Active && now.Before(v.lease.Deadline), until, authenticatedAt.At, now)
+	active := v.lease.Active && now.Before(v.lease.Deadline)
+	deadline, err := leaseDeadline(active, until, authenticatedAt.At, now)
 	if err != nil {
 		return v.lease, err
 	}
-	v.lease = DeploymentLease{Active: true, Deadline: deadline}
+	v.lease = DeploymentLease{Active: true, Deadline: deadline, rearmed: !active}
 	k.objects[e.Endpoint] = v
 	return v.lease, nil
 }

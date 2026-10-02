@@ -23,6 +23,7 @@ var ErrLeaseExpired = errors.New("relay lease expired; fresh controller approval
 type DeploymentLease struct {
 	Active   bool      `json:"active"`
 	Deadline time.Time `json:"deadline"`
+	rearmed  bool      // this call established a fresh short grant, not a continuation
 	set      string
 	staged   []string
 	Boot     *relayguard.State `json:"boottime,omitempty"`

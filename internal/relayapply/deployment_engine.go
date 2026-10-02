@@ -266,7 +266,7 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 			if clockErr != nil {
 				err = clockErr
 			} else {
-				_, err = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, fresh)
+				_, err = e.renewLease(ctx, v, r.Deployment.ExpiresAt, fresh)
 			}
 		}
 	}
@@ -346,6 +346,19 @@ func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCl
 	return out, err
 }
 
+// A fresh rearm has a deliberately short deadline. Complete one normal,
+// conditional continuation while that kernel grant is still active rather than
+// waiting for another full multi-endpoint cycle. The second call receives NO
+// fresh approval: expiry, process pause or failed readback cannot rearm it.
+// Both nft's old-element condition and BPF's prior-deadline CAS remain required.
+func (e *DeploymentEngine) renewLease(ctx context.Context, v DeploymentEntry, expiry time.Time, fresh FreshApproval) (DeploymentLease, error) {
+	state, err := e.backend.Lease(ctx, v, expiry, fresh)
+	if err != nil || !state.Active || !state.rearmed {
+		return state, err
+	}
+	return e.backend.Lease(ctx, v, expiry, FreshApproval{})
+}
+
 // Maintain renews only already applied, still approved resources. A fresh
 // authenticated response is required to automatically rearm an expired lease.
 func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshApproval) (DeploymentResult, error) {
@@ -385,7 +398,7 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 			continue
 		}
 		checked[v.Alias] = true
-		_, x = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, authenticatedAt)
+		_, x = e.renewLease(ctx, v, r.Deployment.ExpiresAt, authenticatedAt)
 		if x != nil && !errors.Is(x, ErrLeaseExpired) {
 			x = errors.Join(x, e.backend.Down(ctx, v))
 		}
