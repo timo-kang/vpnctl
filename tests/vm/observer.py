@@ -46,6 +46,13 @@ def open_lease_guards(snapshot):
             cutoff = datetime.datetime.fromisoformat(next(iter(cutoffs))).replace(tzinfo=datetime.timezone.utc)
             timer = sets[next(iter(selected))]
             if now < cutoff and any(e['elem'].get('expires', 0) > 0 for e in timer.get('elem', [])):
+                guard = kernel[relay].get('bpf_guards', {}).get('vd' + table[2:], {})
+                boot = guard.get('state', {})
+                # The read validates both attachments, code and map owner.
+                if (not guard.get('error') and boot.get('program_id', 0) > 0
+                        and boot.get('map_id', 0) > 0 and boot.get('observed_ns', 0) > 0
+                        and 0 <= boot.get('deadline_ns', -1) <= boot['observed_ns']):
+                    continue
                 opened.append({'relay': relay, 'table': table, 'selected': timer['name'], 'cutoff': cutoff.isoformat(), 'elements': timer['elem']})
     return opened
 
@@ -448,10 +455,10 @@ def exercise(vm, case, mode, delta, result):
         result['fresh_install'] = vm.probes(('new',))
         if not all(p['ok'] for p in result['fresh_install']):
             raise RuntimeError('fresh installation after storage failure/reboot failed')
-    elif case in ('downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade'):
+    elif case in ('downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade'):
         result['version_check'] = vm.call('fixture/' + case)
         vm.record('journal-version-check', result['version_check'])
-        if case in ('legacy-upgrade', 'lease-v1-upgrade'):
+        if case in ('legacy-upgrade', 'lease-v1-upgrade', 'lease-v2-upgrade'):
             result['legacy_blocked'] = vm.closed()
             result['upgrade_recovery'] = vm.recover()
             vm.call('fixture/stop')
@@ -468,7 +475,7 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
@@ -502,7 +509,7 @@ def main():
         cases += [('clock', mode, delta, 'host') for mode in ('stopped', 'running') for delta in (-2, -31, -600, 2, 600)]
         cases += [('pause', 'stopped', 0, rtc) for rtc in ('host', 'vm')]
         cases += [('pause-fenced', 'stopped', 0, rtc) for rtc in ('host', 'vm')]
-        cases += [(case, 'stopped', 0, 'host') for case in ('suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'pause-expired')]
+        cases += [(case, 'stopped', 0, 'host') for case in ('suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'pause-expired')]
         cases += [(case, 'stopped', delta, 'host') for case in ('delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend') for delta in (0, -31)]
     verdicts = []
     host_before = host_clock()

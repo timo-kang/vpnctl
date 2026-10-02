@@ -47,6 +47,8 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "boot-guard-snapshot":
+		err = snapshotBootGuards()
 	case "vm-probe":
 		err = serveVMProbe()
 	case "lease-lock":

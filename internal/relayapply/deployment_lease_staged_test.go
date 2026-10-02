@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"vpnctl/internal/relayguard"
 )
 
 func stagedLeaseTestRows(e DeploymentEntry, deadline time.Time, selected, pending string) []object {
@@ -38,6 +40,7 @@ func TestStagedLeaseCancelledPreparationStaysClosedAndIsReclaimed(t *testing.T) 
 	approval, _ := engine.cache.Status()
 	e, _ := desiredDeployment(approval, options.EndpointID, options.ListenPort)
 	e.Alias, e.Group, e.LinkIndex, _ = token()
+	e.LeaseVersion = 2
 	selected := "lease_00000000000000000000000000000001"
 	pending := ""
 	deadline := time.Unix(1, 0)
@@ -96,14 +99,14 @@ func TestStagedLeaseCancelledPreparationStaysClosedAndIsReclaimed(t *testing.T) 
 			return nil, errors.New("unexpected command")
 		}
 	}}}
-	if _, err := k.Lease(ctx, e, time.Now().Add(time.Hour), time.Now()); !errors.Is(err, context.Canceled) {
+	if _, err := k.Lease(ctx, e, time.Now().Add(time.Hour), FreshApproval{At: time.Now()}); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if activations != 0 || pending == "" || active {
 		t.Fatal("cancelled preparation selected", activations, pending, active)
 	}
 	cancelPreparation = false
-	if state, err := k.Lease(context.Background(), e, time.Now().Add(time.Hour), time.Now()); err != nil || !state.Active {
+	if state, err := k.Lease(context.Background(), e, time.Now().Add(time.Hour), FreshApproval{At: time.Now()}); err != nil || !state.Active {
 		t.Fatal(state, err)
 	}
 	if preparations != 2 || activations != 1 || pending != "" {
@@ -127,7 +130,7 @@ func TestLeaseV1UpgradeQuiescesInsteadOfRenewing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := upgraded.Maintain(context.Background(), time.Now()); err != nil || result.State != "empty" || len(k.objects) != 0 {
+	if result, err := upgraded.Maintain(context.Background(), FreshApproval{At: time.Now()}); err != nil || result.State != "empty" || len(k.objects) != 0 {
 		t.Fatal("v1 renewed", result, err)
 	}
 }
@@ -137,6 +140,7 @@ func TestStagedLeaseInventoryRequiresExactOwnershipAndSelection(t *testing.T) {
 	approval, _ := engine.cache.Status()
 	e, _ := desiredDeployment(approval, options.EndpointID, options.ListenPort)
 	e.Alias, e.Group, e.LinkIndex, _ = token()
+	e.LeaseVersion = 2
 	selected := "lease_00000000000000000000000000000001"
 	pending := "lease_00000000000000000000000000000002"
 	for _, mode := range []string{"valid", "metainfo", "pending-live-selected-dead", "pending-expired", "foreign-pending", "extra-rule", "duplicate", "third-set", "invalid-name", "wrong-selection", "missing-selected", "extra-property", "unbounded-pending"} {
@@ -187,5 +191,36 @@ func TestStagedLeaseInventoryRequiresExactOwnershipAndSelection(t *testing.T) {
 				t.Fatal(state)
 			}
 		})
+	}
+}
+
+func TestBootLeaseRejectsStaleApprovalEvenWhenNftStillLive(t *testing.T) {
+	engine, _, _, _, options, _ := deploymentFixture(t, 1)
+	approval, _ := engine.cache.Status()
+	e, _ := desiredDeployment(approval, options.EndpointID, options.ListenPort)
+	e.Alias, e.Group, e.LinkIndex, _ = token()
+	boot, err := relayguard.Now()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stamp := range []uint64{0, boot - uint64(6*time.Second), boot + uint64(time.Second)} {
+		deadline := time.Now().Add(8 * time.Second).Truncate(time.Second)
+		k := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
+			rows := []object{}
+			switch strings.Join(args, " ") {
+			case "-j -n -T list tables":
+				rows = leaseExpected(e, deadline)[:1]
+			case "-j -n -T list flowtables":
+			case "-j -n -T list table inet " + leaseTable(e):
+				rows = stagedLeaseTestRows(e, deadline, "lease_00000000000000000000000000000001", "")
+				rows[1]["set"].(object)["elem"] = []any{object{"elem": object{"val": e.LinkIndex, "expires": 7}}}
+			default:
+				t.Fatalf("invalid BOOTTIME proof reached mutation: %s %v %s", name, args, input)
+			}
+			return json.Marshal(object{"nftables": rows})
+		}}}
+		if state, err := k.stagedLease(context.Background(), e, time.Now().Add(time.Hour), FreshApproval{At: time.Now(), BootNS: stamp}, &relayguard.State{Active: false}); !errors.Is(err, ErrLeaseExpired) || state.Active {
+			t.Fatal(state, err)
+		}
 	}
 }

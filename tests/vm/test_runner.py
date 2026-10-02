@@ -46,6 +46,14 @@ class ObserverTests(unittest.TestCase):
             return {'kernel': {'at': '2026-10-01T00:00:01Z', 'r0': {'nft -j -n -T list ruleset': json.dumps({'nftables': rows})},
                                'r1': {'nft -j -n -T list ruleset': json.dumps({'nftables': []}), 'wg show all allowed-ips': ''}}}
         self.assertEqual(len(observer.open_lease_guards(snapshot())), 1)
+        for extra, expected in [
+                ({'state': {'program_id': 1, 'map_id': 2, 'observed_ns': 300, 'deadline_ns': 100}}, 0),
+                ({'state': {'program_id': 1, 'map_id': 2, 'observed_ns': 50, 'deadline_ns': 100}}, 1),
+                ({'error': 'missing egress', 'state': {'program_id': 1, 'map_id': 2, 'observed_ns': 300, 'deadline_ns': 100}}, 1),
+                ({'state': {'observed_ns': 300, 'deadline_ns': 100}}, 1)]:
+            evidence = snapshot()
+            evidence['kernel']['r0']['bpf_guards'] = {'vdtest': extra}
+            self.assertEqual(len(observer.open_lease_guards(evidence)), expected)
         rows[1]['set']['elem'] = []
         self.assertEqual(observer.open_lease_guards(snapshot()), [])
         rows[2]['rule']['expr'].pop()

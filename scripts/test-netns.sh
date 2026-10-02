@@ -83,7 +83,7 @@ manifest="$artifact_dir/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
 } > "$manifest"
 echo "Network test results: $artifact_dir"
 docker run "${docker_limits[@]}" --rm --init --entrypoint /bin/sh --name "$container_name" --network none \
-    --cap-add NET_ADMIN --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
+    --cap-add NET_ADMIN --cap-add BPF --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
     --mount "type=bind,src=$build_dir,dst=/test,readonly" \
     --mount "type=bind,src=$artifact_dir,dst=/results" \
     "${work_mount[@]}" \
@@ -92,7 +92,7 @@ docker run "${docker_limits[@]}" --rm --init --entrypoint /bin/sh --name "$conta
     -e VPNCTL_SOAK_PROFILE="${VPNCTL_SOAK_PROFILE:-auto}" -e VPNCTL_SOAK_DURATION="${VPNCTL_SOAK_DURATION:-}" -e VPNCTL_SOAK_NODES="${VPNCTL_SOAK_NODES:-}" \
     -e VPNCTL_SOAK_PHASE_INTERVAL="${VPNCTL_SOAK_PHASE_INTERVAL:-}" -e VPNCTL_SOAK_REJOIN_ONLY="${VPNCTL_SOAK_REJOIN_ONLY:-0}" \
     -e GORACE=atexit_sleep_ms=0 -e VPNCTL_RESULT_UID="$(id -u)" -e VPNCTL_RESULT_GID="$(id -g)" \
-    "$image_id" -c 'status=0; /test/integration.test "$@" || status=$?; chown -R "$VPNCTL_RESULT_UID:$VPNCTL_RESULT_GID" /results; if [ -d /work ]; then chown -R "$VPNCTL_RESULT_UID:$VPNCTL_RESULT_GID" /work; fi; exit "$status"' \
+    "$image_id" -c 'mkdir -m 700 /run/vpnctl-bpf && mount -t bpf -o mode=0700,nosuid,nodev,noexec bpf /run/vpnctl-bpf || exit 1; status=0; /test/integration.test "$@" || status=$?; chown -R "$VPNCTL_RESULT_UID:$VPNCTL_RESULT_GID" /results; if [ -d /work ]; then chown -R "$VPNCTL_RESULT_UID:$VPNCTL_RESULT_GID" /work; fi; exit "$status"' \
     sh -test.v -test.timeout=15m "$@" &
 docker_pid=$!
 wait "$docker_pid"

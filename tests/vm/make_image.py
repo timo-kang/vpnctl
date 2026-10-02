@@ -14,7 +14,7 @@ assert not (root / '.dockerenv').exists() and not list((root / 'run').iterdir())
 (root / 'etc/hostname').write_text('vpnctl-vm\n')
 (root / 'etc/hosts').write_text('127.0.0.1 localhost\n127.0.1.1 vpnctl-vm\n')
 (root / 'etc/machine-id').write_text('')
-for name in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1'):
+for name in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1', 'vpnctl-lease-v2'):
     shutil.copyfile('/input/' + name, root / 'opt/vpnctl-vm' / name)
     (root / 'opt/vpnctl-vm' / name).chmod(0o755)
 kernels = sorted((root / 'boot').glob('vmlinuz-*'))
@@ -34,4 +34,4 @@ def digest(p):
         return hashlib.file_digest(f, 'sha256').hexdigest()
 (out / 'image.json').write_text(json.dumps({'kernel': kernel.name,
     'sha256': {n: digest(out / n) for n in ('vmlinuz', 'initrd', 'guest.qcow2')},
-    'binaries': {n: digest(root / 'opt/vpnctl-vm' / n) for n in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1')}}, indent=2) + '\n')
+    'binaries': {n: digest(root / 'opt/vpnctl-vm' / n) for n in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1', 'vpnctl-lease-v2')}}, indent=2) + '\n')

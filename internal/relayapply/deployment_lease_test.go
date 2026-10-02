@@ -125,7 +125,7 @@ func TestLeaseCleanupConflictDoesNotStarveApprovedEndpoint(t *testing.T) {
 				e.backend = k
 				e.cache = &failingDeploymentCache{deploymentCache: c, failAt: 1}
 			}
-			if out, err := e.Maintain(context.Background(), time.Now().UTC()); err == nil || out.KernelReady {
+			if out, err := e.Maintain(context.Background(), FreshApproval{At: time.Now().UTC()}); err == nil || out.KernelReady {
 				t.Fatal("cleanup conflict hidden", out, err)
 			}
 			if k.objects["ep0"].lease.Active {
@@ -152,7 +152,7 @@ func (c *failedLeaseRecheckCache) Status() (relaycache.DeploymentReport, error) 
 	return r, err
 }
 
-func (b failedLeaseBackend) Lease(c context.Context, e DeploymentEntry, t, authenticatedAt time.Time) (DeploymentLease, error) {
+func (b failedLeaseBackend) Lease(c context.Context, e DeploymentEntry, t time.Time, authenticatedAt FreshApproval) (DeploymentLease, error) {
 	if e.Endpoint == b.failed {
 		return DeploymentLease{}, errors.New("flowtable or guard conflict")
 	}
@@ -170,7 +170,7 @@ func TestLeaseRenewalConflictQuiescesAndDoesNotSkipOtherEndpoints(t *testing.T) 
 		}
 	}
 	e.backend = failedLeaseBackend{k, "ep0"}
-	if r, err := e.Maintain(context.Background(), time.Now().UTC()); err == nil || r.KernelReady {
+	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Now().UTC()}); err == nil || r.KernelReady {
 		t.Fatal(r, err)
 	}
 	if k.objects["ep0"].up || k.objects["ep0"].lease.Active {
@@ -197,7 +197,7 @@ func TestLegacyDeploymentCannotBeReportedLeaseProtected(t *testing.T) {
 	if err != nil {
 		t.Fatal("old typed journal no longer readable", err)
 	}
-	if r, err := other.Maintain(context.Background(), time.Now().UTC()); err != nil || r.State != "empty" || len(k.objects) != 0 {
+	if r, err := other.Maintain(context.Background(), FreshApproval{At: time.Now().UTC()}); err != nil || r.State != "empty" || len(k.objects) != 0 {
 		t.Fatal("legacy peer was renewed without installing a guard", r, err)
 	}
 }
@@ -207,19 +207,19 @@ func TestLeaseMaintenanceRequiresFreshResponseAfterTimeout(t *testing.T) {
 	if _, err := e.Apply(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
-	if r, err := e.Maintain(context.Background(), time.Time{}); err != nil || !r.KernelReady {
+	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Time{}}); err != nil || !r.KernelReady {
 		t.Fatal(r, err)
 	}
 	v := k.objects[o.EndpointID]
 	v.lease = DeploymentLease{}
 	k.objects[o.EndpointID] = v
-	if r, err := e.Maintain(context.Background(), time.Time{}); err == nil || r.KernelReady {
+	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Time{}}); err == nil || r.KernelReady {
 		t.Fatal("cached approval restored expired lease", r, err)
 	}
-	if r, err := e.Maintain(context.Background(), time.Now().Add(-6*time.Second).UTC()); err == nil || r.KernelReady {
+	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Now().Add(-6 * time.Second).UTC()}); err == nil || r.KernelReady {
 		t.Fatal("response received before a long pause restored expired lease", r, err)
 	}
-	if r, err := e.Maintain(context.Background(), time.Now().UTC()); err != nil || !r.KernelReady {
+	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Now().UTC()}); err != nil || !r.KernelReady {
 		t.Fatal("fresh approval did not restore validated peers", r, err)
 	}
 }
@@ -267,13 +267,13 @@ func TestLeaseRoundedRearmWindowIsRetryableExpiry(t *testing.T) {
 	peer := k.objects[options.EndpointID]
 	peer.lease = DeploymentLease{}
 	k.objects[options.EndpointID] = peer
-	if out, err := e.Maintain(context.Background(), clock.Add(-4900*time.Millisecond)); !errors.Is(err, ErrLeaseExpired) || out.KernelReady {
+	if out, err := e.Maintain(context.Background(), FreshApproval{At: clock.Add(-4900 * time.Millisecond)}); !errors.Is(err, ErrLeaseExpired) || out.KernelReady {
 		t.Fatal("spent window accepted", out, err)
 	}
 	if peer := k.objects[options.EndpointID]; !peer.up || peer.lease.Active {
 		t.Fatal("closed peer was torn down or rearmed")
 	}
-	if out, err := e.Maintain(context.Background(), clock); err != nil || !out.KernelReady {
+	if out, err := e.Maintain(context.Background(), FreshApproval{At: clock}); err != nil || !out.KernelReady {
 		t.Fatal("new approval cannot rearm retained peer", out, err)
 	}
 }
@@ -283,6 +283,7 @@ func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testi
 	approval, _ := engine.cache.Status()
 	entry, _ := desiredDeployment(approval, options.EndpointID, options.ListenPort)
 	entry.Alias, entry.Group, entry.LinkIndex, _ = token()
+	entry.LeaseVersion = 2
 	for _, mode := range []string{"active", "zero-countdown", "empty-set", "missing", "wrong-deadline", "wrong-owner"} {
 		t.Run(mode, func(t *testing.T) {
 			committed := false
@@ -343,7 +344,7 @@ func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testi
 					return nil, fmt.Errorf("unexpected nft command %v", args)
 				}
 			}}}
-			state, err := backend.Lease(context.Background(), entry, time.Now().Add(time.Hour), time.Now().UTC())
+			state, err := backend.Lease(context.Background(), entry, time.Now().Add(time.Hour), FreshApproval{At: time.Now().UTC()})
 			if !committed {
 				t.Fatal("lease commit not exercised", err)
 			}
@@ -391,7 +392,7 @@ func TestLeaseSupervisorFinalCleanupDoesNotExtendCycleBudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	want, _ := ctx.Deadline()
-	if r, err := e.Maintain(ctx, time.Now().UTC()); err == nil || r.KernelReady {
+	if r, err := e.Maintain(ctx, FreshApproval{At: time.Now().UTC()}); err == nil || r.KernelReady {
 		t.Fatal(r, err)
 	}
 	if backend.downDeadline.IsZero() || backend.downDeadline.After(want) {

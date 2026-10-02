@@ -106,7 +106,7 @@ func desiredDeployment(r relaycache.DeploymentReport, endpoint string, port int)
 	if port < 1 || port > 65535 || !slices.ContainsFunc(relay.Endpoints, func(ep relaycatalog.Endpoint) bool { return ep.ID == endpoint }) {
 		return DeploymentEntry{}, errors.New("endpoint or local listen port invalid")
 	}
-	e := DeploymentEntry{Controller: v.ControllerID, Endpoint: endpoint, Interface: deploymentInterface(v.ControllerID, r.PrincipalID, r.RelayID, endpoint), PublicKey: relay.PublicKey, KeyGeneration: relay.KeyGeneration, ListenPort: port, LeaseVersion: 2, Peers: []DeploymentPeer{}, Phase: "preparing"}
+	e := DeploymentEntry{Controller: v.ControllerID, Endpoint: endpoint, Interface: deploymentInterface(v.ControllerID, r.PrincipalID, r.RelayID, endpoint), PublicKey: relay.PublicKey, KeyGeneration: relay.KeyGeneration, ListenPort: port, LeaseVersion: 3, Peers: []DeploymentPeer{}, Phase: "preparing"}
 	paths := map[string]bool{}
 	for _, p := range v.Spec.Paths {
 		if p.EndpointID == endpoint {
@@ -129,7 +129,7 @@ func sameDeployment(a, b DeploymentEntry) bool {
 	return deploymentHash(a) == deploymentHash(b)
 }
 func validateDeploymentEntry(e DeploymentEntry, j deploymentJournal) error {
-	if e.LeaseVersion < 0 || e.LeaseVersion > 2 {
+	if e.LeaseVersion < 0 || e.LeaseVersion > 3 {
 		return errors.New("unsupported relay lease version")
 	}
 	id, err := hex.DecodeString(e.Controller)

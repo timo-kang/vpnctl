@@ -268,7 +268,7 @@ func TestVMWorker(t *testing.T) {
 				f.controller.grant(r.relay, "")
 			}
 			result = map[string]any{"withdrawn": true}
-		case "/downgrade", "/lease-v1-downgrade":
+		case "/downgrade", "/lease-v1-downgrade", "/lease-v2-downgrade":
 			stop()
 			rows := []map[string]any{}
 			for _, r := range f.recipients {
@@ -282,6 +282,9 @@ func TestVMWorker(t *testing.T) {
 				if strings.HasPrefix(req.URL.Path, "/lease-v1-") {
 					a[0] = "/opt/vpnctl-vm/vpnctl-lease-v1"
 				}
+				if strings.HasPrefix(req.URL.Path, "/lease-v2-") {
+					a[0] = "/opt/vpnctl-vm/vpnctl-lease-v2"
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				out, err := netCommand(ctx, r.ns, a...).CombinedOutput()
 				cancel()
@@ -292,7 +295,7 @@ func TestVMWorker(t *testing.T) {
 				rows = append(rows, map[string]any{"relay": r.relay, "rejected": true, "journal_sha256": fmt.Sprintf("%x", sha256.Sum256(before)), "reason": string(out)})
 			}
 			result = rows
-		case "/legacy-upgrade", "/lease-v1-upgrade":
+		case "/legacy-upgrade", "/lease-v1-upgrade", "/lease-v2-upgrade":
 			stop()
 			rows := []map[string]any{}
 			for _, r := range f.recipients {
@@ -309,6 +312,9 @@ func TestVMWorker(t *testing.T) {
 					if strings.HasPrefix(req.URL.Path, "/lease-v1-") {
 						a[0] = "/opt/vpnctl-vm/vpnctl-lease-v1"
 					}
+					if strings.HasPrefix(req.URL.Path, "/lease-v2-") {
+						a[0] = "/opt/vpnctl-vm/vpnctl-lease-v2"
+					}
 					a = append(a, "--key-file", r.key, "--key-generation", "1", "--listen-port", fmt.Sprint(51820+ep))
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					out, err := netCommand(ctx, r.ns, a...).CombinedOutput()
@@ -321,6 +327,9 @@ func TestVMWorker(t *testing.T) {
 				validOld := !bytes.Contains(old, []byte("lease_version"))
 				if req.URL.Path == "/lease-v1-upgrade" {
 					validOld = bytes.Contains(old, []byte(`"lease_version":1`)) && !bytes.Contains(old, []byte(`"lease_version":2`))
+				}
+				if req.URL.Path == "/lease-v2-upgrade" {
+					validOld = bytes.Contains(old, []byte(`"lease_version":2`)) && !bytes.Contains(old, []byte(`"lease_version":3`))
 				}
 				if err != nil || !validOld || len(strings.Fields(netOutput(t, r.ns, "wg", "show", "interfaces"))) != 2 {
 					t.Fatal("legacy peer fixture not installed", err)

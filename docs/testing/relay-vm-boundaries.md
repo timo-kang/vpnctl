@@ -60,7 +60,8 @@ scripts/test-vm.sh --case lease
 기본 CLI는 checkout에서 빌드하며 외부 binary의 출처와 SHA-256을 따로 기록한다.
 실제 구형 CLI 비교에는 lease 도입 전 커밋
 `6e2da45c89de2d3ad2e4c930f1037472e6440692`(v0)와
-`fb0ca2e9684af827ac2afc4dd0cb9afcb0ca3e8b`(v1)의 git object가 필요하다.
+`fb0ca2e9684af827ac2afc4dd0cb9afcb0ca3e8b`(v1),
+`b4ba9e7793b123e4b47bd2fc5acfdf9b2698a26b`(v2)의 git object가 필요하다.
 새 journal/marker를 삭제하여 downgrade가 되게 만들지 않는다.
 
 `VPNCTL_KEEP_VM_WORK=1`이면 성공해도 이번 private 디스크를 보존한다. 이 디렉터리에는
@@ -213,13 +214,34 @@ systemd 255, QEMU 8.2 계열이다. 정확한 package/image 값은 실행 manife
 
 `lease-v1-upgrade`와 `lease-v1-downgrade`는 실제 이전 binary
 `fb0ca2e9684af827ac2afc4dd0cb9afcb0ca3e8b`를 빌드한다. v1 설치가 새 감독에서 회수되는지,
-v2 journal을 v1 binary가 변경 없이 거절하는지 확인한다. legacy(v0) 검증도 유지한다.
-manifest와 guest health에 네 binary의 SHA256을 기록한다. `matrix`는 총 44개 경우다.
+새 journal을 v1 binary가 변경 없이 거절하는지 확인한다. legacy(v0) 검증도 유지한다.
+v3에서는 `lease-v2-upgrade`/`lease-v2-downgrade`를 추가하고 실제 v2 커밋
+`b4ba9e7793b123e4b47bd2fc5acfdf9b2698a26b`도 별도로 빌드한다. v0/v1 검증을 유지하고
+세 구버전 모두 새 journal을 변경 없이 거절하는지 확인한다.
+manifest와 guest health에 다섯 binary의 SHA256을 기록한다. `matrix`는 총 46개 경우다.
 #135의 외부 시간 한계 세 경우는 완료 여부와 지원 판정을 계속 분리한다.
 
 S3와 wall rollback을 결합한 [#138](https://github.com/timo-kang/vpnctl/issues/138)은
 lease v2에서도 남는 결함이다. S3 동안 nft 상대 timer는 진행하지 않고, 역행 때문에
 절대 cutoff도 과거 경과를 나타내지 못한다. 이때 CLOCK_BOOTTIME은 진행하므로 모든
-게스트 clock이 멈추는 #135와 구별한다. 게스트 전원/시계의 이런 결합 작업도 사전 외부
-차단 없이 지원 완료로 판정하지 않는다. 커널 절전 포함 시계 보호 또는 실제 강제되는
-외부 fence가 검증될 때까지 관련 최종 gate를 유지한다.
+게스트 clock이 멈추는 #135와 구별한다. v3는 아래 BOOTTIME 보호를 추가한다.
+최종 커밋의 실제 전원·시간 조합 검증과 커널 증거가 확보되기 전에는 gate를 유지한다.
+
+
+## BOOTTIME packet guard 검증 (lease v3)
+
+v3는 WireGuard TC ingress/egress의 BPF 프로그램에서 절전 시간을 포함한 기한을
+검사한다. `delayed-suspend --delta -31`은 v2에서 실패한 실제 35초 S3+시계 역행을
+그대로 재현한다. 호스트의 절전·재부팅·시간 변경 명령은 실행하지 않는다.
+
+snapshot은 별도 읽기 전용 netns worker로 TC 두 부착점, 프로그램 명령어 태그,
+map 소유자와 원시 BOOTTIME 기한을 확인한다. nft가 여전히 통과 가능해도 검증한 BPF
+기한이 관측 BOOTTIME보다 과거라면 독립적인 차단 증거가 된다. BPF 자료 누락, 외부
+필터, 활성 BPF를 차단 증거로 간주하지 않는다. TCP 새 연결과 기존 연결은 별도로
+검증하여 재핸드셰이크 실패를 커널 lease 성공으로 혼동하지 않는다.
+
+`TestNetns_BootGuard`는 CAP_SYS_ADMIN을 제거한 자식에서 CAP_BPF와 NET_ADMIN만으로
+실행하고, CAP_BPF까지 제거한 자식의 설치 실패를 확인한다. 반복된 만료 후 캐시 갱신,
+기한 초과·세대 재생, 부분 부착, 같은 이름의 외부 프로그램, link 삭제 후 map 회수를
+검사한다. VM 전체 pause에서는 BOOTTIME도 정지한다. #135의 외부 차단 요구를
+폐기하거나 이 시험으로 전체 M3 완료를 선언하지 않는다.

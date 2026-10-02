@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"vpnctl/internal/relayguard"
 )
 
 // A stopped supervisor cannot leave an indefinitely usable dataplane. The
-// absolute cutoff also covers suspend; the timed set bounds clock rollback.
+// nft cutoff and timer are combined with an independent suspend-aware BPF gate.
 const DeploymentLeaseDuration = 10 * time.Second
 const DeploymentRearmWindow = 5 * time.Second
 
@@ -23,6 +25,7 @@ type DeploymentLease struct {
 	Deadline time.Time `json:"deadline"`
 	set      string
 	staged   []string
+	Boot     *relayguard.State `json:"boottime,omitempty"`
 }
 
 func leaseTable(e DeploymentEntry) string { return "vl" + e.Interface[2:] }
@@ -212,7 +215,7 @@ func (k deploymentKernel) leaseRead(ctx context.Context, e DeploymentEntry) (Dep
 		return DeploymentLease{}, true, err
 	}
 	var s DeploymentLease
-	if e.LeaseVersion == 2 {
+	if e.LeaseVersion >= 2 {
 		s, err = validateStagedLease(rows, e)
 	} else {
 		s, err = validateLease(rows, e)
@@ -234,7 +237,7 @@ func (k deploymentKernel) noFlowtables(ctx context.Context) error {
 }
 
 func (k deploymentKernel) leaseCreate(ctx context.Context, e DeploymentEntry) error {
-	if e.LeaseVersion == 2 {
+	if e.LeaseVersion >= 2 {
 		return k.stagedLeaseCreate(ctx, e)
 	}
 	if _, exists, err := k.leaseRead(ctx, e); err != nil {
@@ -280,11 +283,11 @@ func leaseDeadline(active bool, expiry, authenticatedAt, now time.Time) (time.Ti
 	return deadline, nil
 }
 
-func (k deploymentKernel) Lease(ctx context.Context, e DeploymentEntry, approvalExpiry, authenticatedAt time.Time) (DeploymentLease, error) {
+func (k deploymentKernel) Lease(ctx context.Context, e DeploymentEntry, approvalExpiry time.Time, authenticatedAt FreshApproval) (DeploymentLease, error) {
 	if e.LeaseVersion != 2 {
 		return DeploymentLease{}, errors.New("relay lease upgrade requires release and apply")
 	}
-	return k.stagedLease(ctx, e, approvalExpiry, authenticatedAt)
+	return k.stagedLease(ctx, e, approvalExpiry, authenticatedAt, nil)
 }
 
 func (k deploymentKernel) leaseBlock(ctx context.Context, e DeploymentEntry) error {
@@ -293,7 +296,7 @@ func (k deploymentKernel) leaseBlock(ctx context.Context, e DeploymentEntry) err
 		return err
 	}
 	sets := []string{"alive"}
-	if e.LeaseVersion == 2 {
+	if e.LeaseVersion >= 2 {
 		sets = append([]string{state.set}, state.staged...)
 	}
 	script := ""

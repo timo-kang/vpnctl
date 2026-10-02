@@ -1,7 +1,7 @@
 # 릴레이 승인 감독과 커널 lease (#124)
 
 `relay supervise`는 이미 적용한 relay peer를 감독한다. 새 `relay apply`는 peer를
-사용 가능하게 만들기 전에 endpoint 전용 nftables 차단 규칙을 설치한다. 감독이 없어도
+사용 가능하게 만들기 전에 endpoint 전용 nftables 규칙과 WireGuard TC 송수신 BOOTTIME 차단을 설치한다. 감독이 없어도
 정상적으로 진행하는 게스트 시계에서 마지막 커널 통과 허가는 최대 10초 뒤 만료된다.
 VM 전체 pause처럼 모든 게스트 시계가 멈추는 조건은 외부 시간 상한이 아니며,
 [VM 검증·사전 차단 계약](../testing/relay-vm-boundaries.md)을 따른다. 명령을 한 번 실행한 뒤 무기한 사용하는
@@ -24,8 +24,9 @@ vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
 monotonic 성분을 보존해 저장/검사 지연과 작은
 wall clock 역행으로 재허가 창이 늘어나지 않게 한다. nft 타이머 준비와 경로 선택을
 분리하여 지연된 선택 명령은 이미 만료된 타이머를 다시 시작할 수 없다(#136).
-S3와 시계 역행이 겹쳐 timer 자체가 만료되지 않는 추가 결함
-[#138](https://github.com/timo-kang/vpnctl/issues/138)은 별도 커널 보호 또는 외부 차단이 필요하다.
+S3와 시계 역행이 겹쳐 nft timer가 만료되지 않는 조건(#138)은
+`lease_version=3`의 독립 BOOTTIME packet guard가 차단한다. 전체 게스트 시계가 멈추는
+VM pause는 외부 사전 차단 계약이 계속 필요하다.
 재허가 창이 소진되거나 nft 재확인 중 잔여 시간이 0초/만료로 표시되면 정상 규칙의
 차단 상태와 link를 유지하고 다음 새 응답을 기다린다. 규칙 누락·소유자 변조·기한
 불일치는 정상 만료로 취급하지 않고 기존 차단/복구 오류를 유지한다.
@@ -60,12 +61,13 @@ namespace 잠금 경합은 기존 cycle 예산 안에서 25ms마다 재시도한
 
 endpoint마다 `vl` + interface hash의 `inet` table을 만들고 소유 alias를 각 rule에 기록한다.
 input/iif, forward/iif·oif, output/oif에 소유 ifindex 조건을 붙인다. 처음에는 timed set이
-비어 있고 cutoff가 과거이므로 차단된다. 두 조건 모두 통과해야 한다.
+비어 있고 cutoff가 과거이므로 차단된다. v3에서는 세 조건 모두 통과해야 한다.
 
 1. 실제 wall time이 절대 cutoff보다 작다.
 2. 선택된 `iface_index` timed set에 소유 ifindex가 살아 있다.
+3. TC BPF map의 소유 BOOTTIME 기한보다 현재 BOOTTIME이 작다.
 
-`lease_version=2` 갱신은 다음 두 트랜잭션으로 나뉜다.
+`lease_version=2`부터 nft 갱신은 다음 두 트랜잭션으로 나뉜다.
 
 1. 매번 난수 128bit 이름의 새 set을 생성하고 timeout 원소를 넣는다. 이 set은 아직
    어떤 경로에서도 참조하지 않으므로 준비 명령만 지연되거나 재실행되어도 통신을 열지 않는다.
@@ -89,32 +91,61 @@ input/iif, forward/iif·oif, output/oif에 소유 ifindex 조건을 붙인다. �
 jiffies로 만료를 판단하므로 tick 오차 100ms 미만인 플랫폼을 요구한다(검증 Linux HZ≥100).
 Linux nft transaction 처리 자체에 대한 hard realtime 보장은 하지 않는다. 전체 게스트
 clock이 멈추는 VM pause/스냅샷 복원 한계(#135)는 그대로이며 외부 사전 차단 계약을 따른다.
-S3와 wall rollback을 결합하면 BOOTTIME만 진행하고 두 packet guard clock은
-기한을 표현하지 못할 수 있다(#138). 준비 ACK 시 BOOTTIME을 읽는 것으로 그 이후의
-절전까지 보호하지는 못한다. 이런 전원/시간 변경은 사전 외부 차단 없이 지원 완료가 아니다.
+v2에서는 S3와 wall rollback이 겹치면 두 nft 조건을 우회할 수 있었다(#138).
+v3는 모든 소유 WireGuard 인터페이스에 하나의 TC BPF 프로그램을 ingress/egress 양쪽에
+부착하고 `bpf_ktime_get_boot_ns`로 패킷마다 별도 절대 기한을 검사한다. 이 시계는 S3
+시간도 포함한다. map은 최초 차단 상태로 만들고 두 부착점을 검증한 뒤 link를 올린다.
+
+갱신은 네트워크에 부착하지 않은 별도 BPF 프로그램의 `BPF_PROG_TEST_RUN`으로 한다.
+spin lock 안에서 전체 128bit 소유자, 예상 세대, 이전 BOOTTIME 기한을 확인한다.
+이미 만료되었다면 인증 요청 전에 얻은 BOOTTIME 관측부터 5초 이내의 새 승인만
+허용하며 새 기한도 이 창을 넘지 못한다. 활성 연장도 계산 당시 BOOTTIME+최대 10초인
+고정 제안을 사용한다. 늦게 실행되는 syscall에 현재 시각을 더해 수명을 새로 만들지 않는다.
+반영한 세대는 증가하고 같은 제안 재생은 실패한다. nft 경로 선택 전에 갱신하며,
+이후 선택이 늦어져도 TC gate는 절전 시간을 포함하여 독립 만료한다.
+
+기한 map과 packet 프로그램은 배포가 준비한 `/run/vpnctl-bpf`의 소유자 전용 pin으로
+유지한다. 프로세스가 전역 객체 ID로 재개방하면 CAP_SYS_ADMIN이 필요하므로 이 방식을
+사용하지 않는다. pin 경로는 전체 128bit 소유 토큰으로 구분하고 bpffs 종류, UID,
+디렉터리 0700·파일 0600, symlink와 조상 경로의 쓰기 권한을 검사한다. 필요한 두 pin만
+열며 전역 객체 목록은 열거하지 않는다. 소유 WG link를 제거한 다음 program pin과 map
+pin 순서로 회수하고, 완료 전까지 journal을 보존하여 중단된 정리를 반복할 수 있게 한다.
+제품은 filesystem을 마운트하지 않으며 준비가 누락되면 적용에 실패한다. 검사 시 두 부착점과
+프로그램 명령어 태그, map 구조·소유자·기한을 검증하며 불일치를 보호 없는 준비 완료로
+표시하지 않는다. time namespace의 boottime/monotonic offset이 0이 아니면 userspace와
+커널 helper의 시간 영역이 달라지므로 적용·갱신을 거절한다.
 cache의 영속 관측 시각과 30초 역행 거절 정책도 유지한다.
 
 nft 규칙의 property·순서·owner·set timeout을 모두 판독해 비교하고 소유 table만
 갱신/제거한다. host ruleset이나 다른 interface를 flush하지 않는다. 기존 TCP도 filter
 hook을 통과하므로 lease를 적용받는다. flowtable은 forwarding hook을 우회할 수 있어
 같은 namespace의 nft flowtable이 하나라도 있으면 생성/갱신/준비 완료 판정을 거절한다.
-운영자는 XDP/TC/hardware offload 등 별도 우회 경로를 사용하지 않아야 한다.
+운영자는 소유 TC guard 외의 XDP/TC/hardware offload 등 별도 우회 경로를 사용하지 않아야 한다.
 root/CAP_NET_ADMIN이 규칙을 삭제하는 상황을 격리하는 보안 경계는 아니다.
 
 지원 기준은 Linux `CLOCK_BOOTTIME`, nftables `meta time`, comment가 있는 timed
-`iface_index` set, 조건부 원소 삭제, JSON listing이다.
+`iface_index` set, 조건부 원소 삭제, JSON listing이다. v3는 추가로 Linux 5.8 이상에서
+`CONFIG_BPF_SYSCALL`, `CONFIG_NET_CLS_BPF`, `CONFIG_NET_SCH_INGRESS`, BTF map의
+`bpf_spin_lock`, `BPF_PROG_TEST_RUN`, `bpf_ktime_get_boot_ns`가 필요하다. 버전 번호만으로
+충족했다고 가정하지 않고 실제 설치와 readback이 성공해야 한다. CAP_NET_ADMIN 및
+CAP_BPF, 커널 설정에 맞는 memlock 한도가 필요하다. 기본 서비스 템플릿은 64MiB를
+설정한다. helper/권한/자원이 부족하면 적용을 취소하며 nft만으로 자동 하향하지 않는다.
 실제 검증은 test-netns 이미지의 Debian bookworm nftables 1.0.6과 실행 호스트 커널에서
 수행한다. 다른 nft/kernel 조합은 동일 시험으로 확인한다. 시간은 UTC로 판독한다.
 규칙 표현이 다르거나 지원되지 않으면 보호 없이 적용하지 않고 실패한다.
 [nftables 공식 매뉴얼](https://www.netfilter.org/projects/nftables/manpage.html),
 [Linux timekeeping](https://docs.kernel.org/core-api/timekeeping.html),
-[Linux 6.8의 set 만료 검사](https://github.com/torvalds/linux/blob/v6.8/include/net/netfilter/nf_tables.h).
+[Linux 6.8의 set 만료 검사](https://github.com/torvalds/linux/blob/v6.8/include/net/netfilter/nf_tables.h),
+[BOOTTIME helper 계약](https://github.com/torvalds/linux/blob/v6.8/include/uapi/linux/bpf.h),
+[객체 ID 재개방 권한과 FD 정보 검사](https://github.com/torvalds/linux/blob/v6.8/kernel/bpf/syscall.c).
 
 ## 관측과 복구
 
 JSONL에는 `observed_at`, `cycle_ms`, `state`, `reason`, `refresh`, `approval_state`,
 `approval_valid`, `approval_expires_at`, `last_refresh_at`, `last_success_at`, `kernel`을 기록한다.
-커널 검사 성공 시 endpoint별 `lease.active`와 `lease.deadline`을 제공한다.
+커널 검사 성공 시 endpoint별 `lease.active`, `lease.deadline`,
+`lease.boottime`의 `deadline_ns`, `observed_ns`, `generation`, `program_id`, `map_id`를 제공한다.
+`active`는 nft와 BOOTTIME 조건을 모두 만족해야 한다.
 `expiry_enforcement=kernel_lease`는 이 방식의 보호 계약이며 서버 uplink 건강 증거가 아니다.
 `uplink_health=unknown`을 유지한다. `degraded`나 kernel 정보 누락은 차단 완료의 증거가
 아니므로 마지막 deadline과 실제 패킷 관측을 함께 확인한다. 로그 쓰기가 막히면 다음
@@ -127,11 +158,14 @@ guard 자체가 변조되면 타인 규칙을 덮어쓰지 않고 소유 link �
 회수 실패로 journal에 남은 과거 endpoint를 갱신하지 않으며, cache 읽기 실패나 journal
 저장 불확실 상태에서는 갱신을 진행하지 않는다. 전체 결과는 계속 `degraded`로 보고한다.
 
-이전 journal의 `lease_version`은 0(lease 없음) 또는 1(단일 갱신 batch)이다. 새 버전이 이를 읽으면 이전 endpoint를
+이전 journal의 `lease_version`은 0(lease 없음), 1(단일 갱신 batch), 2(nft 준비/선택 분리)이다. 새 버전이 이를 읽으면 이전 endpoint를
 차단·회수하고 새 apply를 요구한다. 구형 binary로 downgrade하여 새 journal을 열 수 없다.
 업그레이드 전 기존 endpoint release, 새 binary 설치, refresh/supervise/apply 순서를 권장한다.
 rollback은 새 binary로 endpoint를 release한 후 이전 배포로 복귀한다. guard/journal만
-삭제하는 우회 절차는 사용하지 않는다.
+삭제하는 우회 절차는 사용하지 않는다. 같은 boot에서 namespace를 폐기하기 전에도
+원래 namespace에서 release한다. namespace만 지우면 private pin은 남을 수 있으므로
+원래 domain을 복구해 회수하거나 배포 절차에서 전용 bpffs 수명을 함께 관리해야 한다.
+다른 domain의 journal을 임의로 채택하거나 이름 패턴만으로 pin을 일괄 삭제하지 않는다.
 
 boot ID 또는 namespace가 바뀌면 journal을 자동 채택하지 않는다. 재부팅 후 nft/WG
 규칙을 독립적으로 자동 복원하는 서비스와 함께 쓰지 않는다. 이전 domain의 자원이
@@ -165,9 +199,14 @@ VPNCTL_RACE=0 scripts/test-netns.sh -test.run='^TestNetns_M3(PathTopology|RelayD
 ## 다른 배포 저장소에서 사용하기
 
 [systemd template](../../deploy/vpnctl-relay-supervise@.service)을 가져가 경로·UID·netns를
-배포 환경에 맞춘다. 같은 relay의 명령들은 동일 UID, 영속 cache, network namespace를
+배포 환경에 맞춘다. 전용 mount 템플릿 `deploy/run-vpnctl\x2dbpf.mount`를 함께
+배포하고 relay 시작 전에 준비한다. 마운트 준비에 필요한 관리자 권한은 배포 단계에서
+사용하며 상시 relay 서비스에는 CAP_SYS_ADMIN을 부여하지 않는다. CLI와 감독은 같은
+mount namespace의 bpffs를 사용한다. 별도 경로가 필요하면 모든 관련 명령에
+`VPNCTL_BPF_ROOT`를 동일하게 설정하고 전용 mount를 그곳에 준비한다. 같은 relay의 명령들은 동일 UID, 영속 cache, network namespace를
 사용해야 한다. host filesystem에 0700 cache 디렉터리, 0600 일반 파일을 유지한다.
-`ip`, `wg`, `nft`, NET_ADMIN과 writable cache가 필요하다. 서비스에 PrivateNetwork를
+`ip`, `wg`, `nft`, CAP_NET_ADMIN·CAP_BPF와 writable cache가 필요하다.
+저장소의 서비스 파일은 배포 템플릿이며 편집만으로 현재 머신에 설치되지는 않는다. 서비스에 PrivateNetwork를
 설정하면 실제 peer namespace와 달라지므로 사용하지 않는다. 신뢰된 absolute PATH를 쓴다.
 
 감독 종료는 즉시 endpoint 삭제 명령이 아니다. 즉시 회수하려면 supervisor를 중지하고

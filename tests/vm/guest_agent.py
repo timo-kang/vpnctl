@@ -32,7 +32,7 @@ def guard():
 @lru_cache(maxsize=1)
 def binary_hashes():
     result = {}
-    for name in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1'):
+    for name in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1', 'vpnctl-lease-v2'):
         with (Path('/opt/vpnctl-vm') / name).open('rb') as f:
             result[name] = hashlib.file_digest(f, 'sha256').hexdigest()
     return result
@@ -263,6 +263,10 @@ class ControlServer(ThreadingHTTPServer):
 
 if __name__ == '__main__':
     guard()
+    # Dedicated guest-only mount, after the host/guest isolation guard.
+    pins = Path('/run/vpnctl-bpf')
+    pins.mkdir(mode=0o700, exist_ok=True)
+    subprocess.run(['mount', '-t', 'bpf', '-o', 'mode=0700,nosuid,nodev,noexec', 'bpf', str(pins)], check=True)
     subprocess.run(['modprobe', 'virtio_net'], check=True)
     interfaces = [p.name for p in Path('/sys/class/net').iterdir() if p.name != 'lo']
     if len(interfaces) != 1:

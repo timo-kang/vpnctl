@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"vpnctl/internal/relayguard"
 )
 
 // Starting a timeout and granting traffic MUST be separate transactions. The
@@ -136,7 +138,7 @@ func (k deploymentKernel) stagedLeaseCreate(ctx context.Context, e DeploymentEnt
 const leasePrepareBudget = time.Second
 const leaseTimerMargin = 100 * time.Millisecond
 
-func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, expiry, authenticatedAt time.Time) (DeploymentLease, error) {
+func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, expiry time.Time, authenticated FreshApproval, boot *relayguard.State) (DeploymentLease, error) {
 	state, exists, err := k.leaseRead(ctx, e)
 	if err != nil {
 		return state, err
@@ -152,6 +154,10 @@ func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, ex
 	if err != nil {
 		return state, err
 	}
+	if boot != nil {
+		state.Active = state.Active && boot.Active
+	}
+	authenticatedAt := authenticated.At
 	deadline, err := leaseDeadline(state.Active, expiry, authenticatedAt, started.UTC())
 	if err != nil {
 		return state, err
@@ -165,6 +171,12 @@ func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, ex
 			return state, ErrLeaseExpired
 		}
 		remaining = min(remaining, DeploymentRearmWindow-age)
+		if boot != nil {
+			if authenticated.BootNS == 0 || uint64(bootStarted) < authenticated.BootNS || uint64(bootStarted)-authenticated.BootNS >= uint64(DeploymentRearmWindow) {
+				return state, ErrLeaseExpired
+			}
+			remaining = min(remaining, DeploymentRearmWindow-time.Duration(uint64(bootStarted)-authenticated.BootNS))
+		}
 	}
 	timerMS := (remaining - leasePrepareBudget).Milliseconds()
 	if timerMS < 1 || timerMS > DeploymentLeaseDuration.Milliseconds() {
@@ -197,6 +209,19 @@ func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, ex
 	}
 	if bootFinished < bootStarted || elapsed+time.Duration(timerMS)*time.Millisecond+leaseTimerMargin > remaining || !time.Now().Before(deadline) {
 		return state, ErrLeaseExpired
+	}
+	if boot != nil {
+		freshUntil := uint64(0)
+		if authenticated.BootNS != 0 {
+			freshUntil = authenticated.BootNS + uint64(DeploymentRearmWindow)
+		}
+		_, err := relayguard.Update(ctx, guardOwner(e), boot.Generation, uint64(bootStarted)+uint64(remaining), freshUntil)
+		if errors.Is(err, relayguard.ErrExpired) {
+			return state, ErrLeaseExpired
+		}
+		if err != nil {
+			return state, err
+		}
 	}
 	// Continuation is conditional on the old timer still existing in the kernel
 	// transaction. Never silently convert a failed continuation to a fresh grant.
