@@ -74,3 +74,47 @@ network mutation is required; missing optional collectors remain unknown.
 `TestNetns_M3RelayDeploymentScale`는 1/3/8/32 node 승인 × 4 path의 정확한 peer·route 수를
 실제 커널과 반복 CLI 실행으로 검사하고 `m3-relay-scale-*/nodes-*.json`에 기록한다.
 이는 32대 동시 통신이나 자동 전환 SLO 검증을 의미하지 않는다.
+
+## M3 CI 실행 예산
+
+승인·충돌·압력 검증과 supervisor 규모 검증은 독립된 컨테이너/시험 프로세스로 실행한다.
+이전에는 앞선 세 그룹에 524.71초를 사용한 뒤, 마지막 32 node × 8 endpoint 검증이
+전체 12분 timer에 중단됐다(#150). 아래 제한은 전체 시험 묶음의 실행 예산이다.
+개별 준비·명령·승인 만료·kernel lease 판정 시간과 2 CPU/2 GiB 조건은 유지한다.
+
+| CI 작업 / artifact | 선택한 시험 | Go 전체 제한 | CI job 제한 |
+| --- | --- | --- | --- |
+| `m3-lease-matrix` | `M3AuthorityMatrix`, `M3LeaseConflicts`, `M3LeasePressure` | 12분 | 15분 |
+| `m3-supervision-population` | `M3SupervisionScale`의 1/3/8/32 node × 1/8 endpoint 전부 | 8분 | 12분 |
+| `m3-supervision-kernel-delay` | `M3SupervisionScale/nodes_32_endpoints_8`, 각 ip/wg/nft 명령에 5ms 지연 | 4분 | 12분 |
+
+8분 규모 예산은 기존 실행에서 작은 일곱 규모만 약 162초를 사용한 점과 마지막 규모의
+동시 작업·장애/재승인 단계를 고려해 별도로 부여한다. 지연 profile의 4분 예산은 기존과
+같다. 두 profile은 `fail-fast: false`인 별도 matrix job이므로 한쪽 실패로 다른 쪽을
+취소하거나 건너뛰지 않는다. 기존 kernel job에서는 위 네 top-level test를 계속 제외해
+중복 실행하지 않는다. 각 실행의 manifest·공개 보고서는 구분된 artifact에 남긴다.
+
+판정 시 runner exit 0과 함께 population의 `(nodes, endpoints, command_delay_ms)`가
+`{1,3,8,32} × {1,8} × {0}`인 **8개** 완료 보고서, kernel-delay의 `(32,8,5)` **1개**
+완료 보고서를 확인한다. 보고서 누락·`completed=false`·timeout·skip은 검증 완료가 아니다.
+호스트에서 시험 바이너리를 직접 실행하지 않고 같은 runner로 재현한다.
+
+```sh
+VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 VPNCTL_TEST_MEMORY=2g \
+VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-m3-population \
+./scripts/test-netns.sh -test.run='^TestNetns_M3SupervisionScale$' \
+  -m3-scale-command-delay-ms=0 -test.timeout=8m
+
+VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 VPNCTL_TEST_MEMORY=2g \
+VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-m3-kernel-delay \
+./scripts/test-netns.sh -test.run='^TestNetns_M3SupervisionScale$/^nodes_32_endpoints_8$' \
+  -m3-scale-command-delay-ms=5 -test.timeout=4m
+```
+
+## Controller 배치 검증
+
+`./scripts/test-m3-control-isolation.sh`는 실제 controller를 relay0과 같은 namespace에
+두는 배치와 별도 namespace에 두는 배치를 모두 시험한다. 두 relay의 독립 mTLS 신원,
+controller 단절 중 유효 승인 유지, supervisor 사망·offline 재시작, 실제 승인 만료와
+새 승인 복구를 별도 uplink TCP로 검사한다. [구성과 판정](../../docs/validation/m3-control-isolation.md)에
+fixture 경로 선택과 제품 자동전환의 경계, 재사용 입력·결과를 명시한다.

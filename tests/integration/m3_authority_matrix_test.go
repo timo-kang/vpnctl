@@ -76,9 +76,20 @@ func (f *m3AuthorityFixture) snapshot() map[string]any {
 	return out
 }
 
+type m3AuthorityOptions struct {
+	separateController    bool
+	independentRecipients bool
+}
+
 func newM3AuthorityFixture(t *testing.T) *m3AuthorityFixture {
 	t.Helper()
-	robot, relays, target := newM3Topology(t)
+	return newM3AuthorityFixtureWithOptions(t, m3AuthorityOptions{})
+}
+
+func newM3AuthorityFixtureWithOptions(t *testing.T, opts m3AuthorityOptions) *m3AuthorityFixture {
+	t.Helper()
+	layout := newM3TopologyLayout(t, opts.separateController)
+	robot, relays, target := layout.robot, layout.relays, layout.target
 	private := t.TempDir()
 	if err := os.Chmod(private, 0700); err != nil {
 		t.Fatal(err)
@@ -95,9 +106,13 @@ func newM3AuthorityFixture(t *testing.T) *m3AuthorityFixture {
 	t.Cleanup(func() {
 		writeM3Report(t, filepath.Join(results, "outcome.json"), map[string]any{"test": t.Name(), "completed": !t.Failed(), "final_kernel": f.snapshot()})
 	})
-	f.controller = newM3Controller(t, relays[0], "192.0.2.11", private, results)
+	f.controller = newM3Controller(t, layout.controller, layout.controllerAddress, private, results)
 	f.node = f.controller.enroll(robot, "robot")
-	agent := f.controller.enroll(relays[0], "agent")
+	agent := ""
+	if !opts.independentRecipients {
+		agent = f.controller.enroll(relays[0], "agent")
+	}
+	principals := make(map[string]string)
 	cfg, err := config.Load(f.node)
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +125,12 @@ func newM3AuthorityFixture(t *testing.T) *m3AuthorityFixture {
 	for r, ns := range relays {
 		key, pub := wgKeyPair(t)
 		id := fmt.Sprintf("r%d", r)
+		principal := "agent"
+		if opts.independentRecipients {
+			principal = "agent-" + id
+			agent = f.controller.enroll(ns, principal)
+		}
+		principals[id] = principal
 		keyfile := filepath.Join(private, id+".key")
 		mustWrite(t, keyfile, key)
 		relay := relaycatalog.Relay{ID: id, PublicKey: pub, KeyGeneration: 1}
@@ -123,7 +144,7 @@ func newM3AuthorityFixture(t *testing.T) *m3AuthorityFixture {
 	}
 	f.controller.apply(f.spec, 3600)
 	for _, r := range f.recipients {
-		f.controller.grant(r.relay, "agent")
+		f.controller.grant(r.relay, principals[r.relay])
 	}
 	startNetworkProcess(t, target, filepath.Join(private, "echo.log"), []string{"VPNCTL_WORKER=m3-echo"}, worker, "-test.run=^TestNetworkWorker$")
 	f.install()

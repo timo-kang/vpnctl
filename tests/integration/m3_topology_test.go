@@ -183,8 +183,25 @@ func TestNetns_M3PathTopology(t *testing.T) {
 // Only test-owned links, forwarding and NAT; callers supply production tunnels.
 func newM3Topology(t *testing.T) (string, []string, string) {
 	t.Helper()
+	layout := newM3TopologyLayout(t, false)
+	return layout.robot, layout.relays, layout.target
+}
+
+type m3TopologyLayout struct {
+	robot, target, controller, controllerAddress string
+	relays                                       []string
+}
+
+// A distinct controller has no uplink link, forwarding or WireGuard device.
+// Both placements expose the same remote mTLS API to robot and relay agents.
+func newM3TopologyLayout(t *testing.T, separateController bool) m3TopologyLayout {
+	t.Helper()
 	suffix := fmt.Sprintf("%x", time.Now().UnixNano()&0xfffffff)
-	ns := make([]string, 4)
+	count := 4
+	if separateController {
+		count++
+	}
+	ns := make([]string, count)
 	for i := range ns {
 		ns[i] = fmt.Sprintf("m3%s-%d", suffix, i)
 		run(t, ".", "ip", "netns", "add", ns[i])
@@ -219,6 +236,12 @@ func newM3Topology(t *testing.T) (string, []string, string) {
 			link(relay, iface, fmt.Sprintf("%s.%d/24", prefix, 11+r), bridges[u])
 		}
 	}
+	layout := m3TopologyLayout{robot: robot, relays: relays, target: target, controller: relays[0], controllerAddress: "192.0.2.11"}
+	if separateController {
+		layout.controller, layout.controllerAddress = ns[4], "192.0.2.254"
+		link(layout.controller, "control0", layout.controllerAddress+"/24", bridges[0])
+		(relayUplink{relay: layout.controller}).forwarding(t, false)
+	}
 	link(target, "eth0", m3Target+"/24", bridges[2])
 	for r, relay := range relays {
 		addr := fmt.Sprintf("198.18.0.%d", 11+r)
@@ -234,7 +257,7 @@ func newM3Topology(t *testing.T) (string, []string, string) {
    }
   }`, addr))
 	}
-	return robot, relays, target
+	return layout
 }
 
 func checkM3Topology(t *testing.T, worker, robot string, relays []string, target string) {
