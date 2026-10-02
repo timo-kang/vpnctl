@@ -185,6 +185,15 @@ func (k deploymentKernel) wire(ctx context.Context, e DeploymentEntry) (bool, er
 	return complete, nil
 }
 func (k deploymentKernel) Check(ctx context.Context, e DeploymentEntry, fresh bool) (bool, error) {
+	if e.PolicyVersion == 1 {
+		present, err := k.policyRead(ctx, e)
+		if err != nil || fresh && present {
+			return false, errors.Join(err, ErrConflict)
+		}
+		if !fresh && !present {
+			return false, errors.New("relay forwarding policy missing")
+		}
+	}
 	if fresh && e.LeaseVersion >= 1 {
 		if _, exists, err := k.leaseRead(ctx, e); err != nil {
 			return false, err
@@ -207,7 +216,10 @@ func (k deploymentKernel) Check(ctx context.Context, e DeploymentEntry, fresh bo
 }
 func (k deploymentKernel) Step(ctx context.Context, e DeploymentEntry, step, key string) error {
 	if step == "guard" {
-		return k.leaseCreate(ctx, e)
+		if err := k.leaseCreate(ctx, e); err != nil {
+			return err
+		}
+		return k.policyCreate(ctx, e)
 	}
 	_, _, exists, _, err := k.inventory(ctx, e, step == "link")
 	if err != nil {
@@ -269,13 +281,23 @@ func (k deploymentKernel) Down(ctx context.Context, e DeploymentEntry) error {
 	return errors.Join(guardErr, err)
 }
 func (k deploymentKernel) Remove(ctx context.Context, e DeploymentEntry) error {
+	// A changed firewall belongs to an external operator: block the lease,
+	// preserve the journal and refuse destructive cleanup.
+	if e.PolicyVersion == 1 {
+		if _, err := k.policyRead(ctx, e); err != nil {
+			return err
+		}
+	}
 	_, _, exists, _, err := k.inventory(ctx, e, false)
 	if err != nil {
 		return err
 	}
 	if !exists {
 		if e.LeaseVersion >= 1 {
-			return k.leaseRemove(ctx, e)
+			if err := k.leaseRemove(ctx, e); err != nil {
+				return err
+			}
+			return k.policyRemove(ctx, e)
 		}
 		return nil
 	}
@@ -290,6 +312,9 @@ func (k deploymentKernel) Remove(ctx context.Context, e DeploymentEntry) error {
 		if err = k.leaseRemove(ctx, e); err != nil {
 			return err
 		}
+	}
+	if err = k.policyRemove(ctx, e); err != nil {
+		return err
 	}
 	_, err = k.Check(ctx, e, true)
 	return err

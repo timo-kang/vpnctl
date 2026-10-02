@@ -16,7 +16,7 @@ import (
 
 func TestNetns_M3LeaseConflicts(t *testing.T) {
 	requireNetwork(t)
-	for _, fault := range []string{"foreign-peer-with-withdrawal", "preshared-key", "foreign-route", "foreign-guard-chain", "flowtable"} {
+	for _, fault := range []string{"foreign-peer-with-withdrawal", "preshared-key", "foreign-route", "foreign-guard-chain", "foreign-forward-policy", "missing-forward-policy", "flowtable"} {
 		t.Run(fault, func(t *testing.T) {
 			f := newM3AuthorityFixture(t)
 			report := map[string]any{"schema_version": 1, "fault": fault, "completed": false}
@@ -48,6 +48,10 @@ func TestNetns_M3LeaseConflicts(t *testing.T) {
 				netOutput(t, r.ns, "ip", "route", "add", "203.0.113.1/32", "dev", iface)
 			case "foreign-guard-chain":
 				netOutput(t, r.ns, "nft", "add", "chain", "inet", guard, "foreign")
+			case "foreign-forward-policy":
+				netOutput(t, r.ns, "nft", "add", "chain", "inet", "vf"+iface[2:], "foreign")
+			case "missing-forward-policy":
+				netOutput(t, r.ns, "nft", "delete", "table", "inet", "vf"+iface[2:])
 			case "flowtable":
 				(relayUplink{relay: r.ns}).nft(t, `table inet foreign_flow {
  flowtable external { hook ingress priority 0; devices = { wan0 }; }
@@ -90,6 +94,16 @@ func TestNetns_M3LeaseConflicts(t *testing.T) {
 			case "foreign-guard-chain":
 				netOutput(t, r.ns, "nft", "list", "chain", "inet", guard, "foreign")
 				netOutput(t, r.ns, "nft", "delete", "chain", "inet", guard, "foreign")
+			case "foreign-forward-policy":
+				netOutput(t, r.ns, "nft", "list", "chain", "inet", "vf"+iface[2:], "foreign")
+				if _, err := r.call("release", 0, 0); err == nil {
+					t.Fatal("foreign policy silently removed")
+				}
+				netOutput(t, r.ns, "nft", "delete", "chain", "inet", "vf"+iface[2:], "foreign")
+			case "missing-forward-policy":
+				if strings.Contains(netOutput(t, r.ns, "nft", "list", "tables"), "vf"+iface[2:]) {
+					t.Fatal("external deletion triggered automatic policy replacement")
+				}
 			case "flowtable":
 				netOutput(t, r.ns, "nft", "list", "flowtable", "inet", "foreign_flow", "external")
 				netOutput(t, r.ns, "nft", "delete", "table", "inet", "foreign_flow")

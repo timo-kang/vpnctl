@@ -115,9 +115,12 @@ func (e *DeploymentEngine) persist() error {
 	return err
 }
 func (e *DeploymentEngine) result(state, reason string) DeploymentResult {
-	r := DeploymentResult{SchemaVersion: 1, State: state, Reason: reason, RelayID: e.journal.Relay, UplinkHealth: "unknown", ExpiryEnforcement: "kernel_lease", Endpoints: []DeploymentEndpointResult{}}
+	r := DeploymentResult{SchemaVersion: 1, State: state, Reason: reason, RelayID: e.journal.Relay, UplinkHealth: "unknown", ExpiryEnforcement: "kernel_lease", ForwardingPolicy: "source_target_prefixes", Endpoints: []DeploymentEndpointResult{}}
 	for _, v := range e.journal.Entries {
 		r.Endpoints = append(r.Endpoints, DeploymentEndpointResult{EndpointID: v.Endpoint, Interface: v.Interface, Phase: v.Phase, Peers: len(v.Peers)})
+		if v.PolicyVersion == 0 {
+			r.ForwardingPolicy = "legacy_upgrade_required"
+		}
 		if v.LeaseVersion == 0 {
 			r.ExpiryEnforcement = "legacy_on_command"
 		} else if v.LeaseVersion < 3 {

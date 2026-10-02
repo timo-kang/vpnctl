@@ -42,12 +42,29 @@ func TestNetns_M3RelayDeploymentScale(t *testing.T) {
 			keyfile := filepath.Join(private, "relay.key")
 			mustWrite(t, keyfile, key)
 			spec := relaycatalog.Spec{SchemaVersion: 1, PoolCIDR: "10.78.0.0/16", Relays: []relaycatalog.Relay{{ID: "r", PublicKey: pub, KeyGeneration: 1, Endpoints: []relaycatalog.Endpoint{{ID: "ep", Address: "192.0.2.1:51820"}}}}, Targets: []relaycatalog.Target{{ID: "app", Prefixes: []string{"198.18.0.2/32"}, ProbeAddress: "198.18.0.2", Port: 443, Protocol: "tcp"}}}
+			if size == 32 {
+				spec.Targets = nil
+				for target := 0; target < relaycatalog.MaxTargets; target++ {
+					v := relaycatalog.Target{ID: fmt.Sprintf("t%02d", target), ProbeAddress: fmt.Sprintf("198.19.%d.1", target), Port: 443, Protocol: "tcp"}
+					for prefix := 0; prefix < 8; prefix++ {
+						v.Prefixes = append(v.Prefixes, fmt.Sprintf("198.19.%d.%d/28", target, prefix*32))
+					}
+					spec.Targets = append(spec.Targets, v)
+				}
+			}
 			env := relaycatalog.Environment{Nodes: map[string]bool{}, VPNCIDR: "10.77.0.0/24"}
 			for n := 0; n < size; n++ {
 				id := fmt.Sprintf("node-%d", n)
 				env.Nodes[id] = true
 				for p := 0; p < 4; p++ {
-					spec.Paths = append(spec.Paths, relaycatalog.Path{ID: fmt.Sprintf("p-%d-%d", n, p), NodeID: id, RelayID: "r", EndpointID: "ep", UnderlayID: fmt.Sprintf("lan%d", p), TargetIDs: []string{"app"}})
+					targets := []string{"app"}
+					if size == 32 {
+						targets = nil
+						for target := p * 8; target < (p+1)*8; target++ {
+							targets = append(targets, fmt.Sprintf("t%02d", target))
+						}
+					}
+					spec.Paths = append(spec.Paths, relaycatalog.Path{ID: fmt.Sprintf("p-%d-%d", n, p), NodeID: id, RelayID: "r", EndpointID: "ep", UnderlayID: fmt.Sprintf("lan%d", p), TargetIDs: targets})
 				}
 			}
 			state, err := relaycatalog.Apply(nil, relaycatalog.Update{TTLSeconds: 3600, Spec: spec}, env, time.Now())
@@ -146,7 +163,7 @@ func TestNetns_M3RelayDeploymentScale(t *testing.T) {
 			if strings.TrimSpace(netOutput(t, ns, "wg", "show", "interfaces")) != "" {
 				t.Fatal("owned interface survived")
 			}
-			report := map[string]any{"schema_version": 1, "completed": true, "nodes": size, "paths_per_node": 4, "kernel_peers": size * 4, "attempts": 3, "duration_ms": time.Since(started).Milliseconds(), "scope": "real peer/return-route population and repeated CLI reopen; fixture issuer; no full-fleet traffic SLO"}
+			report := map[string]any{"schema_version": 1, "completed": true, "nodes": size, "paths_per_node": 4, "targets": len(spec.Targets), "kernel_peers": size * 4, "attempts": 3, "duration_ms": time.Since(started).Milliseconds(), "scope": "real peer/return-route and source/target policy population; repeated CLI reopen; fixture issuer; no full-fleet traffic SLO"}
 			b, err := json.MarshalIndent(report, "", "  ")
 			if err != nil {
 				t.Fatal(err)

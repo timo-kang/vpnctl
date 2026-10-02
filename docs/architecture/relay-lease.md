@@ -217,3 +217,12 @@ mount namespace의 bpffs를 사용한다. 별도 경로가 필요하면 모든 �
 각 endpoint에 `relay release`를 실행한다. supervisor 정지만으로도 lease는 만료된다.
 네트워크 준비 순서, controller 도달 경로, source/target firewall과 SNAT/반환 route는
 [배포 네트워크 계약](../deployment/relay-network.md)의 책임으로 남는다.
+
+## 다중 감독기의 fresh 승인 요청 순서 (#143)
+
+감독기는 cache lock과 namespace lock을 취득한 뒤 실제 인증 요청을 수행한다. 다른 감독기를
+기다린 시간을 승인 재가동의 5초 창에 포함시키지 않으며, 승인 시각은 여전히 실제 HTTP 요청
+직전에 읽은 realtime/BOOTTIME이다. 오래된 응답의 시각을 다시 찍어 사용하지 않는다.
+namespace를 보유한 요청은 최대 1초이고 lock 대기·요청·커널 작업 전체의 5초 cycle 예산은
+유지한다. 실패 응답 뒤에도 Maintain을 호출하며 프로세스 중단은 독립 kernel lease가 차단한다.
+배포 source/target 정책 검사로 cycle 비용이 늘어도 이 순서를 유지해야 한다.

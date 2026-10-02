@@ -83,7 +83,10 @@ func TestRelayDeploymentKernelInventoryAndForeignState(t *testing.T) {
 			k := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
 				joined := strings.Join(args, " ")
 				if name == "nft" && strings.HasSuffix(joined, "list tables") {
-					return []byte(`{"nftables":[]}`), nil
+					return json.Marshal(object{"nftables": policyExpected(v)[:1]})
+				}
+				if name == "nft" && strings.HasSuffix(joined, "list table inet "+policyTable(v)) {
+					return json.Marshal(object{"nftables": policyExpected(v)})
 				}
 				switch joined {
 				case "-j -N -d link show":

@@ -29,19 +29,26 @@ type DeploymentPeer struct {
 	PublicKey string `json:"public_key"`
 	Address   string `json:"address"`
 }
+type DeploymentGrant struct {
+	Target   string   `json:"target"`
+	Prefixes []string `json:"prefixes"`
+	Sources  []string `json:"sources"`
+}
 type DeploymentEntry struct {
-	Controller    string           `json:"controller_id"`
-	Endpoint      string           `json:"endpoint_id"`
-	Interface     string           `json:"interface"`
-	PublicKey     string           `json:"public_key"`
-	KeyGeneration uint64           `json:"key_generation"`
-	ListenPort    int              `json:"listen_port"`
-	LeaseVersion  int              `json:"lease_version,omitempty"`
-	Peers         []DeploymentPeer `json:"peers"`
-	Alias         string           `json:"alias"`
-	LinkIndex     uint32           `json:"link_index"`
-	Group         uint32           `json:"group"`
-	Phase         string           `json:"phase"`
+	Controller    string            `json:"controller_id"`
+	Endpoint      string            `json:"endpoint_id"`
+	Interface     string            `json:"interface"`
+	PublicKey     string            `json:"public_key"`
+	KeyGeneration uint64            `json:"key_generation"`
+	ListenPort    int               `json:"listen_port"`
+	PolicyVersion int               `json:"policy_version,omitempty"`
+	Grants        []DeploymentGrant `json:"grants,omitempty"`
+	LeaseVersion  int               `json:"lease_version,omitempty"`
+	Peers         []DeploymentPeer  `json:"peers"`
+	Alias         string            `json:"alias"`
+	LinkIndex     uint32            `json:"link_index"`
+	Group         uint32            `json:"group"`
+	Phase         string            `json:"phase"`
 }
 type deploymentJournal struct {
 	Version   int               `json:"version"`
@@ -61,6 +68,7 @@ type DeploymentResult struct {
 	RelayID           string                     `json:"relay_id"`
 	KernelReady       bool                       `json:"kernel_ready"`
 	UplinkHealth      string                     `json:"uplink_health"`
+	ForwardingPolicy  string                     `json:"forwarding_policy"`
 	ExpiryEnforcement string                     `json:"expiry_enforcement"`
 	Endpoints         []DeploymentEndpointResult `json:"endpoints"`
 }
@@ -106,7 +114,7 @@ func desiredDeployment(r relaycache.DeploymentReport, endpoint string, port int)
 	if port < 1 || port > 65535 || !slices.ContainsFunc(relay.Endpoints, func(ep relaycatalog.Endpoint) bool { return ep.ID == endpoint }) {
 		return DeploymentEntry{}, errors.New("endpoint or local listen port invalid")
 	}
-	e := DeploymentEntry{Controller: v.ControllerID, Endpoint: endpoint, Interface: deploymentInterface(v.ControllerID, r.PrincipalID, r.RelayID, endpoint), PublicKey: relay.PublicKey, KeyGeneration: relay.KeyGeneration, ListenPort: port, LeaseVersion: 3, Peers: []DeploymentPeer{}, Phase: "preparing"}
+	e := DeploymentEntry{Controller: v.ControllerID, Endpoint: endpoint, Interface: deploymentInterface(v.ControllerID, r.PrincipalID, r.RelayID, endpoint), PublicKey: relay.PublicKey, KeyGeneration: relay.KeyGeneration, ListenPort: port, LeaseVersion: 3, PolicyVersion: 1, Peers: []DeploymentPeer{}, Phase: "preparing"}
 	paths := map[string]bool{}
 	for _, p := range v.Spec.Paths {
 		if p.EndpointID == endpoint {
@@ -119,6 +127,7 @@ func desiredDeployment(r relaycache.DeploymentReport, endpoint string, port int)
 		}
 	}
 	slices.SortFunc(e.Peers, func(a, b DeploymentPeer) int { return strings.Compare(a.PublicKey, b.PublicKey) })
+	e.Grants = deploymentGrants(v, endpoint)
 	return e, nil
 }
 func sameDeployment(a, b DeploymentEntry) bool {
@@ -129,6 +138,9 @@ func sameDeployment(a, b DeploymentEntry) bool {
 	return deploymentHash(a) == deploymentHash(b)
 }
 func validateDeploymentEntry(e DeploymentEntry, j deploymentJournal) error {
+	if err := validateDeploymentGrants(e); err != nil {
+		return err
+	}
 	if e.LeaseVersion < 0 || e.LeaseVersion > 3 {
 		return errors.New("unsupported relay lease version")
 	}

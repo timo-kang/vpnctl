@@ -45,6 +45,17 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 		return out, err
 	}
 	defer c.Close()
+	// Acquire the namespace before starting the bounded authenticated request.
+	// Waiting behind another supervisor must not consume a fresh response's
+	// five-second rearm window. Never relabel an old response with a new time.
+	// The request holds the namespace for at most one second, within the same
+	// five-second cycle; independent kernel leases still bound any stalled work.
+	e, openErr := openSupervisedDeployment(ctx, func() (*relayapply.DeploymentEngine, error) { return relayapply.OpenDeployment(c) })
+	if openErr != nil {
+		out.Reason = "enforcement_unavailable"
+		return out, openErr
+	}
+	defer e.Close()
 	authenticatedAt := relayapply.FreshApproval{}
 	var report relaycache.DeploymentReport
 	if refresh {
@@ -66,14 +77,7 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	if report.Deployment != nil {
 		out.ApprovalExpiresAt = report.Deployment.ExpiresAt
 	}
-	// Even a rejected refresh must reach enforcement. An I/O failure that
-	// prevents opening the engine cannot refresh the independent kernel lease.
-	e, openErr := openSupervisedDeployment(ctx, func() (*relayapply.DeploymentEngine, error) { return relayapply.OpenDeployment(c) })
-	if openErr != nil {
-		out.Reason = "enforcement_unavailable"
-		return out, errors.Join(err, openErr)
-	}
-	defer e.Close()
+	// Even a rejected refresh must reach enforcement.
 	kernel, enforceErr := e.Maintain(ctx, authenticatedAt)
 	out.Kernel = &kernel
 	latest, statusErr := c.Status()
