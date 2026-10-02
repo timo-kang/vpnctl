@@ -17,6 +17,12 @@ make test-netns
 VPNCTL_NETNS_SIZES=1,8,32 \
 VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-network-results \
 ./scripts/test-netns.sh -test.run TestNetns_PKILifecycleUplink -test.count=3
+
+# 실제 갱신 이력이 누적된 상태에서 동일한 CA 전환 기준 적용
+VPNCTL_RACE=0 VPNCTL_TEST_CPUS=2 VPNCTL_TEST_MEMORY=2g \
+VPNCTL_NETNS_SIZES=32 VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-pki-aged \
+./scripts/test-netns.sh -test.run '^TestNetns_PKILifecycleUplink$' \
+  -pki-history-warmup=90s -test.timeout=8m
 ```
 
 컨테이너는 `--network none`이며 내부에 bridge, controller 네임스페이스와 노드별
@@ -72,6 +78,21 @@ Go ticker가 스케줄링 때문에 생략한 tick은 송신 패킷 수에 포�
 
 `*.jsonl`은 개별 측정, `summary.json`은 node/phase/protocol별 송신·실패·TCP 재연결·
 최장 실패 구간과 성공 표본 간격, `kernel.json`은 PKI 전환 전후 공개 커널 상태다.
+`ca-ca.activate-*.json` / `ca-ca.retire-*.json`은 각 전환의 시작·소요 시간,
+RPC별 상태/오류, 마지막 거절 사유를 기록한다. 상태 표본은 trust 세대·active/previous/
+pending issuer·overlap 시각, 예상 node별 ACK와 해당 인증서·가장 최근 발급 인증서의
+공개 metadata를 포함한다. 전체 발급 이력 대신 건수만 기록하며, ACK가 없는 node도
+목록에 남긴다. 표본 시각 이후 상태를 추정하지 않는다. 조회가 실패하면 앞서 관측한
+상태와 오류를 보존하며, 결과를 모르는 mutation은 확인 없이 재시도하지 않는다.
+전환당 최대 320개 RPC 표본을 보존하고 초과 시 누락 건수와 마지막 표본을 남긴다.
+기록 때문에 제한 이후 추가 IPC를 실행하거나 15초 전환 예산을 연장하지 않는다.
+
+`-pki-history-warmup`은 기본 0, 최대 5분이다. 모든 node의 probe 시작 후 실제 시간을
+기다려 정상적인 인증서 갱신·이력을 누적한다. 시계나 인증서 수명, probe 주기를 바꾸지
+않으며 추가 구간도 UDP/TCP/HTTPS 실패·TCP 재연결 0건을 요구한다. CA 전환의 15초
+제한과 개별 IPC 2초 제한은 그대로다. 기존 바이너리를 비교할 때는
+`VPNCTL_TEST_BINARY=/absolute/path/to/vpnctl`로 주입한다.
+
 최장 실패 구간에는 실패 판단을 위한 timeout이 포함되어 실제 단절 시간의 보수적인
 관측값이다. 20ms보다 짧은 단절이나 모든 패킷의 전달을 보장하는 측정은 아니다.
 개인키·token·authority/credentials 파일은 artifact에 포함하지 않는다.
@@ -118,6 +139,19 @@ controller/API 복원과 손실 해제 후 API 복원은 5초, `wg0`가 사라�
    TLS 요청이 지연됐다. 커널 CI에는 배포 빌드를 사용하고 별도 전체 race 작업을 유지한다.
    같은 요청 기준의 2 CPU 배포 빌드 시험은 95,714건 실패 0건으로 통과했다.
    폐기 인증서 50회 반복의 전체 시간 제한도 개별 1초 제한을 고려해 60초로 조정했다.
+
+8. **전체 PKI 상태 복사 비용과 CA 실패 진단 유실 (#101)**: 변경 없는 ACK도
+   전체 authority를 JSON 직렬화/역직렬화한 뒤 중복 여부를 검사했다. 현재는 세대·
+   인증서 유효성·node identity 검사를 먼저 완료한 뒤 중복을 반환하고, 실제 변경은
+   값 타입만 담긴 네 map을 복사한다. 저장·게시 시점, 폐기/만료 및 CA ACK gate는
+   유지한다. 동시 읽기·저장 실패·재시작 회귀와 후보 map 변경 시 기존 게시 상태가
+   보존되는지 검사한다. `BenchmarkAuthorityCopyHistory`의 320건 합성 이력에서
+   복사 자체는 기존 약 2.10–2.12ms/1.46–1.49MB에서 15.5–16.2µs/97.6KB로 줄었다
+   (동일 머신, GOMAXPROCS=2, 각 3회). 이는 전체 요청이나 전환의 성능 수치가 아니다.
+   상태 조회 timeout이 앞선 mutation 거절 사유를 덮어쓰던 시험 helper도 수정했다.
+   2026-10-02의 실패 CI에는 마지막 node ACK 진단이 없어 단일 원인을 확정할 수
+   없으며, 이 비용 감소나 이후 통과만으로 간헐적 실패 해결을 선언하지 않는다.
+   재현 조건·검증 결과는 [#101](https://github.com/timo-kang/vpnctl/issues/101)에 기록한다.
 
 ## 범위의 한계
 
