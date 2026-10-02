@@ -21,7 +21,7 @@ func TestLeaseRejectsAlteredRulesAndUnboundedCountdown(t *testing.T) {
 	r, _ := e.cache.Status()
 	v, _ := desiredDeployment(r, o.EndpointID, o.ListenPort)
 	v.Alias, v.Group, v.LinkIndex, _ = token()
-	for _, kind := range []string{"valid", "blocked", "expired", "zero-countdown", "element-timeout", "owner", "policy", "added-rule", "timeout", "wrong-index", "deadline", "dormant"} {
+	for _, kind := range []string{"valid", "blocked", "expired", "zero-countdown", "subsecond", "zero-timeout-live", "negative-timeout", "element-timeout", "owner", "policy", "added-rule", "timeout", "wrong-index", "deadline", "dormant"} {
 		t.Run(kind, func(t *testing.T) {
 			deadline := time.Now().Add(8 * time.Second).Truncate(time.Second)
 			if kind == "expired" {
@@ -46,6 +46,13 @@ func TestLeaseRejectsAlteredRulesAndUnboundedCountdown(t *testing.T) {
 				set["elem"].([]any)[0].(map[string]any)["elem"].(map[string]any)["expires"] = float64(100)
 			case "zero-countdown":
 				set["elem"].([]any)[0].(map[string]any)["elem"].(map[string]any)["expires"] = float64(0)
+			case "subsecond":
+				item := set["elem"].([]any)[0].(map[string]any)["elem"].(map[string]any)
+				item["timeout"], item["expires"] = float64(0), float64(0)
+			case "zero-timeout-live":
+				set["elem"].([]any)[0].(map[string]any)["elem"].(map[string]any)["timeout"] = float64(0)
+			case "negative-timeout":
+				set["elem"].([]any)[0].(map[string]any)["elem"].(map[string]any)["timeout"] = float64(-1)
 			case "element-timeout":
 				set["elem"].([]any)[0].(map[string]any)["elem"].(map[string]any)["timeout"] = float64(100)
 			case "wrong-index":
@@ -56,7 +63,7 @@ func TestLeaseRejectsAlteredRulesAndUnboundedCountdown(t *testing.T) {
 				rows[0]["table"].(map[string]any)["flags"] = []any{"dormant"}
 			}
 			got, err := validateLease(rows, v)
-			valid := kind == "valid" || kind == "blocked" || kind == "expired" || kind == "zero-countdown"
+			valid := kind == "valid" || kind == "blocked" || kind == "expired" || kind == "zero-countdown" || kind == "subsecond"
 			if (err == nil) != valid || valid && got.Active != (kind == "valid") {
 				t.Fatal(kind, got, err)
 			}

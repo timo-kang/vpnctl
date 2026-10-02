@@ -138,7 +138,11 @@ func validateLease(rows []object, e DeploymentEntry) (DeploymentLease, error) {
 						}
 						if raw, ok := item["timeout"]; ok {
 							timeout, ok := raw.(float64)
-							if !ok || timeout <= 0 || timeout > DeploymentLeaseDuration.Seconds() || left > timeout {
+							// nft JSON truncates milliseconds to whole seconds. A
+							// subsecond element has timeout=0 and expires=0; keep
+							// it inactive without mistaking our own timer for a
+							// foreign resource and tearing down the owned link.
+							if !ok || timeout < 0 || timeout > DeploymentLeaseDuration.Seconds() || left > timeout {
 								return state, ErrConflict
 							}
 						}
