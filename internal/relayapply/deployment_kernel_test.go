@@ -80,6 +80,10 @@ func TestRelayDeploymentKernelInventoryAndForeignState(t *testing.T) {
 			mutations := 0
 			k := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
 				joined := strings.Join(args, " ")
+				if name == "nft" && strings.HasSuffix(joined, "list table inet "+leaseTable(v)) {
+					// This fixture has only the forwarding policy, no lease table.
+					return nil, errors.New("table absent")
+				}
 				if name == "nft" && strings.HasSuffix(joined, "list tables") {
 					return json.Marshal(object{"nftables": policyExpected(v)[:1]})
 				}
@@ -124,6 +128,26 @@ func TestRelayDeploymentKernelInventoryAndForeignState(t *testing.T) {
 				}
 				if err := k.Remove(context.Background(), v); err == nil {
 					t.Fatal("foreign state removed")
+				}
+			}
+			if mode == "clean" {
+				check := k.maintenanceCheck()
+				if ready, err := check(context.Background(), v, false); !ready || err != nil {
+					t.Fatal("maintenance lost clean inventory", ready, err)
+				}
+				// The BOOTTIME checker must not accidentally inherit the plain
+				// kernel's factory and skip its separate ownership/readback gate.
+				guarded := v
+				guarded.LeaseVersion = 3
+				if ready, err := (bootDeploymentKernel{k}).maintenanceCheck()(context.Background(), guarded, false); ready || err == nil {
+					t.Fatal("missing real guard accepted by maintenance factory")
+				}
+				link["ifalias"] = "changed-between-cycles"
+				if ready, err := k.maintenanceCheck()(context.Background(), v, false); ready || !errors.Is(err, ErrConflict) {
+					t.Fatal("next cycle reused prior ownership", ready, err)
+				}
+				if err := k.Down(context.Background(), v); !errors.Is(err, ErrConflict) {
+					t.Fatal("mutation reused maintenance ownership", err)
 				}
 			}
 			if mutations != 0 || err != nil && strings.Contains(err.Error(), "must-not-disclose") {

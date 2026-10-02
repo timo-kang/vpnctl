@@ -382,14 +382,20 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 			return e.result("blocked", "approval_or_cleanup_failed"), errors.Join(err, statusErr)
 		}
 	}
+	check := e.backend.Check
+	if batch, ok := e.backend.(interface{ maintenanceCheck() deploymentCheck }); ok {
+		check = batch.maintenanceCheck()
+	}
+	var failures []DeploymentFailure
 	checked := make(map[string]bool, len(e.journal.Entries))
 	for _, v := range e.journal.Entries {
 		want, approvalErr := desiredDeployment(r, v.Endpoint, v.ListenPort)
 		if approvalErr != nil || !sameDeployment(v, want) {
 			continue // enforce has already attempted to quiesce this entry.
 		}
-		ready, x := e.backend.Check(ctx, v, false)
+		ready, x := check(ctx, v, false)
 		if x != nil || !ready || v.Phase != "applied" {
+			failures = append(failures, deploymentFailure(v.Endpoint, "ownership_check", x, authenticatedAt))
 			err = errors.Join(err, ErrRecovery, x, e.backend.Down(ctx, v))
 			continue
 		}
@@ -399,13 +405,18 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 		}
 		checked[v.Alias] = true
 		_, x = e.renewLease(ctx, v, r.Deployment.ExpiresAt, authenticatedAt)
+		if x != nil {
+			failures = append(failures, deploymentFailure(v.Endpoint, "lease_renewal", x, authenticatedAt))
+		}
 		if x != nil && !errors.Is(x, ErrLeaseExpired) {
 			x = errors.Join(x, e.backend.Down(ctx, v))
 		}
 		err = errors.Join(err, x)
 	}
 	if err != nil {
-		return e.result("blocked", "lease_renewal_failed"), err
+		out := e.result("blocked", "lease_renewal_failed")
+		out.Failures = failures
+		return out, err
 	}
 	// The supervisor already has an independent kernel expiry guard. Keep
 	// its cycle budget instead of inheriting a CLI's 60s cleanup extension.
@@ -470,4 +481,29 @@ func (e *DeploymentEngine) Recover(ctx context.Context) (DeploymentResult, error
 		}
 	}
 	return e.inspect(ctx)
+}
+
+// Reports contain only bounded public identifiers and enumerated reasons, never
+// command output, raw errors, keys or private configuration paths.
+func deploymentFailure(endpoint, stage string, err error, fresh FreshApproval) DeploymentFailure {
+	reason := "kernel_operation_failed"
+	switch {
+	case err == nil:
+		reason = "incomplete"
+	case errors.Is(err, context.DeadlineExceeded):
+		reason = "deadline"
+	case errors.Is(err, context.Canceled):
+		reason = "cancelled"
+	case errors.Is(err, ErrConflict):
+		reason = "ownership_conflict"
+	case errors.Is(err, ErrLeaseExpired):
+		reason = "lease_expired"
+	case errors.Is(err, ErrRecovery):
+		reason = "recovery_required"
+	}
+	out := DeploymentFailure{EndpointID: endpoint, Stage: stage, Reason: reason}
+	if !fresh.At.IsZero() {
+		out.FreshAgeMS = max(0, time.Since(fresh.At).Milliseconds())
+	}
+	return out
 }
