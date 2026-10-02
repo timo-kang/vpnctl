@@ -71,6 +71,13 @@ type DeploymentResult struct {
 	ForwardingPolicy  string                     `json:"forwarding_policy"`
 	ExpiryEnforcement string                     `json:"expiry_enforcement"`
 	Endpoints         []DeploymentEndpointResult `json:"endpoints"`
+	Failures          []DeploymentFailure        `json:"failures,omitempty"`
+}
+type DeploymentFailure struct {
+	EndpointID string `json:"endpoint_id"`
+	Stage      string `json:"stage"`
+	Reason     string `json:"reason"`
+	FreshAgeMS int64  `json:"fresh_age_ms,omitempty"`
 }
 type DeploymentEndpointResult struct {
 	EndpointID  string           `json:"endpoint_id"`

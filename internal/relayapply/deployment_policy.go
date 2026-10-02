@@ -246,20 +246,11 @@ func validatePolicy(rows []object, e DeploymentEntry) error {
 }
 
 func (k deploymentKernel) policyRead(ctx context.Context, e DeploymentEntry) (bool, error) {
-	rows, err := k.nftRows(ctx, "list", "tables")
-	if err != nil {
-		return false, err
+	rows, exists, err := k.readNFTTable(ctx, policyTable(e))
+	if err != nil || !exists {
+		return exists, err
 	}
-	for _, row := range rows {
-		if table, ok := row["table"].(map[string]any); ok && table["family"] == "inet" && table["name"] == policyTable(e) {
-			rows, err = k.nftRows(ctx, "list", "table", "inet", policyTable(e))
-			if err == nil {
-				err = validatePolicy(rows, e)
-			}
-			return true, err
-		}
-	}
-	return false, nil
+	return true, validatePolicy(rows, e)
 }
 
 func (k deploymentKernel) policyCreate(ctx context.Context, e DeploymentEntry) error {

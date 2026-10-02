@@ -181,7 +181,7 @@ func TestLeaseRenewalConflictQuiescesAndDoesNotSkipOtherEndpoints(t *testing.T) 
 		}
 	}
 	e.backend = failedLeaseBackend{k, "ep0"}
-	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Now().UTC()}); err == nil || r.KernelReady {
+	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Now().UTC()}); err == nil || r.KernelReady || len(r.Failures) != 1 || r.Failures[0].EndpointID != "ep0" || r.Failures[0].Stage != "lease_renewal" {
 		t.Fatal(r, err)
 	}
 	if k.objects["ep0"].up || k.objects["ep0"].lease.Active {
@@ -315,6 +315,9 @@ func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testi
 				case "-j -n -T list flowtables":
 					return encode([]object{})
 				case "-j -n -T list table inet " + leaseTable(entry):
+					if committed && mode == "missing" {
+						return nil, errors.New("table absent")
+					}
 					observed := deadline
 					if committed && mode == "wrong-deadline" {
 						observed = observed.Add(time.Second)

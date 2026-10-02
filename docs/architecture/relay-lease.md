@@ -244,3 +244,17 @@ namespace를 보유한 요청은 최대 1초이고 lock 대기·요청·커널 �
 나머지를 실제 승인 요청과 커널 검증·갱신에 남겨, 다른 감독기를 오래 기다린 뒤 남은
 짧은 시간으로 매번 불완전한 재가동을 시작하지 않게 한다. 잠금을 못 얻어 요청 자체를
 하지 않은 주기는 refresh 간격을 소비하지 않는다. lease/fresh 기한을 연장하지 않는다.
+
+대규모 감독에서 동일 namespace의 link/IPv4·IPv6 route/rule/WG mark/listener inventory는
+각 주기의 소유권 검사들 사이에서만 공유한다. BOOTTIME 기준 5초 이상 경과·역행·시계
+조회 실패 시 재사용하지 않으므로 suspend가 Go deadline의 진행을 멈춰도 오래된 값을
+보존하지 않는다. 승인 정리 후 새 inventory를 만들며 다음
+주기에는 다시 읽는다. endpoint별 주소·WG peer dump·forwarding 정책과 lease/BPF 상태는
+공유하지 않는다. Down/Remove 등 변경 전 검사는 원래 backend에서 새로 읽는다. 일반
+nft table 조회는 table을 직접 읽고, 실패한 경우에만 전체 목록으로 부재와 읽기 실패를
+구분한다. 명령 오류를 table 부재로 추정하거나 lease countdown을 캐시하지 않는다.
+
+감독기의 갱신 실패 응답은 `kernel.failures`에 endpoint ID, `ownership_check` 또는
+`lease_renewal` 단계, 열거된 원인(`deadline`, `lease_expired`, `ownership_conflict` 등),
+실제로 관측한 fresh 승인의 경과 시간을 남긴다. 원시 명령 출력·오류 문자열·키는 싣지 않는다.
+이 목록은 성공한 다른 endpoint의 통신이나 앱 uplink 상태를 추정하는 근거가 아니다.
