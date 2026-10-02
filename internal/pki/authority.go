@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -300,9 +301,14 @@ func validateAuthority(s authorityState) error {
 }
 
 func (a *Authority) clone() authorityState {
-	data, _ := json.Marshal(a.state)
-	var next authorityState
-	_ = json.Unmarshal(data, &next)
+	// Map values contain only immutable strings and value types. Copy the maps
+	// so in-flight readers retain the previous committed generation without
+	// serializing private material and the entire issuance history twice.
+	next := a.state
+	next.CAs = maps.Clone(a.state.CAs)
+	next.Certificates = maps.Clone(a.state.Certificates)
+	next.Acks = maps.Clone(a.state.Acks)
+	next.Renewals = maps.Clone(a.state.Renewals)
 	return next
 }
 
@@ -519,11 +525,11 @@ func (a *Authority) Acknowledge(nodeID string, cert *x509.Certificate, generatio
 	if err != nil || id != nodeID {
 		return ErrCertificateDenied
 	}
-	next := a.clone()
 	ack := TrustAck{Generation: generation, Fingerprint: Fingerprint(cert), At: time.Now().UTC()}
-	if prev, ok := next.Acks[nodeID]; ok && prev.Generation == generation && prev.Fingerprint == ack.Fingerprint {
+	if prev, ok := a.state.Acks[nodeID]; ok && prev.Generation == generation && prev.Fingerprint == ack.Fingerprint {
 		return nil
 	}
+	next := a.clone()
 	next.Acks[nodeID] = ack
 	return a.commit(next)
 }
