@@ -5,10 +5,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"vpnctl/internal/relayapply"
 	"vpnctl/internal/relaycache"
@@ -24,11 +26,15 @@ func runRelayPeerApply(args []string) error {
 	generation := fs.Uint64("key-generation", 0, "local WG key generation (apply)")
 	port := fs.Int("listen-port", 0, "local UDP listen port, independent of external NAT port (apply)")
 	timeout := fs.Duration("timeout", relayapply.MaxDuration, "deadline, at most 1m; rollback has an independent 1m budget")
+	lockWait := fs.Duration("lock-wait", 0, "optional total cache/namespace lock wait, at most 5s and within timeout; default fails fast")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if len(fs.Args()) != 0 || *timeout <= 0 || *timeout > relayapply.MaxDuration {
 		return fmt.Errorf("unexpected arguments or timeout outside (0,1m]")
+	}
+	if *lockWait < 0 || *lockWait > 5*time.Second || *lockWait > *timeout {
+		return fmt.Errorf("lock-wait must be in [0,5s] and no greater than timeout")
 	}
 	apply := args[0] == "apply"
 	if (apply || args[0] == "release") != (*endpoint != "") {
@@ -59,20 +65,31 @@ func runRelayPeerApply(args []string) error {
 	if *dir == "" {
 		*dir = filepath.Join(cfg.Node.PKIDir, "relay-deployments", *relay)
 	}
-	s, err := relaycache.OpenDeployment(*dir, relaycache.DeploymentOptions{PrincipalID: cfg.Node.Name, RelayID: *relay})
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-	e, err := relayapply.OpenDeployment(s)
-	if err != nil {
-		return err
-	}
-	defer e.Close()
 	parent, stop := signalContext()
 	defer stop()
 	ctx, cancel := context.WithTimeout(parent, *timeout)
 	defer cancel()
+	// Both locks share one wait budget, charged to the operation deadline.
+	lockCtx := ctx
+	if *lockWait > 0 {
+		var stopWait context.CancelFunc
+		lockCtx, stopWait = context.WithTimeout(ctx, *lockWait)
+		defer stopWait()
+	}
+	s, err := openRelayCommandLock(lockCtx, *lockWait > 0, func() (*relaycache.DeploymentStore, error) {
+		return relaycache.OpenDeployment(*dir, relaycache.DeploymentOptions{PrincipalID: cfg.Node.Name, RelayID: *relay})
+	}, relaycache.ErrBusy)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	e, err := openRelayCommandLock(lockCtx, *lockWait > 0, func() (*relayapply.DeploymentEngine, error) {
+		return relayapply.OpenDeployment(s)
+	}, relayapply.ErrKernelBusy)
+	if err != nil {
+		return err
+	}
+	defer e.Close()
 	var out relayapply.DeploymentResult
 	switch args[0] {
 	case "apply":
@@ -88,4 +105,19 @@ func runRelayPeerApply(args []string) error {
 		return output
 	}
 	return err
+}
+
+func openRelayCommandLock[T any](ctx context.Context, wait bool, open func() (T, error), busy error) (T, error) {
+	var zero T
+	if err := ctx.Err(); err != nil {
+		return zero, errors.Join(busy, err)
+	}
+	if !wait {
+		return open()
+	}
+	value, err := retrySupervisedLock(ctx, open, busy)
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return value, errors.Join(busy, err)
+	}
+	return value, err
 }

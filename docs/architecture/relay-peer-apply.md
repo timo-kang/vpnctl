@@ -20,7 +20,7 @@ vpnctl relay refresh --config relay.yaml --relay-id relay-a
 vpnctl relay supervise --config relay.yaml --relay-id relay-a
 # 다른 터미널에서 적용한다.
 vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
-  --key-file /var/lib/vpnctl-relay/keys/relay.key --key-generation 1 --listen-port 51820
+  --key-file /var/lib/vpnctl-relay/keys/relay.key --key-generation 1 --listen-port 51820 --lock-wait 5s
 vpnctl relay inspect --config relay.yaml --relay-id relay-a
 vpnctl relay release --config relay.yaml --relay-id relay-a --endpoint-id lan
 vpnctl relay recover --config relay.yaml --relay-id relay-a
@@ -31,6 +31,12 @@ vpnctl relay recover --config relay.yaml --relay-id relay-a
 apply만 key/port 인자를 받는다. private key의 X25519 공개값과 승인 public key를 대조하고,
 설정은 `wg setconf /dev/stdin`의 pipe로만 전달한다. 비밀키는 argv·journal·오류에 넣지 않는다.
 키 생성·회전·외부 NAT mapping의 배포 책임은 운영 시스템에 있다.
+
+잠금 경합은 기본적으로 즉시 `busy`를 반환한다. 감독 실행 중 명시적 작업에는
+`--lock-wait`를 0~5초 범위에서 지정할 수 있다. cache와 namespace 획득에 하나의
+대기 기한을 공유하고 25ms마다 경합만 재시도한다. 대기는 `--timeout`에 포함되며
+그보다 긴 값을 거절한다. 기한 초과는 busy와 deadline 오류를 함께 반환한다.
+공정한 FIFO 순서나 과부하 중 성공을 보장하지 않으며 승인·lease 기한을 늘리지 않는다.
 
 - `vd` + identity hash의 interface 이름을 사용한다. node의 `vr` interface와 분리한다.
   endpoint마다 승인된 relay key를 사용하지만 peer 목록은 해당 endpoint의 binding만 포함한다.

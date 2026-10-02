@@ -19,6 +19,11 @@ NetworkManager, systemd-networkd, netplan이 생성한 설정, DHCP client, wg-q
 현재 namespace lock은 vpnctl 명령끼리의 동시 변경을 막는다. NetworkManager 등 외부
 프로세스가 이 lock을 따르지는 않으므로, 잠금만으로 공존이 보장된다고 판단하지 않는다.
 
+이 계약은 새 relay 후보/배포 journal 경로를 기준으로 한다. 기존 `up`/agent direct의
+`wireguard.Manager.ApplyPeers`는 지정 WG에 syncconf를 적용하고 policy table을
+재설치한다. 해당 WG/table은 전용으로 예약해야 한다. 기존 적용자까지 같은 소유권
+검사로 통합하고 외부 자원 보존을 검증하는 일도 #20/#23의 잔여 조건이다.
+
 ## 배포 설정 예제
 
 이름은 실제 `node relay plan`/`relay inspect` 결과의 interface로 치환한다. wildcard로
