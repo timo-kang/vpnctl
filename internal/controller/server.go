@@ -69,12 +69,18 @@ type Server struct {
 	registryUncertain bool
 	// directOK tracks recent direct probe successes reported by nodes.
 	// Used to gate P2P WireGuard /32 injection so relay doesn't get blackholed.
-	directOK         map[string]map[string]time.Time // node_id -> peer_id -> last success
-	probeResponder   *direct.Responder
-	tokenStore       *pki.TokenStore
-	authority        *pki.Authority
-	pkiDir           string
-	legacyCertLogged sync.Map
+	directOK              map[string]map[string]time.Time // node_id -> peer_id -> ticket issue time
+	directObservedIssued  uint64
+	directObservedApplied uint64
+	directPairs           map[directPairKey]*directPairState
+	directSecret          string
+	directObserved        map[string]string
+	directNow             func() time.Time
+	probeResponder        *direct.Responder
+	tokenStore            *pki.TokenStore
+	authority             *pki.Authority
+	pkiDir                string
+	legacyCertLogged      sync.Map
 }
 
 // NewServer constructs a controller server.
@@ -895,6 +901,7 @@ func (s *Server) commitRegistryLocked(next *store.Registry, autoApply bool) erro
 		return s.applyAndPersist(previous, next, autoApply)
 	}()
 	if err == nil || atomicfile.Replaced(err) {
+		s.invalidateDirectRegistryLocked(previous, next)
 		s.reg = next
 		s.registryUncertain = atomicfile.Replaced(err)
 	}
@@ -1049,8 +1056,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		VPNIP:  result.VPNIP,
 	}
 
-	// Fill observed WireGuard endpoints for candidates (best-effort).
-	s.fillObservedEndpoints(resp.Peers)
+	// Rebuild candidates with the current observed endpoint generation.
+	resp.Peers = s.directCandidates(result.NodeID)
 
 	s.updateMetrics()
 	writeJSON(w, http.StatusOK, resp)
@@ -1071,11 +1078,7 @@ func (s *Server) handleCandidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	peers := s.peersLocked(nodeID)
-	s.mu.Unlock()
-
-	s.fillObservedEndpoints(peers)
+	peers := s.directCandidates(nodeID)
 
 	resp := api.CandidatesResponse{Peers: peers}
 	writeJSON(w, http.StatusOK, resp)
@@ -1216,18 +1219,19 @@ func (s *Server) handleDirectResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
+	issued, ticketErr := s.acceptDirectLocked(req)
+	if ticketErr != nil {
+		s.mu.Unlock()
+		writeJSONError(w, http.StatusConflict, ticketErr.Error())
+		return
+	}
 	if req.Success {
 		m := s.directOK[req.NodeID]
 		if m == nil {
 			m = make(map[string]time.Time)
 			s.directOK[req.NodeID] = m
 		}
-		m[req.PeerID] = time.Now().UTC()
-	} else {
-		// An explicit failure invalidates the pair, including either-direction mode.
-		// Neither direction may reuse a success observed before this failure.
-		delete(s.directOK[req.NodeID], req.PeerID)
-		delete(s.directOK[req.PeerID], req.NodeID)
+		m[req.PeerID] = issued
 	}
 	s.mu.Unlock()
 
@@ -1279,12 +1283,16 @@ func (s *Server) peersLocked(nodeID string) []api.PeerCandidate {
 		if node.ID == nodeID {
 			continue
 		}
+		endpoint := node.Endpoint
+		if endpoint == "" {
+			endpoint = s.directObserved[node.PubKey]
+		}
 		peers = append(peers, api.PeerCandidate{
 			ID:         node.ID,
 			Name:       node.Name,
 			PubKey:     node.PubKey,
 			VPNIP:      node.VPNIP,
-			Endpoint:   node.Endpoint,
+			Endpoint:   endpoint,
 			PublicAddr: node.PublicAddr,
 			NATType:    node.NATType,
 			ProbePort:  node.ProbePort,
@@ -1296,8 +1304,8 @@ func (s *Server) peersLocked(nodeID string) []api.PeerCandidate {
 
 func (s *Server) p2pReadyLocked(a, b string) bool {
 	// Require mutual direct probe success within TTL.
-	const ttl = 2 * time.Minute
-	now := time.Now().UTC()
+	const ttl = directReadinessTTL
+	now := s.directClock()
 
 	ab := s.directOK[a]
 	ba := s.directOK[b]
@@ -1308,10 +1316,10 @@ func (s *Server) p2pReadyLocked(a, b string) bool {
 	t2, ok2 := ba[a]
 	switch strings.ToLower(strings.TrimSpace(s.cfg.P2PReadyMode)) {
 	case "either":
-		if ok1 && now.Sub(t1) <= ttl {
+		if ok1 && now.Sub(t1) >= 0 && now.Sub(t1) < ttl {
 			return true
 		}
-		if ok2 && now.Sub(t2) <= ttl {
+		if ok2 && now.Sub(t2) >= 0 && now.Sub(t2) < ttl {
 			return true
 		}
 		return false
@@ -1319,32 +1327,10 @@ func (s *Server) p2pReadyLocked(a, b string) bool {
 		if !ok1 || !ok2 {
 			return false
 		}
-		if now.Sub(t1) > ttl || now.Sub(t2) > ttl {
+		if now.Sub(t1) < 0 || now.Sub(t2) < 0 || now.Sub(t1) >= ttl || now.Sub(t2) >= ttl {
 			return false
 		}
 		return true
-	}
-}
-
-func (s *Server) fillObservedEndpoints(peers []api.PeerCandidate) {
-	if s == nil || s.wg == nil || s.cfg.WGInterface == "" {
-		return
-	}
-	m, err := s.wg.PeerEndpoints(s.cfg.WGInterface)
-	if err != nil || len(m) == 0 {
-		return
-	}
-	for i := range peers {
-		// If the node explicitly advertised an endpoint (e.g. port-forwarded), don't override it.
-		if peers[i].Endpoint != "" {
-			continue
-		}
-		if peers[i].PubKey == "" {
-			continue
-		}
-		if ep := m[peers[i].PubKey]; ep != "" {
-			peers[i].Endpoint = ep
-		}
 	}
 }
 

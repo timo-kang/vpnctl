@@ -40,6 +40,7 @@ func command(ctx context.Context, input, name string, args ...string) ([]byte, e
 	c.Stdin = strings.NewReader(input)
 	out, stderr := &outputBuffer{max: 512 << 10}, &outputBuffer{max: 4096}
 	c.Stdout, c.Stderr = out, stderr
+	defer func() { clear(stderr.b.Bytes()) }()
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	c.Cancel = func() error {
 		err := syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
@@ -50,6 +51,7 @@ func command(ctx context.Context, input, name string, args ...string) ([]byte, e
 	}
 	c.WaitDelay = 250 * time.Millisecond
 	if err := c.Run(); err != nil {
+		clear(out.b.Bytes())
 		if c.Process != nil {
 			_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 		}

@@ -140,6 +140,11 @@ func (r *m3Recipient) args(action, endpoint string) []string {
 	return a
 }
 func (r *m3Recipient) call(action string, ep, port int) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
+	defer cancel()
+	return r.callContext(ctx, action, ep, port)
+}
+func (r *m3Recipient) callContext(ctx context.Context, action string, ep, port int, extra ...string) ([]byte, error) {
 	a := r.args(action, "")
 	if ep >= 0 {
 		a = append(a, "--endpoint-id", fmt.Sprintf("ep%d", ep))
@@ -147,17 +152,49 @@ func (r *m3Recipient) call(action string, ep, port int) ([]byte, error) {
 	if action == "apply" {
 		a = append(a, "--key-file", r.key, "--key-generation", fmt.Sprint(r.generation), "--listen-port", fmt.Sprint(port))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
-	defer cancel()
-	return netCommand(ctx, r.ns, a...).Output()
+	a = append(a, extra...)
+	started := time.Now()
+	b, err := netCommand(ctx, r.ns, a...).Output()
+	var state map[string]any
+	_ = json.Unmarshal(b, &state)
+	class := "success"
+	if err != nil {
+		class = "failed"
+		var exited *exec.ExitError
+		if errors.As(err, &exited) && strings.Contains(string(exited.Stderr), "busy") {
+			class = "busy"
+		}
+		if ctx.Err() != nil {
+			class = "deadline"
+		}
+	}
+	record, _ := json.Marshal(map[string]any{"at": time.Now().UTC(), "action": action, "endpoint": ep, "elapsed_ms": time.Since(started).Milliseconds(), "result": class, "state": state["state"], "reason": state["reason"]})
+	file, saveErr := os.OpenFile(filepath.Join(r.results, r.relay+"-commands.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if saveErr != nil {
+		return b, errors.Join(err, saveErr)
+	}
+	_, saveErr = file.Write(append(record, '\n'))
+	return b, errors.Join(err, saveErr, file.Close())
 }
 func (r *m3Recipient) require(action string, ep, port int) relayapply.DeploymentResult {
 	r.t.Helper()
 	var out relayapply.DeploymentResult
-	// Converge after fail-fast ownership rejection or a lease that expired
-	// during another endpoint's setup. ready() independently verifies renewal.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	// Explicit setup/recovery may wait for locks within its existing 15s
+	// operation budget. Burst calls retain the default fail-fast behavior.
+	// ready() independently verifies authenticated lease renewal.
 	eventually(r.t, 15*time.Second, "relay "+action, func() error {
-		b, err := r.call(action, ep, port)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var options []string
+		if action == "apply" || action == "release" || action == "recover" || action == "inspect" {
+			deadline, _ := ctx.Deadline()
+			remaining := time.Until(deadline)
+			options = []string{"--lock-wait", min(5*time.Second, remaining).String(), "--timeout", remaining.String()}
+		}
+		b, err := r.callContext(ctx, action, ep, port, options...)
 		if err != nil {
 			var exited *exec.ExitError
 			if errors.As(err, &exited) {

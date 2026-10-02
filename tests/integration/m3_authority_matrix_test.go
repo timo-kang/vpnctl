@@ -173,8 +173,8 @@ func (f *m3AuthorityFixture) install() {
 		if len(out.Endpoints) != 2 {
 			f.t.Fatal("missing endpoint", out)
 		}
-		// Explicit fixture forwarding/NAT only: the product has not approved a
-		// forwarding policy yet. Managed inet guards still run before this chain.
+		// Deployment fixture forwarding/NAT remains separate from the product
+		// source/target ACL and lease guards, which run before this chain.
 		netOutput(f.t, recipient.ns, "nft", "delete", "table", "ip", "m3")
 		(relayUplink{relay: recipient.ns}).nft(f.t, fmt.Sprintf(`table ip m3 {
  chain forward { type filter hook forward priority filter; policy drop;

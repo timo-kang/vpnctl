@@ -26,14 +26,18 @@ type RegisterRequest struct {
 
 // PeerCandidate describes a peer for direct/relay selection.
 type PeerCandidate struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	PubKey     string `json:"pub_key"`
-	VPNIP      string `json:"vpn_ip"`
-	Endpoint   string `json:"endpoint"`
-	PublicAddr string `json:"public_addr"`
-	NATType    string `json:"nat_type"`
-	ProbePort  int    `json:"probe_port"`
+	// DirectGeneration identifies the pair's current authorization epoch. ProbeToken
+	// authorizes one result for this candidate snapshot, not WG dataplane health.
+	DirectGeneration string `json:"direct_generation,omitempty"`
+	ProbeToken       string `json:"probe_token,omitempty"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	PubKey           string `json:"pub_key"`
+	VPNIP            string `json:"vpn_ip"`
+	Endpoint         string `json:"endpoint"`
+	PublicAddr       string `json:"public_addr"`
+	NATType          string `json:"nat_type"`
+	ProbePort        int    `json:"probe_port"`
 	// P2PReady is set by the controller when recent mutual direct probe success exists.
 	// Nodes should only inject /32 WireGuard peers when this is true to avoid blackholing relay traffic.
 	P2PReady bool `json:"p2p_ready"`
@@ -67,11 +71,12 @@ type NATProbeRequest struct {
 
 // DirectResultRequest submits a direct path attempt result.
 type DirectResultRequest struct {
-	NodeID  string  `json:"node_id"`
-	PeerID  string  `json:"peer_id"`
-	Success bool    `json:"success"`
-	RTTMs   float64 `json:"rtt_ms"`
-	Reason  string  `json:"reason"`
+	ProbeToken string  `json:"probe_token"`
+	NodeID     string  `json:"node_id"`
+	PeerID     string  `json:"peer_id"`
+	Success    bool    `json:"success"`
+	RTTMs      float64 `json:"rtt_ms"`
+	Reason     string  `json:"reason"`
 }
 
 // WGConfigResponse supplies server peer information for nodes.

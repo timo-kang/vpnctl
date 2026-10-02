@@ -115,9 +115,12 @@ func (e *DeploymentEngine) persist() error {
 	return err
 }
 func (e *DeploymentEngine) result(state, reason string) DeploymentResult {
-	r := DeploymentResult{SchemaVersion: 1, State: state, Reason: reason, RelayID: e.journal.Relay, UplinkHealth: "unknown", ExpiryEnforcement: "kernel_lease", Endpoints: []DeploymentEndpointResult{}}
+	r := DeploymentResult{SchemaVersion: 1, State: state, Reason: reason, RelayID: e.journal.Relay, UplinkHealth: "unknown", ExpiryEnforcement: "kernel_lease", ForwardingPolicy: "source_target_prefixes", Endpoints: []DeploymentEndpointResult{}}
 	for _, v := range e.journal.Entries {
 		r.Endpoints = append(r.Endpoints, DeploymentEndpointResult{EndpointID: v.Endpoint, Interface: v.Interface, Phase: v.Phase, Peers: len(v.Peers)})
+		if v.PolicyVersion == 0 {
+			r.ForwardingPolicy = "legacy_upgrade_required"
+		}
 		if v.LeaseVersion == 0 {
 			r.ExpiryEnforcement = "legacy_on_command"
 		} else if v.LeaseVersion < 3 {
@@ -263,7 +266,7 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 			if clockErr != nil {
 				err = clockErr
 			} else {
-				_, err = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, fresh)
+				_, err = e.renewLease(ctx, v, r.Deployment.ExpiresAt, fresh)
 			}
 		}
 	}
@@ -287,10 +290,10 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 	return e.inspect(ctx)
 }
 func (e *DeploymentEngine) inspect(ctx context.Context) (DeploymentResult, error) {
-	return e.inspectWithCleanup(ctx, true)
+	return e.inspectWithCleanup(ctx, true, nil)
 }
 
-func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCleanup bool) (DeploymentResult, error) {
+func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCleanup bool, checked map[string]bool) (DeploymentResult, error) {
 	r, err := e.enforce(ctx)
 	if err != nil {
 		return e.result("blocked", "approval_or_cleanup_failed"), err
@@ -304,7 +307,13 @@ func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCl
 		out.State = "empty"
 	}
 	for i, v := range e.journal.Entries {
-		ready, x := e.backend.Check(ctx, v, false)
+		// Maintain has checked each owned object immediately before renewal.
+		// Reuse only those observations from this locked cycle, not a cache
+		// from an earlier cycle. Always reread leases and approval below.
+		ready, x := checked[v.Alias], error(nil)
+		if checked == nil {
+			ready, x = e.backend.Check(ctx, v, false)
+		}
 		lease, leaseErr := e.backend.LeaseStatus(ctx, v)
 		out.Endpoints[i].Lease = &lease
 		if leaseErr != nil || !lease.Active || r.Deployment == nil || lease.Deadline.After(r.Deployment.ExpiresAt) {
@@ -337,6 +346,19 @@ func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCl
 	return out, err
 }
 
+// A fresh rearm has a deliberately short deadline. Complete one normal,
+// conditional continuation while that kernel grant is still active rather than
+// waiting for another full multi-endpoint cycle. The second call receives NO
+// fresh approval: expiry, process pause or failed readback cannot rearm it.
+// Both nft's old-element condition and BPF's prior-deadline CAS remain required.
+func (e *DeploymentEngine) renewLease(ctx context.Context, v DeploymentEntry, expiry time.Time, fresh FreshApproval) (DeploymentLease, error) {
+	state, err := e.backend.Lease(ctx, v, expiry, fresh)
+	if err != nil || !state.Active || !state.rearmed {
+		return state, err
+	}
+	return e.backend.Lease(ctx, v, expiry, FreshApproval{})
+}
+
 // Maintain renews only already applied, still approved resources. A fresh
 // authenticated response is required to automatically rearm an expired lease.
 func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshApproval) (DeploymentResult, error) {
@@ -360,13 +382,20 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 			return e.result("blocked", "approval_or_cleanup_failed"), errors.Join(err, statusErr)
 		}
 	}
+	check := e.backend.Check
+	if batch, ok := e.backend.(interface{ maintenanceCheck() deploymentCheck }); ok {
+		check = batch.maintenanceCheck()
+	}
+	var failures []DeploymentFailure
+	checked := make(map[string]bool, len(e.journal.Entries))
 	for _, v := range e.journal.Entries {
 		want, approvalErr := desiredDeployment(r, v.Endpoint, v.ListenPort)
 		if approvalErr != nil || !sameDeployment(v, want) {
 			continue // enforce has already attempted to quiesce this entry.
 		}
-		ready, x := e.backend.Check(ctx, v, false)
+		ready, x := check(ctx, v, false)
 		if x != nil || !ready || v.Phase != "applied" {
+			failures = append(failures, deploymentFailure(v.Endpoint, "ownership_check", x, authenticatedAt))
 			err = errors.Join(err, ErrRecovery, x, e.backend.Down(ctx, v))
 			continue
 		}
@@ -374,18 +403,24 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 			err = errors.Join(err, ErrRecovery)
 			continue
 		}
-		_, x = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, authenticatedAt)
+		checked[v.Alias] = true
+		_, x = e.renewLease(ctx, v, r.Deployment.ExpiresAt, authenticatedAt)
+		if x != nil {
+			failures = append(failures, deploymentFailure(v.Endpoint, "lease_renewal", x, authenticatedAt))
+		}
 		if x != nil && !errors.Is(x, ErrLeaseExpired) {
 			x = errors.Join(x, e.backend.Down(ctx, v))
 		}
 		err = errors.Join(err, x)
 	}
 	if err != nil {
-		return e.result("blocked", "lease_renewal_failed"), err
+		out := e.result("blocked", "lease_renewal_failed")
+		out.Failures = failures
+		return out, err
 	}
 	// The supervisor already has an independent kernel expiry guard. Keep
 	// its cycle budget instead of inheriting a CLI's 60s cleanup extension.
-	return e.inspectWithCleanup(ctx, false)
+	return e.inspectWithCleanup(ctx, false, checked)
 }
 func (e *DeploymentEngine) Inspect(ctx context.Context) (DeploymentResult, error) {
 	if !e.mu.TryLock() {
@@ -446,4 +481,29 @@ func (e *DeploymentEngine) Recover(ctx context.Context) (DeploymentResult, error
 		}
 	}
 	return e.inspect(ctx)
+}
+
+// Reports contain only bounded public identifiers and enumerated reasons, never
+// command output, raw errors, keys or private configuration paths.
+func deploymentFailure(endpoint, stage string, err error, fresh FreshApproval) DeploymentFailure {
+	reason := "kernel_operation_failed"
+	switch {
+	case err == nil:
+		reason = "incomplete"
+	case errors.Is(err, context.DeadlineExceeded):
+		reason = "deadline"
+	case errors.Is(err, context.Canceled):
+		reason = "cancelled"
+	case errors.Is(err, ErrConflict):
+		reason = "ownership_conflict"
+	case errors.Is(err, ErrLeaseExpired):
+		reason = "lease_expired"
+	case errors.Is(err, ErrRecovery):
+		reason = "recovery_required"
+	}
+	out := DeploymentFailure{EndpointID: endpoint, Stage: stage, Reason: reason}
+	if !fresh.At.IsZero() {
+		out.FreshAgeMS = max(0, time.Since(fresh.At).Milliseconds())
+	}
+	return out
 }

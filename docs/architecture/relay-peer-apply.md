@@ -3,12 +3,14 @@
 `relay apply|inspect|release|recover`는 영속 승인 cache를 읽어 endpoint별 전용 WireGuard
 interface, 승인된 peer의 정확한 inner `/32` AllowedIPs, main table의 `/32` 반환 경로를
 관리한다. 로봇이 LTE 없이 Wi-Fi/Ethernet으로 릴레이를 거쳐 서버에 도달하는 경로의 일부다.
-자동 경로 선택, 서버 통신 성공, 목적지별 forwarding 권한까지 완료한 상태는 아니다.
+승인된 source/target prefix 조합은 커널 정책으로 제한한다. 자동 경로 선택과 서버 통신
+성공 판정은 별도다.
 
 ## 명령과 소유권
 
 [수신 주체 승인](relay-recipient.md)과 [cache 갱신](relay-deployment-cache.md)이 선행된다.
-Linux의 `ip`, `wg`, `nft`, 대상 network namespace의 NET_ADMIN 권한이 필요하다. 동일 UID의
+Linux의 `ip`, `wg`, `nft`, 대상 network namespace의 NET_ADMIN·BPF 권한과
+전용 bpffs 준비가 필요하다. [서비스 권한 계약](relay-lease.md)을 따른다. 동일 UID의
 0700 디렉터리에 0600 단일 hardlink 일반 파일로 private key를 배포한다. symlink/FIFO,
 비신뢰 상위 디렉터리, 다른 공개키, 잘못된 key generation은 적용 전에 거절한다.
 
@@ -18,7 +20,7 @@ vpnctl relay refresh --config relay.yaml --relay-id relay-a
 vpnctl relay supervise --config relay.yaml --relay-id relay-a
 # 다른 터미널에서 적용한다.
 vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
-  --key-file /var/lib/vpnctl-relay/keys/relay.key --key-generation 1 --listen-port 51820
+  --key-file /var/lib/vpnctl-relay/keys/relay.key --key-generation 1 --listen-port 51820 --lock-wait 5s
 vpnctl relay inspect --config relay.yaml --relay-id relay-a
 vpnctl relay release --config relay.yaml --relay-id relay-a --endpoint-id lan
 vpnctl relay recover --config relay.yaml --relay-id relay-a
@@ -29,6 +31,12 @@ vpnctl relay recover --config relay.yaml --relay-id relay-a
 apply만 key/port 인자를 받는다. private key의 X25519 공개값과 승인 public key를 대조하고,
 설정은 `wg setconf /dev/stdin`의 pipe로만 전달한다. 비밀키는 argv·journal·오류에 넣지 않는다.
 키 생성·회전·외부 NAT mapping의 배포 책임은 운영 시스템에 있다.
+
+잠금 경합은 기본적으로 즉시 `busy`를 반환한다. 감독 실행 중 명시적 작업에는
+`--lock-wait`를 0~5초 범위에서 지정할 수 있다. cache와 namespace 획득에 하나의
+대기 기한을 공유하고 25ms마다 경합만 재시도한다. 대기는 `--timeout`에 포함되며
+그보다 긴 값을 거절한다. 기한 초과는 busy와 deadline 오류를 함께 반환한다.
+공정한 FIFO 순서나 과부하 중 성공을 보장하지 않으며 승인·lease 기한을 늘리지 않는다.
 
 - `vd` + identity hash의 interface 이름을 사용한다. node의 `vr` interface와 분리한다.
   endpoint마다 승인된 relay key를 사용하지만 peer 목록은 해당 endpoint의 binding만 포함한다.
@@ -85,8 +93,9 @@ SIGKILL 뒤 `recover`는 미완성 intent를 제거한다. 이미 `applied`인�
 
 ## 배포 경계와 검증
 
-제품 소유: WG interface/peer, inner `/32` 반환 route, endpoint별 nft lease guard, 승인과 소유 journal.
-배포 소유: forwarding sysctl, rp_filter, 외부 endpoint/NAT mapping, source/target 제한 firewall,
+제품 소유: WG interface/peer, inner `/32` 반환 route, endpoint별 nft lease guard·BPF guard,
+`vf…` source/target 제한 table, 승인과 소유 journal.
+배포 소유: forwarding sysctl, rp_filter, 외부 endpoint/NAT mapping, 추가 앱 protocol/port firewall,
 uplink route, SNAT 또는 서버의 명시적 반환 route. node의 앱 route 선택도 아직 후속 단계다.
 [배포 네트워크 계약](../deployment/relay-network.md)을 같이 적용한다.
 
@@ -107,6 +116,50 @@ go test -race ./internal/relayapply ./internal/relaycache ./cmd/vpnctl
 VPNCTL_RACE=0 scripts/test-netns.sh -test.run='^TestNetns_M3(PathTopology|RelayDeploymentScale)$'
 ```
 
-#114에는 [상시 만료 차단 #124](https://github.com/timo-kang/vpnctl/issues/124),
-source/target별 forwarding 제한과 부정 시험, 재사용 가능한 배포 설정의
-통합 판정이 남는다. 자동 선택·전환·세션 유지 검증은 #22/#23/#24에서 이어간다.
+#114의 source/target 제한과 부정 시험은 아래 정책에 포함한다.
+[상시 만료 차단 #124](https://github.com/timo-kang/vpnctl/issues/124)의 배포 플랫폼 판정과
+실제 배포 설정의 통합 판정은 남는다. 자동 선택·전환·세션 유지 검증은 #20~#24에서 이어간다.
+
+## Source/target 정책과 외부 관리자
+
+새 journal entry는 `policy_version: 1`과 정렬된 target/prefix/source grant를 기록한다.
+`relay apply`는 link를 올리기 전에 별도 `inet vf…` table에 정책을 원자적으로 설치한다.
+WG가 인증된 peer의 정확한 source `/32`를 검증하고, 정책은 해당 binding에 허용된 target
+prefix만 전달한다. 반환은 해당 target에서 해당 source로 오는 established/reply 방향으로
+제한한다. 승인되지 않은 목적지, 다른 binding의 source, 신규 서버발 연결, 릴레이 로컬
+서비스와 IPv6 inner 통신은 허용하지 않는다. target의 probe port는 앱 허용 포트 목록이
+아니므로 추가 protocol/port 제한은 배포 방화벽에서 설정한다.
+
+ICMP destination-unreachable/time-exceeded/parameter-problem은 conntrack의 원래 source와
+target이 해당 승인 조합이고 reply/related인 경우에만 전달한다. 릴레이에서 발생한 오류도
+동일하게 제한한다. 임의 ICMP나 모든 related 데이터 연결은 허용하지 않는다. 중간 라우터의
+ICMP source를 node WG가 수신할 수 있는지와 실제 앱의 PMTU/UDP 동작은 #24의 전체 경로
+검증에 포함한다.
+
+inspect/supervise는 table·set·rule·chain·우선순위·소유 comment를 비교한다. 외부 정책
+추가/변경 시 오류를 보고하고 supervise가 기존 lease를 차단한다. 외부 변경을 덮어쓰거나
+그 table을 삭제하지 않는다. 허용 rule의 `return`은 배포 방화벽의 차단을 우회하지 않으며,
+정책만 설치돼도 `uplink_health`는 여전히 `unknown`이다. source/target 권한 변경은 이전
+설치를 회수하고 새 명시적 apply를 요구한다.
+
+policy가 없는 구형 entry는 새 버전에서 회수하고 새 승인·키 검증으로 apply해야 한다.
+구버전 바이너리는 새 journal의 필드를 거절하므로 직접 downgrade하지 않는다. 새 버전의
+release로 차단·회수를 완료하고 journal/cache를 보존한 뒤 운영 rollback 절차를 따른다.
+marker나 정책 table만 지워 구형 상태를 강제로 채택하지 않는다.
+
+SNAT 또는 서버 명시적 반환 route, forwarding과 배포 방화벽은
+[배포 네트워크 계약](../deployment/relay-network.md), NetworkManager/networkd와의
+공존은 [소유권 계약](../deployment/network-ownership.md)을 따른다.
+
+정책 전환의 실제 바이너리 검증은 이전 main `0e1541845ca5086e358453b0c50c1dc300a6fb06`을
+고정한다. CI는 그 checkout에서 별도 바이너리를 빌드하며, runner는 두 바이너리를 읽기
+전용으로 컨테이너에 전달하고 각각의 digest를 manifest에 기록한다.
+
+```sh
+VPNCTL_RACE=0 VPNCTL_TEST_PREVIOUS_BINARY=/path/to/pre-policy-vpnctl \
+  scripts/test-netns.sh -test.run='^TestNetns_M3ForwardPolicyUpgrade$'
+```
+
+새 journal에 대한 구형 inspect의 거절·무변경, 실제 구형 lease v3 설치의 새 감독기 회수,
+새 승인·명시적 apply 뒤 네 경로 TCP 복구를 확인한다. 이전 바이너리를 제공하지 않은
+로컬 실행은 이 검사만 skip하며, skip을 버전 호환성 통과로 기록하지 않는다.

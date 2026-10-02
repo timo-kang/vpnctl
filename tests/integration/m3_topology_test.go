@@ -34,7 +34,7 @@ type m3Probe struct {
 }
 
 func serveM3Echo() error {
-	l, e := net.Listen("tcp4", m3Target+":9192")
+	l, e := net.Listen("tcp4", m3ProbeAddress()+":9192")
 	if e != nil {
 		return e
 	}
@@ -65,6 +65,9 @@ func serveM3Echo() error {
 	}
 }
 func runM3Probe() error {
+	if os.Getenv("VPNCTL_PROBE_UDP_ERROR") == "1" {
+		return runM3UDPError()
+	}
 	began := time.Now()
 	r := m3Probe{}
 	probe := func() error {
@@ -118,13 +121,45 @@ func runM3Probe() error {
 	return json.NewEncoder(os.Stdout).Encode(r)
 }
 
+// A closed UDP service produces a related ICMP port-unreachable. An authorized
+// connection must receive this feedback through both SNAT and the product ACL.
+func runM3UDPError() error {
+	began := time.Now()
+	d := net.Dialer{Timeout: time.Second}
+	if source := os.Getenv("VPNCTL_PROBE_SOURCE"); source != "" {
+		d.LocalAddr = &net.UDPAddr{IP: net.ParseIP(source)}
+	}
+	c, err := d.Dial("udp4", m3ProbeAddress()+":9193")
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(time.Second))
+	if _, err = c.Write([]byte("vpnctl-icmp-control")); err != nil {
+		return err
+	}
+	_, err = c.Read(make([]byte, 64))
+	r := m3Probe{OK: errors.Is(err, syscall.ECONNREFUSED), MS: float64(time.Since(began).Microseconds()) / 1000}
+	if !r.OK {
+		r.Failure = "icmp_unavailable"
+	}
+	return json.NewEncoder(os.Stdout).Encode(r)
+}
+
 // Source routing is installed explicitly by the four-path test fixture.
 func m3Dial(timeout time.Duration) (net.Conn, error) {
 	d := net.Dialer{Timeout: timeout}
 	if source := os.Getenv("VPNCTL_PROBE_SOURCE"); source != "" {
 		d.LocalAddr = &net.TCPAddr{IP: net.ParseIP(source)}
 	}
-	return d.Dial("tcp4", m3Target+":9192")
+	return d.Dial("tcp4", m3ProbeAddress()+":9192")
+}
+
+func m3ProbeAddress() string {
+	if target := os.Getenv("VPNCTL_PROBE_TARGET"); target != "" {
+		return target
+	}
+	return m3Target
 }
 
 type m3Path struct {

@@ -107,7 +107,7 @@ jobs:
       # Concurrent SQLite race packages on two CPUs can starve live producers
       # past their unchanged 45s convergence budget. Every test still runs.
       - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
-      - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic)' -count=1
+      - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic)|^TestCATransition' -count=1
       - name: VM runner isolation and evidence regressions (no guest power actions)
         run: python3 -m unittest discover -s tests/vm -p 'test_*.py' -v
       - run: go vet ./...
@@ -164,10 +164,20 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+      - name: Checkout the pinned pre-forwarding-policy version
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 0e1541845ca5086e358453b0c50c1dc300a6fb06
+          path: .compat/relay-pre-policy
+          persist-credentials: false
+      - name: Build the actual prior binary for journal compatibility
+        working-directory: .compat/relay-pre-policy
+        run: go build -o "$RUNNER_TEMP/vpnctl-previous" ./cmd/vpnctl
       - name: Isolated namespaces, real processes, variable fleet and fault injection
         env:
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-network-results
           VPNCTL_RACE: '0'
+          VPNCTL_TEST_PREVIOUS_BINARY: ${{ runner.temp }}/vpnctl-previous
         run: ./scripts/test-netns.sh -test.skip='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale)$'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -193,6 +203,13 @@ jobs:
           VPNCTL_TEST_CPUS: '2'
           VPNCTL_TEST_MEMORY: 2g
         run: ./scripts/test-netns.sh -test.run='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale)$' -test.timeout=12m
+      - name: Maximum population with five milliseconds added to every kernel command
+        env:
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-m3-lease-results
+          VPNCTL_RACE: '0'
+          VPNCTL_TEST_CPUS: '2'
+          VPNCTL_TEST_MEMORY: 2g
+        run: ./scripts/test-netns.sh -test.run='^TestNetns_M3SupervisionScale$/^nodes_32_endpoints_8$' -m3-scale-command-delay-ms=5 -test.timeout=4m
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

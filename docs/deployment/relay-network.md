@@ -1,7 +1,7 @@
 # 별도 서버 uplink를 위한 relay 배포 계약
 
 이 문서는 다른 배포 저장소가 가져다 쓸 네트워크 설정 계약이다. vpnctl은 WG
-peer/AllowedIPs/노드 경로를 관리하고, 배포 시스템은 relay OS의 forwarding,
+peer/AllowedIPs/노드 경로와 승인 source/target 제한을 관리하고, 배포 시스템은 relay OS의 forwarding,
 방화벽, 서버 반환 경로 또는 SNAT를 관리한다. 아래 예제는 IPv4 전용이며 주소와
 interface 이름은 배포 설정으로 바꾼다. 이 저장소는 운영 호스트에 자동 적용하지 않는다.
 
@@ -128,3 +128,15 @@ and provision the target's public CA bundle independently. See
 for Ethernet/Wi-Fi/LTE collectors, selected outer WG routes, endpoint probes,
 retention, queue loss bounds and `node diagnose`/`fleet uplinks` commands.
 The observer performs no modem activation, route change or relay switching.
+
+## 다중 릴레이 적용과 네트워크 관리자
+
+`relay apply`가 생성한 `vd…` interface에는 승인 source/target prefix 제한과 lease guard가
+적용된다. 위 `wg0` 예제는 실제 inspect의 interface 이름으로 치환한다. 제품의 `vf…`/`vl…`
+table은 배포 방화벽이 소유하지 않는다. 배포 시스템은 별도 앱 포트 제한과 forwarding/NAT를
+관리하고, firewall reload에서 제품 table을 보존한다. 허용되지 않은 source/target은 배포
+forward chain이 넓게 열려 있어도 제품 정책에서 차단한다.
+
+[네트워크 관리자와의 공존 계약](network-ownership.md)에 NetworkManager/networkd 예제와
+자동 경로 전환에 앞서 확인할 소유권·충돌·reload 검증을 정리했다. 실제 관리자별 호환성은
+배포 환경에서 검증해야 하며, 이 문서나 template을 개발 호스트에 자동 설치하지 않는다.

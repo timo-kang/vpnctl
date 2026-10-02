@@ -3,6 +3,14 @@
 set -euo pipefail
 # Resolve caller-relative paths before entering the suite checkout.
 external_binary=${VPNCTL_TEST_BINARY:-}
+previous_binary=${VPNCTL_TEST_PREVIOUS_BINARY:-}
+if [[ -n "$previous_binary" ]]; then
+    previous_binary=$(realpath -- "$previous_binary")
+    if [[ ! -f "$previous_binary" || ! -x "$previous_binary" ]]; then
+        echo 'VPNCTL_TEST_PREVIOUS_BINARY must name an executable Linux vpnctl binary' >&2
+        exit 2
+    fi
+fi
 if [[ -n "$external_binary" ]]; then
     external_binary=$(realpath -- "$external_binary")
     if [[ ! -f "$external_binary" || ! -x "$external_binary" ]]; then
@@ -53,6 +61,11 @@ if [[ -n "${VPNCTL_TEST_WORK_ROOT:-}" ]]; then
     work_mount=(--mount "type=bind,src=$work_dir,dst=/work" -e TMPDIR=/work)
 fi
 binary_origin=checkout
+previous_args=()
+if [[ -n "$previous_binary" ]]; then
+    cp -- "$previous_binary" "$build_dir/vpnctl-previous"
+    previous_args=(-e VPNCTL_TEST_PREVIOUS_BINARY=/test/vpnctl-previous)
+fi
 if [[ -n "$external_binary" ]]; then
     cp -- "$external_binary" "$build_dir/vpnctl"
     binary_origin=external
@@ -78,6 +91,7 @@ manifest="$artifact_dir/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
         "soak_phase_interval=${VPNCTL_SOAK_PHASE_INTERVAL:-}"
     if [[ -n "$work_dir" ]]; then findmnt -T "$work_dir" -o TARGET,SOURCE,FSTYPE,OPTIONS; fi
     sha256sum "$build_dir/vpnctl" "$build_dir/integration.test"
+    if [[ -n "$previous_binary" ]]; then sha256sum "$build_dir/vpnctl-previous"; fi
     docker image inspect "$image_id" --format 'image_id={{.Id}}'
     printf 'test_argument=%s\n' "$@"
 } > "$manifest"
@@ -87,6 +101,7 @@ docker run "${docker_limits[@]}" --rm --init --entrypoint /bin/sh --name "$conta
     --mount "type=bind,src=$build_dir,dst=/test,readonly" \
     --mount "type=bind,src=$artifact_dir,dst=/results" \
     "${work_mount[@]}" \
+    "${previous_args[@]}" \
     -e VPNCTL_INTEGRATION=1 -e VPNCTL_BIN=/test/vpnctl \
     -e VPNCTL_ARTIFACT_DIR=/results -e VPNCTL_NETNS_SIZES="${VPNCTL_NETNS_SIZES:-1,3,8,32}" \
     -e VPNCTL_SOAK_PROFILE="${VPNCTL_SOAK_PROFILE:-auto}" -e VPNCTL_SOAK_DURATION="${VPNCTL_SOAK_DURATION:-}" -e VPNCTL_SOAK_NODES="${VPNCTL_SOAK_NODES:-}" \

@@ -287,8 +287,15 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		return nil
 	})
 	awaitAction := func(op string) *pki.AuthorityStatus {
-		var status *pki.AuthorityStatus
-		eventually(t, 15*time.Second, op, func() error { r, err := admin(api.AdminRequest{Operation: op}); status = r.PKI; return err })
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		status, err := convergeCATransition(ctx, func(ctx context.Context, req api.AdminRequest) (api.AdminResponse, error) {
+			return api.Admin(ctx, ctrlDir, req)
+		}, op)
+		if err != nil {
+			t.Fatalf("%s did not converge within 15s: %v", op, err)
+		}
 		return status
 	}
 	phase("revocation")

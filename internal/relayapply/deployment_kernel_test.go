@@ -29,13 +29,11 @@ func TestRelayDeploymentKernelInventoryAndForeignState(t *testing.T) {
 			v.Phase = "applied"
 			link := object{"ifname": v.Interface, "ifindex": v.LinkIndex, "group": v.Group, "ifalias": v.Alias, "mtu": 1280, "flags": []string{"UP"}, "linkinfo": object{"info_kind": "wireguard"}}
 			routes := []object{}
-			fields := map[string]string{"public-key": v.PublicKey, "listen-port": "51820", "fwmark": "off"}
+			header := []string{"must-not-disclose", v.PublicKey, "51820", "off"}
+			var peers [][]string
 			for _, p := range v.Peers {
 				routes = append(routes, object{"dst": strings.TrimSuffix(p.Address, "/32"), "dev": v.Interface, "protocol": "186", "scope": "253", "metric": v.Group, "flags": []string{}})
-				fields["peers"] += p.PublicKey + "\n"
-				fields["allowed-ips"] += p.PublicKey + " " + p.Address + "\n"
-				fields["preshared-keys"] += p.PublicKey + " (none)\n"
-				fields["persistent-keepalive"] += p.PublicKey + " off\n"
+				peers = append(peers, []string{p.PublicKey, "(none)", "(none)", p.Address, "0", "0", "0", "off"})
 			}
 			addresses := []object{}
 			v6 := []object{}
@@ -51,19 +49,19 @@ func TestRelayDeploymentKernelInventoryAndForeignState(t *testing.T) {
 			case "foreign-address":
 				addresses = append(addresses, object{"family": "inet", "local": "203.0.113.1", "scope": "global"})
 			case "wrong-key":
-				fields["public-key"] = public("other-relay")
+				header[1] = public("other-relay")
 			case "wrong-port":
-				fields["listen-port"] = "51900"
+				header[2] = "51900"
 			case "wrong-mark":
-				fields["fwmark"] = "42"
+				header[3] = "42"
 			case "extra-peer":
-				fields["peers"] += public("external") + "\n"
+				peers = append(peers, []string{public("external"), "(none)", "(none)", "10.99.0.1/32", "0", "0", "0", "off"})
 			case "extra-allowed-ip":
-				fields["allowed-ips"] = strings.ReplaceAll(fields["allowed-ips"], "/32", "/32 0.0.0.0/0")
+				peers[0][3] += ",0.0.0.0/0"
 			case "psk":
-				fields["preshared-keys"] = strings.ReplaceAll(fields["preshared-keys"], "(none)", "must-not-disclose")
+				peers[0][1] = "must-not-disclose"
 			case "keepalive":
-				fields["persistent-keepalive"] = strings.ReplaceAll(fields["persistent-keepalive"], "off", "25")
+				peers[0][7] = "25"
 			case "wrong-owner":
 				link["ifalias"] = "external"
 			case "route-metric":
@@ -73,7 +71,7 @@ func TestRelayDeploymentKernelInventoryAndForeignState(t *testing.T) {
 			case "missing-route":
 				routes = routes[1:]
 			case "missing-peer":
-				fields["peers"] = ""
+				peers = nil
 			case "link-down":
 				link["flags"] = []string{}
 			case "port-collision":
@@ -82,8 +80,15 @@ func TestRelayDeploymentKernelInventoryAndForeignState(t *testing.T) {
 			mutations := 0
 			k := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
 				joined := strings.Join(args, " ")
+				if name == "nft" && strings.HasSuffix(joined, "list table inet "+leaseTable(v)) {
+					// This fixture has only the forwarding policy, no lease table.
+					return nil, errors.New("table absent")
+				}
 				if name == "nft" && strings.HasSuffix(joined, "list tables") {
-					return []byte(`{"nftables":[]}`), nil
+					return json.Marshal(object{"nftables": policyExpected(v)[:1]})
+				}
+				if name == "nft" && strings.HasSuffix(joined, "list table inet "+policyTable(v)) {
+					return json.Marshal(object{"nftables": policyExpected(v)})
 				}
 				switch joined {
 				case "-j -N -d link show":
@@ -101,8 +106,12 @@ func TestRelayDeploymentKernelInventoryAndForeignState(t *testing.T) {
 				case "-j address show dev " + v.Interface:
 					return json.Marshal([]object{{"addr_info": addresses}})
 				}
-				if name == "wg" && len(args) == 3 && args[0] == "show" && args[1] == v.Interface {
-					return []byte(fields[args[2]]), nil
+				if name == "wg" && joined == "show "+v.Interface+" dump" {
+					text := strings.Join(header, "\t") + "\n"
+					for _, peer := range peers {
+						text += strings.Join(peer, "\t") + "\n"
+					}
+					return []byte(text), nil
 				}
 				mutations++
 				return nil, errors.New("unexpected mutation")
@@ -119,6 +128,26 @@ func TestRelayDeploymentKernelInventoryAndForeignState(t *testing.T) {
 				}
 				if err := k.Remove(context.Background(), v); err == nil {
 					t.Fatal("foreign state removed")
+				}
+			}
+			if mode == "clean" {
+				check := k.maintenanceCheck()
+				if ready, err := check(context.Background(), v, false); !ready || err != nil {
+					t.Fatal("maintenance lost clean inventory", ready, err)
+				}
+				// The BOOTTIME checker must not accidentally inherit the plain
+				// kernel's factory and skip its separate ownership/readback gate.
+				guarded := v
+				guarded.LeaseVersion = 3
+				if ready, err := (bootDeploymentKernel{k}).maintenanceCheck()(context.Background(), guarded, false); ready || err == nil {
+					t.Fatal("missing real guard accepted by maintenance factory")
+				}
+				link["ifalias"] = "changed-between-cycles"
+				if ready, err := k.maintenanceCheck()(context.Background(), v, false); ready || !errors.Is(err, ErrConflict) {
+					t.Fatal("next cycle reused prior ownership", ready, err)
+				}
+				if err := k.Down(context.Background(), v); !errors.Is(err, ErrConflict) {
+					t.Fatal("mutation reused maintenance ownership", err)
 				}
 			}
 			if mutations != 0 || err != nil && strings.Contains(err.Error(), "must-not-disclose") {

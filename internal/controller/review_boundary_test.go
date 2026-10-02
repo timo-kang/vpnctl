@@ -224,7 +224,7 @@ func TestDirectFailureInvalidatesPreviousSuccessInBothModes(t *testing.T) {
 			}
 			submit := func(a, b string, success bool) {
 				t.Helper()
-				body, _ := json.Marshal(api.DirectResultRequest{NodeID: a, PeerID: b, Success: success})
+				body, _ := json.Marshal(directRequestForTest(t, s, a, b, success))
 				rec := httptest.NewRecorder()
 				s.handleDirectResult(rec, httptest.NewRequest(http.MethodPost, "/direct-result", bytes.NewReader(body)))
 				if rec.Code != 204 {

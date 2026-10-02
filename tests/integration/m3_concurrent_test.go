@@ -144,8 +144,13 @@ func checkM3ConcurrentRecipients(t *testing.T, ctrl *m3Controller, first *m3Reci
 	if _, err := second.call("apply", 99, 52999); err == nil {
 		t.Fatal("invalid endpoint accepted without contention")
 	}
-	second.require("apply", 7, 52827)
+	// A short rearm grant can expire while both supervisors are paused.
+	// Restore the other installed endpoints with a real authenticated refresh
+	// before inspecting them as part of an explicit Apply. Retrying Apply
+	// alone deliberately cannot rearm an unrelated expired endpoint.
 	second.start()
+	second.ready()
+	second.require("apply", 7, 52827)
 	if out := second.ready(); len(out.Kernel.Endpoints) != 8 {
 		t.Fatal("second deployment not restored", out)
 	}

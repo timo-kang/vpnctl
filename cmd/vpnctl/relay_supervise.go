@@ -37,7 +37,12 @@ const relayKernelRetryInterval = 25 * time.Millisecond
 
 func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, client relaycache.DeploymentClient, refresh bool) (relaySupervisionReport, error) {
 	out := relaySupervisionReport{SchemaVersion: 1, ObservedAt: time.Now().UTC(), State: "degraded", Refresh: "not_due", ApprovalState: "unknown"}
-	c, err := openSupervisedCache(ctx, func() (*relaycache.DeploymentStore, error) {
+	// Reserve the rest of this bounded cycle for the authenticated request
+	// and kernel work. Starting after a 3-4s namespace wait leaves too little
+	// time to rearm an eight-endpoint relay and can starve it forever.
+	locks, stopLocks := relaySupervisionLockContext(ctx)
+	defer stopLocks()
+	c, err := openSupervisedCache(locks, func() (*relaycache.DeploymentStore, error) {
 		return relaycache.OpenDeployment(dir, relaycache.DeploymentOptions{PrincipalID: principal, RelayID: relay})
 	})
 	if err != nil {
@@ -45,6 +50,18 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 		return out, err
 	}
 	defer c.Close()
+	// Acquire the namespace before starting the bounded authenticated request.
+	// Waiting behind another supervisor must not consume a fresh response's
+	// five-second rearm window. Never relabel an old response with a new time.
+	// The request holds the namespace for at most one second, within the same
+	// five-second cycle; independent kernel leases still bound any stalled work.
+	e, openErr := openSupervisedDeployment(locks, func() (*relayapply.DeploymentEngine, error) { return relayapply.OpenDeployment(c) })
+	if openErr != nil {
+		out.Reason = "enforcement_unavailable"
+		return out, openErr
+	}
+	defer e.Close()
+	stopLocks()
 	authenticatedAt := relayapply.FreshApproval{}
 	var report relaycache.DeploymentReport
 	if refresh {
@@ -66,14 +83,7 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	if report.Deployment != nil {
 		out.ApprovalExpiresAt = report.Deployment.ExpiresAt
 	}
-	// Even a rejected refresh must reach enforcement. An I/O failure that
-	// prevents opening the engine cannot refresh the independent kernel lease.
-	e, openErr := openSupervisedDeployment(ctx, func() (*relayapply.DeploymentEngine, error) { return relayapply.OpenDeployment(c) })
-	if openErr != nil {
-		out.Reason = "enforcement_unavailable"
-		return out, errors.Join(err, openErr)
-	}
-	defer e.Close()
+	// Even a rejected refresh must reach enforcement.
 	kernel, enforceErr := e.Maintain(ctx, authenticatedAt)
 	out.Kernel = &kernel
 	latest, statusErr := c.Status()
@@ -97,7 +107,12 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	return out, nil
 }
 
-// Retry cache and namespace contention within the existing cycle deadline.
+// Cache and namespace share one admission budget, not one budget each.
+func relaySupervisionLockContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, time.Second)
+}
+
+// Retry cache and namespace contention within the caller's lock deadline.
 // A once-per-second cache attempt can repeatedly collide with short CLI calls
 // and let every lease expire despite idle gaps between those calls.
 func openSupervisedCache(ctx context.Context, open func() (*relaycache.DeploymentStore, error)) (*relaycache.DeploymentStore, error) {
@@ -134,12 +149,14 @@ func superviseRelay(ctx context.Context, w io.Writer, cycle func(context.Context
 		}
 		started := time.Now()
 		refresh := !started.Before(nextRefresh)
-		if refresh {
-			nextRefresh = started.Add(refreshInterval)
-		}
 		bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 		out, _ := cycle(bounded, refresh)
 		cancel()
+		// Lock admission can fail before any request. Keep that refresh due;
+		// otherwise a busy namespace consumes an entire refresh interval.
+		if refresh && out.Refresh != "not_due" {
+			nextRefresh = started.Add(refreshInterval)
+		}
 		out.ObservedAt = time.Now().UTC()
 		out.CycleMS = time.Since(started).Milliseconds()
 		if err := json.NewEncoder(w).Encode(out); err != nil {

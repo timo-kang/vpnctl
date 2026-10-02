@@ -23,6 +23,7 @@ var ErrLeaseExpired = errors.New("relay lease expired; fresh controller approval
 type DeploymentLease struct {
 	Active   bool      `json:"active"`
 	Deadline time.Time `json:"deadline"`
+	rearmed  bool      // this call established a fresh short grant, not a continuation
 	set      string
 	staged   []string
 	Boot     *relayguard.State `json:"boottime,omitempty"`
@@ -201,22 +202,9 @@ func leaseIndex(v any, e DeploymentEntry) bool {
 }
 
 func (k deploymentKernel) leaseRead(ctx context.Context, e DeploymentEntry) (DeploymentLease, bool, error) {
-	rows, err := k.nftRows(ctx, "list", "tables")
-	if err != nil {
-		return DeploymentLease{}, false, err
-	}
-	exists := false
-	for _, r := range rows {
-		if table, ok := r["table"].(map[string]any); ok && table["family"] == "inet" && table["name"] == leaseTable(e) {
-			exists = true
-		}
-	}
-	if !exists {
-		return DeploymentLease{}, false, nil
-	}
-	rows, err = k.nftRows(ctx, "list", "table", "inet", leaseTable(e))
-	if err != nil {
-		return DeploymentLease{}, true, err
+	rows, exists, err := k.readNFTTable(ctx, leaseTable(e))
+	if err != nil || !exists {
+		return DeploymentLease{}, exists, err
 	}
 	var s DeploymentLease
 	if e.LeaseVersion >= 2 {

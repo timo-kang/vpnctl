@@ -19,8 +19,12 @@ vpnctl relay apply --config relay.yaml --relay-id relay-a --endpoint-id lan \
 `relay sync-credentials`, 승인 TTL 연장은 관리자 catalog 갱신이 맡는다. 감독은
 요청마다 디스크의 mTLS credentials를 다시 읽으며, 인증서 갱신만으로 승인 TTL을
 연장하지 않는다. 최초 cache가 없으면 `refresh`로 초기화해야 한다.
-만료 lease의 재허가는 새 인증 요청 시작부터 최대 5초까지만 열며, 이후 정상 cycle이
-갱신한다. 게스트의 상대 clock이 진행하는 프로세스 지연 조건에서 요청 시각은
+만료 lease의 첫 재허가는 새 인증 요청 시작부터 최대 5초까지만 연다. 커널에서 그 짧은
+허가가 실제 활성임을 읽어 확인하면, 같은 작업 안에서 일반 연속 갱신을 한 번 수행한다.
+연속 갱신에는 fresh 승인을 넘기지 않으며 nft의 이전 원소 조건과 BPF의 이전 세대·기한
+CAS를 다시 통과해야 한다. 그 사이 정지·만료가 발생하면 새 허가로 바꾸지 않는다.
+다중 endpoint 검사 순서를 한 바퀴 기다리다가 같은 짧은 허가가 반복 만료되는 문제를
+피하면서, 정상 lease의 최대 10초와 fresh 재가동 창의 5초를 각각 유지한다. 게스트의 상대 clock이 진행하는 프로세스 지연 조건에서 요청 시각은
 monotonic 성분을 보존해 저장/검사 지연과 작은
 wall clock 역행으로 재허가 창이 늘어나지 않게 한다. nft 타이머 준비와 경로 선택을
 분리하여 지연된 선택 명령은 이미 만료된 타이머를 다시 시작할 수 없다(#136).
@@ -48,11 +52,12 @@ nft JSON은 초 미만 원소를 `timeout: 0, expires: 0`으로 표시할 수 �
 인증 조회 기본 주기는 5초이고 `--refresh-interval`은 1~20초다. HTTP 요청은 1초,
 감독 cycle의 커널 명령 context는 5초로 제한한다. 파일 I/O 자체의 정지까지 context가
 해제하지는 못한다. 이 경우에도 lease는 갱신되지 않는다. cache lock은 cycle마다
-해제하고, namespace 적용 lock은 HTTP 호출이 끝난 뒤에만 얻는다. 동시 CLI의 busy
-오류는 무한 대기하지 않으며, 운영 작업은 짧은 backoff로 재시도한다.
+해제하고, namespace 적용 lock을 얻은 뒤 실제 HTTP 호출을 시작한다. 잠금 대기로
+fresh 응답의 재가동 창을 소진하거나 오래된 응답에 새 시각을 붙이지 않는다.
 cache와 namespace 잠금 경합은 기존 cycle 예산 안에서 25ms마다 재시도한다.
 짧은 CLI가 반복되어 1초 간격의 cache 획득이 계속 충돌하더라도 중간 해제 기회를
-이용한다. 다른 오류는 재시도하지 않으며 CLI 자체는 기존 fail-fast 정책을 유지한다. 작업이 1초보다
+이용한다. 다른 오류는 재시도하지 않는다. CLI는 기본 fail-fast이며, 명시적
+`apply|inspect|release|recover --lock-wait`만 작업 기한 안에서 최대 5초 대기한다. 작업이 1초보다
 길어져도 잠금을 해제한 뒤 다음 주기까지 최소 50ms를 두어 다른 supervisor에 획득
 기회를 준다. 공정한 FIFO 대기열이나 과부하 상태의 무중단을 보장하지는 않는다.
 
@@ -60,6 +65,14 @@ cache와 namespace 잠금 경합은 기존 cycle 예산 안에서 25ms마다 재
 내림한 값이다. 따라서 승인 시각보다 최대 1초 일찍 닫힐 수 있다. 새 패킷의 통과 여부를
 평가하는 기한이며 이미 hook을 통과한 패킷을 회수하거나 기존 TCP socket을 종료하지는 않는다.
 차단 뒤에도 WG interface/peer 또는 conntrack 항목은 남아 있을 수 있다.
+
+한 감독 주기는 endpoint의 소유권·WireGuard 설정·경로·forwarding 정책을 갱신 직전에
+확인하고, 같은 잠금 안에서는 그 결과를 재사용한다. 마지막에는 lease 상태와 승인 유효성을
+다시 읽는다. 이전 주기의 검사 결과를 재사용하지 않는다. 커널 전체의 원자적 snapshot을
+뜻하지 않으며 외부 변경은 다음 검사에서도 다시 확인한다. 명시적 `inspect`와 `apply`의
+최종 검사는 항상 새 inventory를 읽는다. WireGuard 설정은 bounded `wg show … dump`
+한 번으로 확인하며 private-key/PSK 열을 로그나 오류에 포함하지 않는다.
+[출력 형식 근거](https://git.zx2c4.com/wireguard-tools/tree/src/show.c).
 
 ## 커널 규칙과 배포 경계
 
@@ -217,3 +230,31 @@ mount namespace의 bpffs를 사용한다. 별도 경로가 필요하면 모든 �
 각 endpoint에 `relay release`를 실행한다. supervisor 정지만으로도 lease는 만료된다.
 네트워크 준비 순서, controller 도달 경로, source/target firewall과 SNAT/반환 route는
 [배포 네트워크 계약](../deployment/relay-network.md)의 책임으로 남는다.
+
+## 다중 감독기의 fresh 승인 요청 순서 (#143)
+
+감독기는 cache lock과 namespace lock을 취득한 뒤 실제 인증 요청을 수행한다. 다른 감독기를
+기다린 시간을 승인 재가동의 5초 창에 포함시키지 않으며, 승인 시각은 여전히 실제 HTTP 요청
+직전에 읽은 realtime/BOOTTIME이다. 오래된 응답의 시각을 다시 찍어 사용하지 않는다.
+namespace를 보유한 요청은 최대 1초이고 lock 대기·요청·커널 작업 전체의 5초 cycle 예산은
+유지한다. 실패 응답 뒤에도 Maintain을 호출하며 프로세스 중단은 독립 kernel lease가 차단한다.
+배포 source/target 정책 검사로 cycle 비용이 늘어도 이 순서를 유지해야 한다.
+
+감독기의 cache와 namespace 잠금 대기는 하나의 1초 예산을 공유한다. 전체 주기 5초 중
+나머지를 실제 승인 요청과 커널 검증·갱신에 남겨, 다른 감독기를 오래 기다린 뒤 남은
+짧은 시간으로 매번 불완전한 재가동을 시작하지 않게 한다. 잠금을 못 얻어 요청 자체를
+하지 않은 주기는 refresh 간격을 소비하지 않는다. lease/fresh 기한을 연장하지 않는다.
+
+대규모 감독에서 동일 namespace의 link/IPv4·IPv6 route/rule/WG mark/listener inventory는
+각 주기의 소유권 검사들 사이에서만 공유한다. BOOTTIME 기준 5초 이상 경과·역행·시계
+조회 실패 시 재사용하지 않으므로 suspend가 Go deadline의 진행을 멈춰도 오래된 값을
+보존하지 않는다. 승인 정리 후 새 inventory를 만들며 다음
+주기에는 다시 읽는다. endpoint별 주소·WG peer dump·forwarding 정책과 lease/BPF 상태는
+공유하지 않는다. Down/Remove 등 변경 전 검사는 원래 backend에서 새로 읽는다. 일반
+nft table 조회는 table을 직접 읽고, 실패한 경우에만 전체 목록으로 부재와 읽기 실패를
+구분한다. 명령 오류를 table 부재로 추정하거나 lease countdown을 캐시하지 않는다.
+
+감독기의 갱신 실패 응답은 `kernel.failures`에 endpoint ID, `ownership_check` 또는
+`lease_renewal` 단계, 열거된 원인(`deadline`, `lease_expired`, `ownership_conflict` 등),
+실제로 관측한 fresh 승인의 경과 시간을 남긴다. 원시 명령 출력·오류 문자열·키는 싣지 않는다.
+이 목록은 성공한 다른 endpoint의 통신이나 앱 uplink 상태를 추정하는 근거가 아니다.

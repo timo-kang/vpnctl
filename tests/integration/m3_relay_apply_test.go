@@ -60,6 +60,7 @@ func checkM3RelayApply(t *testing.T, relays []string, private, configPath string
 			}
 		}
 		if (err == nil) != success {
+			t.Log(netOutput(t, relays[r], "nft", "-j", "-n", "list", "ruleset"))
 			for _, a := range [][]string{{"ip", "-j", "-N", "-d", "link", "show"}, {"ip", "-j", "-N", "-6", "route", "show", "table", "all"}, {"ip", "-j", "-N", "-4", "route", "show", "table", "all"}} {
 				t.Log(netOutput(t, relays[r], a...))
 			}
@@ -116,7 +117,7 @@ func checkM3RelayApply(t *testing.T, relays []string, private, configPath string
 			call(r, "apply", u, true)
 			iface := out.Endpoints[u].Interface
 			interfaces[r] = append(interfaces[r], iface)
-			// Forwarding authorization/NAT are explicitly still fixture-owned.
+			// Deployment port policy/NAT supplement the product source/target ACL.
 			netOutput(t, ns, "nft", "add", "rule", "ip", "m3", "forward", "iifname", iface, "oifname", "uplink0", "ip", "daddr", m3Target, "tcp", "dport", "9192", "accept")
 			netOutput(t, ns, "nft", "add", "rule", "ip", "m3", "forward", "iifname", "uplink0", "oifname", iface, "ct", "state", "established,related", "accept")
 		}
