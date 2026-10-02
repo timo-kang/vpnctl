@@ -37,7 +37,9 @@ const relayKernelRetryInterval = 25 * time.Millisecond
 
 func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, client relaycache.DeploymentClient, refresh bool) (relaySupervisionReport, error) {
 	out := relaySupervisionReport{SchemaVersion: 1, ObservedAt: time.Now().UTC(), State: "degraded", Refresh: "not_due", ApprovalState: "unknown"}
-	c, err := relaycache.OpenDeployment(dir, relaycache.DeploymentOptions{PrincipalID: principal, RelayID: relay})
+	c, err := openSupervisedCache(ctx, func() (*relaycache.DeploymentStore, error) {
+		return relaycache.OpenDeployment(dir, relaycache.DeploymentOptions{PrincipalID: principal, RelayID: relay})
+	})
 	if err != nil {
 		out.Reason = "cache_unavailable"
 		return out, err
@@ -95,23 +97,30 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	return out, nil
 }
 
-// Two periodic supervisors can otherwise collide at the same phase forever.
-// Retry only namespace contention, within the caller's existing cycle budget.
-// The independent kernel deadline still closes traffic if that budget runs out.
+// Retry cache and namespace contention within the existing cycle deadline.
+// A once-per-second cache attempt can repeatedly collide with short CLI calls
+// and let every lease expire despite idle gaps between those calls.
+func openSupervisedCache(ctx context.Context, open func() (*relaycache.DeploymentStore, error)) (*relaycache.DeploymentStore, error) {
+	return retrySupervisedLock(ctx, open, relaycache.ErrBusy)
+}
 func openSupervisedDeployment(ctx context.Context, open func() (*relayapply.DeploymentEngine, error)) (*relayapply.DeploymentEngine, error) {
+	return retrySupervisedLock(ctx, open, relayapply.ErrKernelBusy)
+}
+func retrySupervisedLock[T any](ctx context.Context, open func() (T, error), busy error) (T, error) {
+	var zero T
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return zero, err
 		}
-		e, err := open()
-		if !errors.Is(err, relayapply.ErrKernelBusy) {
-			return e, err
+		resource, err := open()
+		if !errors.Is(err, busy) {
+			return resource, err
 		}
 		timer := time.NewTimer(relayKernelRetryInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return zero, ctx.Err()
 		case <-timer.C:
 		}
 	}

@@ -48,7 +48,9 @@ VM pause는 외부 사전 차단 계약이 계속 필요하다.
 해제하지는 못한다. 이 경우에도 lease는 갱신되지 않는다. cache lock은 cycle마다
 해제하고, namespace 적용 lock은 HTTP 호출이 끝난 뒤에만 얻는다. 동시 CLI의 busy
 오류는 무한 대기하지 않으며, 운영 작업은 짧은 backoff로 재시도한다.
-namespace 잠금 경합은 기존 cycle 예산 안에서 25ms마다 재시도한다. 작업이 1초보다
+cache와 namespace 잠금 경합은 기존 cycle 예산 안에서 25ms마다 재시도한다.
+짧은 CLI가 반복되어 1초 간격의 cache 획득이 계속 충돌하더라도 중간 해제 기회를
+이용한다. 다른 오류는 재시도하지 않으며 CLI 자체는 기존 fail-fast 정책을 유지한다. 작업이 1초보다
 길어져도 잠금을 해제한 뒤 다음 주기까지 최소 50ms를 두어 다른 supervisor에 획득
 기회를 준다. 공정한 FIFO 대기열이나 과부하 상태의 무중단을 보장하지는 않는다.
 
