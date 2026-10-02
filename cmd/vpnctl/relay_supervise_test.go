@@ -157,3 +157,55 @@ func TestRelaySupervisorRetriesActualCacheLockWithinCycle(t *testing.T) {
 		t.Fatal("non-contention retried", calls, err)
 	}
 }
+
+func TestRelaySupervisorLockAdmissionReservesWorkBudget(t *testing.T) {
+	cycle, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	locks, stop := relaySupervisionLockContext(cycle)
+	defer stop()
+	cycleDeadline, _ := cycle.Deadline()
+	lockDeadline, _ := locks.Deadline()
+	if cycleDeadline.Sub(lockDeadline) < 3900*time.Millisecond {
+		t.Fatal("lock wait consumed kernel work reserve")
+	}
+	// The cache and namespace use exactly this shared deadline. The first
+	// acquires near its end; the second must not get another full second.
+	started := time.Now()
+	_, err := openSupervisedCache(locks, func() (*relaycache.DeploymentStore, error) {
+		if time.Since(started) < 700*time.Millisecond {
+			return nil, relaycache.ErrBusy
+		}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = openSupervisedDeployment(locks, func() (*relayapply.DeploymentEngine, error) {
+		return nil, relayapply.ErrKernelBusy
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || cycle.Err() != nil || time.Since(started) > 1400*time.Millisecond {
+		t.Fatal("namespace did not share admission deadline", err, cycle.Err())
+	}
+}
+
+func TestRelaySupervisorLockFailureDoesNotConsumeRefresh(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	err := superviseRelay(ctx, io.Discard, func(_ context.Context, refresh bool) (relaySupervisionReport, error) {
+		calls++
+		if refresh != (calls <= 2) {
+			t.Fatal("refresh lost to a lock failure", calls, refresh)
+		}
+		if calls == 1 {
+			return relaySupervisionReport{Refresh: "not_due", Reason: "enforcement_unavailable"}, context.DeadlineExceeded
+		}
+		if calls == 3 {
+			cancel()
+		}
+		return relaySupervisionReport{Refresh: "success"}, nil
+	}, 20*time.Second)
+	if err != nil || calls != 3 {
+		t.Fatal(calls, err)
+	}
+}
