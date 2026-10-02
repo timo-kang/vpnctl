@@ -62,6 +62,14 @@ cache와 namespace 잠금 경합은 기존 cycle 예산 안에서 25ms마다 재
 평가하는 기한이며 이미 hook을 통과한 패킷을 회수하거나 기존 TCP socket을 종료하지는 않는다.
 차단 뒤에도 WG interface/peer 또는 conntrack 항목은 남아 있을 수 있다.
 
+한 감독 주기는 endpoint의 소유권·WireGuard 설정·경로·forwarding 정책을 갱신 직전에
+확인하고, 같은 잠금 안에서는 그 결과를 재사용한다. 마지막에는 lease 상태와 승인 유효성을
+다시 읽는다. 이전 주기의 검사 결과를 재사용하지 않는다. 커널 전체의 원자적 snapshot을
+뜻하지 않으며 외부 변경은 다음 검사에서도 다시 확인한다. 명시적 `inspect`와 `apply`의
+최종 검사는 항상 새 inventory를 읽는다. WireGuard 설정은 bounded `wg show … dump`
+한 번으로 확인하며 private-key/PSK 열을 로그나 오류에 포함하지 않는다.
+[출력 형식 근거](https://git.zx2c4.com/wireguard-tools/tree/src/show.c).
+
 ## 커널 규칙과 배포 경계
 
 endpoint마다 `vl` + interface hash의 `inet` table을 만들고 소유 alias를 각 rule에 기록한다.

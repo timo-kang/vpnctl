@@ -7,8 +7,10 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,12 +20,32 @@ import (
 	"vpnctl/internal/relaycatalog"
 )
 
+var m3ScaleCommandDelayMS = flag.Int("m3-scale-command-delay-ms", 0, "test-only ip/wg/nft delay in [0,10] milliseconds")
+
 // Population qualification, not simultaneous fleet traffic or a latency SLO.
 func TestNetns_M3SupervisionScale(t *testing.T) {
 	requireNetwork(t)
+	if *m3ScaleCommandDelayMS < 0 || *m3ScaleCommandDelayMS > 10 {
+		t.Fatal("m3-scale-command-delay-ms must be in [0,10]")
+	}
 	for _, size := range []int{1, 3, 8, 32} {
 		for _, endpoints := range []int{1, 8} {
 			t.Run(fmt.Sprintf("nodes_%d_endpoints_%d", size, endpoints), func(t *testing.T) {
+				if *m3ScaleCommandDelayMS > 0 {
+					slow := t.TempDir()
+					for _, tool := range []string{"ip", "wg", "nft"} {
+						executable, err := exec.LookPath(tool)
+						if err != nil {
+							t.Fatal(err)
+						}
+						shellPath := "'" + strings.ReplaceAll(executable, "'", "'\"'\"'") + "'"
+						script := fmt.Sprintf("#!/bin/sh\nsleep %.3f\nexec %s \"$@\"\n", float64(*m3ScaleCommandDelayMS)/1000, shellPath)
+						if err := os.WriteFile(filepath.Join(slow, tool), []byte(script), 0700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					t.Setenv("PATH", slow+":"+os.Getenv("PATH"))
+				}
 				ns := newNamespaces(t, 1)
 				private := t.TempDir()
 				if err := os.Chmod(private, 0700); err != nil {
@@ -33,7 +55,7 @@ func TestNetns_M3SupervisionScale(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				report := map[string]any{"schema_version": 1, "nodes": size, "paths_per_node": 4, "endpoints": endpoints, "completed": false, "scope": "real controller mTLS, installed peers/routes and supervisor cycle timing; no fleet traffic SLO"}
+				report := map[string]any{"schema_version": 1, "command_delay_ms": *m3ScaleCommandDelayMS, "nodes": size, "paths_per_node": 4, "endpoints": endpoints, "completed": false, "scope": "real controller mTLS, installed peers/routes and supervisor cycle timing; no fleet traffic SLO"}
 				defer func() {
 					if t.Failed() {
 						// Capture public kernel state before process/namespace cleanup.

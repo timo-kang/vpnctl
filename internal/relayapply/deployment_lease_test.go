@@ -373,11 +373,19 @@ func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testi
 type leaseDeadlineBackend struct {
 	deploymentBackend
 	downDeadline time.Time
+	statusHook   func()
 }
 
 func (b *leaseDeadlineBackend) Down(ctx context.Context, e DeploymentEntry) error {
 	b.downDeadline, _ = ctx.Deadline()
 	return b.deploymentBackend.Down(ctx, e)
+}
+
+func (b *leaseDeadlineBackend) LeaseStatus(ctx context.Context, e DeploymentEntry) (DeploymentLease, error) {
+	if b.statusHook != nil {
+		b.statusHook()
+	}
+	return b.deploymentBackend.LeaseStatus(ctx, e)
 }
 
 func TestLeaseSupervisorFinalCleanupDoesNotExtendCycleBudget(t *testing.T) {
@@ -389,13 +397,7 @@ func TestLeaseSupervisorFinalCleanupDoesNotExtendCycleBudget(t *testing.T) {
 	e.cache = cache
 	backend := &leaseDeadlineBackend{deploymentBackend: k}
 	e.backend = backend
-	checks := 0
-	k.checkHook = func() {
-		checks++
-		if checks == 2 {
-			cache.expired = true
-		}
-	}
+	backend.statusHook = func() { cache.expired = true }
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	want, _ := ctx.Deadline()
@@ -407,5 +409,46 @@ func TestLeaseSupervisorFinalCleanupDoesNotExtendCycleBudget(t *testing.T) {
 	}
 	if len(k.objects) != 0 {
 		t.Fatal("expired peers survived final recheck")
+	}
+}
+
+func TestLeaseSupervisionDoesNotReusePreviousCycleOwnership(t *testing.T) {
+	e, k, _, _, o, _ := deploymentFixture(t, 1)
+	if _, err := e.Apply(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	k.checkHook = func() { checks++ }
+	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Now()}); err != nil || !r.KernelReady {
+		t.Fatal(r, err)
+	}
+	if checks != 1 {
+		t.Fatal("duplicate ownership inventories in one cycle", checks)
+	}
+	k.foreign = true
+	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Now()}); err == nil || r.KernelReady {
+		t.Fatal("reused an earlier cycle despite foreign state", r, err)
+	}
+	if checks != 2 {
+		t.Fatal("missing fresh ownership inventory", checks)
+	}
+	for _, v := range k.objects {
+		if v.lease.Active {
+			t.Fatal("conflicted endpoint lease not blocked")
+		}
+	}
+}
+
+func TestLeaseSupervisionRereadsFinalLease(t *testing.T) {
+	e, k, _, _, o, _ := deploymentFixture(t, 1)
+	if _, err := e.Apply(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	backend := &leaseDeadlineBackend{deploymentBackend: k, statusHook: func() {
+		k.now = func() time.Time { return time.Now().Add(11 * time.Second) }
+	}}
+	e.backend = backend
+	if r, err := e.Maintain(context.Background(), FreshApproval{At: time.Now()}); err == nil || r.KernelReady || len(r.Endpoints) != 1 || r.Endpoints[0].Lease == nil || r.Endpoints[0].Lease.Active {
+		t.Fatal("reported renewed lease without reading its final state", r, err)
 	}
 }

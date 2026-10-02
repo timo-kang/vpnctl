@@ -203,6 +203,13 @@ jobs:
           VPNCTL_TEST_CPUS: '2'
           VPNCTL_TEST_MEMORY: 2g
         run: ./scripts/test-netns.sh -test.run='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale)$' -test.timeout=12m
+      - name: Maximum population with five milliseconds added to every kernel command
+        env:
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-m3-lease-results
+          VPNCTL_RACE: '0'
+          VPNCTL_TEST_CPUS: '2'
+          VPNCTL_TEST_MEMORY: 2g
+        run: ./scripts/test-netns.sh -test.run='^TestNetns_M3SupervisionScale$/^nodes_32_endpoints_8$' -m3-scale-command-delay-ms=5 -test.timeout=4m
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

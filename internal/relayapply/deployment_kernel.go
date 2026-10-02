@@ -106,84 +106,15 @@ func (k deploymentKernel) wire(ctx context.Context, e DeploymentEntry) (bool, er
 			return false, ErrConflict
 		}
 	}
-	complete := true
-	for _, field := range []string{"public-key", "listen-port", "fwmark"} {
-		b, err := k.run(ctx, "", "wg", "show", e.Interface, field)
-		if err != nil {
-			return false, err
-		}
-		got := strings.TrimSpace(string(b))
-		switch field {
-		case "public-key":
-			if got == "(none)" {
-				complete = false
-			} else if got != e.PublicKey {
-				return false, ErrConflict
-			}
-		case "listen-port":
-			if got == "0" {
-				complete = false
-			} else if got != strconv.Itoa(e.ListenPort) {
-				return false, ErrConflict
-			}
-		case "fwmark":
-			if got != "off" && got != "0" {
-				return false, ErrConflict
-			}
-		}
+	b, err := k.run(ctx, "", "wg", "show", e.Interface, "dump")
+	if err != nil {
+		return false, err
 	}
-	want := map[string]DeploymentPeer{}
-	for _, p := range e.Peers {
-		want[p.PublicKey] = p
-	}
-	for _, field := range []string{"peers", "allowed-ips", "persistent-keepalive", "preshared-keys"} {
-		b, err := k.run(ctx, "", "wg", "show", e.Interface, field)
-		if err != nil {
-			return false, err
-		}
-		seen := map[string]bool{}
-		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-			if line == "" {
-				continue
-			}
-			f := strings.Fields(line)
-			if len(f) == 0 || seen[f[0]] {
-				return false, ErrConflict
-			}
-			p, ok := want[f[0]]
-			if !ok {
-				return false, ErrConflict
-			}
-			seen[f[0]] = true
-			value := ""
-			if len(f) == 2 {
-				value = f[1]
-			}
-			switch field {
-			case "peers":
-				if len(f) != 1 {
-					return false, ErrConflict
-				}
-			case "allowed-ips":
-				if value == "(none)" {
-					complete = false
-				} else if value != p.Address {
-					return false, ErrConflict
-				}
-			case "persistent-keepalive":
-				if value != "off" {
-					return false, ErrConflict
-				}
-			case "preshared-keys":
-				if value != "(none)" {
-					return false, ErrConflict
-				}
-			}
-		}
-		complete = complete && len(seen) == len(want)
-	}
-	return complete, nil
+	// dump includes private material. Never persist or include it in errors;
+	// the validator consumes and clears the owned command output buffer.
+	return validateDeploymentWire(b, e)
 }
+
 func (k deploymentKernel) Check(ctx context.Context, e DeploymentEntry, fresh bool) (bool, error) {
 	if e.PolicyVersion == 1 {
 		present, err := k.policyRead(ctx, e)

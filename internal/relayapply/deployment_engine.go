@@ -290,10 +290,10 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 	return e.inspect(ctx)
 }
 func (e *DeploymentEngine) inspect(ctx context.Context) (DeploymentResult, error) {
-	return e.inspectWithCleanup(ctx, true)
+	return e.inspectWithCleanup(ctx, true, nil)
 }
 
-func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCleanup bool) (DeploymentResult, error) {
+func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCleanup bool, checked map[string]bool) (DeploymentResult, error) {
 	r, err := e.enforce(ctx)
 	if err != nil {
 		return e.result("blocked", "approval_or_cleanup_failed"), err
@@ -307,7 +307,13 @@ func (e *DeploymentEngine) inspectWithCleanup(ctx context.Context, independentCl
 		out.State = "empty"
 	}
 	for i, v := range e.journal.Entries {
-		ready, x := e.backend.Check(ctx, v, false)
+		// Maintain has checked each owned object immediately before renewal.
+		// Reuse only those observations from this locked cycle, not a cache
+		// from an earlier cycle. Always reread leases and approval below.
+		ready, x := checked[v.Alias], error(nil)
+		if checked == nil {
+			ready, x = e.backend.Check(ctx, v, false)
+		}
 		lease, leaseErr := e.backend.LeaseStatus(ctx, v)
 		out.Endpoints[i].Lease = &lease
 		if leaseErr != nil || !lease.Active || r.Deployment == nil || lease.Deadline.After(r.Deployment.ExpiresAt) {
@@ -363,6 +369,7 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 			return e.result("blocked", "approval_or_cleanup_failed"), errors.Join(err, statusErr)
 		}
 	}
+	checked := make(map[string]bool, len(e.journal.Entries))
 	for _, v := range e.journal.Entries {
 		want, approvalErr := desiredDeployment(r, v.Endpoint, v.ListenPort)
 		if approvalErr != nil || !sameDeployment(v, want) {
@@ -377,6 +384,7 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 			err = errors.Join(err, ErrRecovery)
 			continue
 		}
+		checked[v.Alias] = true
 		_, x = e.backend.Lease(ctx, v, r.Deployment.ExpiresAt, authenticatedAt)
 		if x != nil && !errors.Is(x, ErrLeaseExpired) {
 			x = errors.Join(x, e.backend.Down(ctx, v))
@@ -388,7 +396,7 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 	}
 	// The supervisor already has an independent kernel expiry guard. Keep
 	// its cycle budget instead of inheriting a CLI's 60s cleanup extension.
-	return e.inspectWithCleanup(ctx, false)
+	return e.inspectWithCleanup(ctx, false, checked)
 }
 func (e *DeploymentEngine) Inspect(ctx context.Context) (DeploymentResult, error) {
 	if !e.mu.TryLock() {

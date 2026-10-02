@@ -153,7 +153,28 @@ func (r *m3Recipient) callContext(ctx context.Context, action string, ep, port i
 		a = append(a, "--key-file", r.key, "--key-generation", fmt.Sprint(r.generation), "--listen-port", fmt.Sprint(port))
 	}
 	a = append(a, extra...)
-	return netCommand(ctx, r.ns, a...).Output()
+	started := time.Now()
+	b, err := netCommand(ctx, r.ns, a...).Output()
+	var state map[string]any
+	_ = json.Unmarshal(b, &state)
+	class := "success"
+	if err != nil {
+		class = "failed"
+		var exited *exec.ExitError
+		if errors.As(err, &exited) && strings.Contains(string(exited.Stderr), "busy") {
+			class = "busy"
+		}
+		if ctx.Err() != nil {
+			class = "deadline"
+		}
+	}
+	record, _ := json.Marshal(map[string]any{"at": time.Now().UTC(), "action": action, "endpoint": ep, "elapsed_ms": time.Since(started).Milliseconds(), "result": class, "state": state["state"], "reason": state["reason"]})
+	file, saveErr := os.OpenFile(filepath.Join(r.results, r.relay+"-commands.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if saveErr != nil {
+		return b, errors.Join(err, saveErr)
+	}
+	_, saveErr = file.Write(append(record, '\n'))
+	return b, errors.Join(err, saveErr, file.Close())
 }
 func (r *m3Recipient) require(action string, ep, port int) relayapply.DeploymentResult {
 	r.t.Helper()
