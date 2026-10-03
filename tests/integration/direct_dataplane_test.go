@@ -351,5 +351,25 @@ func testDirectDataplane(t *testing.T, size int) {
 		t.Fatal("foreign peer changed")
 	}
 	report["foreign_peer_preserved"] = true
+	// Config edits must neither be silently ignored nor authorize destructive
+	// syncconf on a cached baseline with foreign state.
+	agents[0].stop()
+	changed := *nodes[0].Node
+	changed.ServerEndpoint = "192.0.2.254:51820"
+	if err := config.Save(paths[0], config.Config{Node: &changed}); err != nil {
+		t.Fatal(err)
+	}
+	agents[0] = startNetworkProcess(t, ns[1], agents[0].log, nil, integrationBinary(t), "node", "serve", "--config", paths[0])
+	eventually(t, 3*time.Second, "baseline config change explicitly blocked", func() error {
+		b, _ := os.ReadFile(agents[0].log)
+		if !strings.Contains(string(b), "baseline configuration changed") {
+			return fmt.Errorf("config conflict not reported")
+		}
+		return nil
+	})
+	if !strings.Contains(netOutput(t, ns[1], "wg", "show", "wg0", "endpoints"), pub+"\t192.0.2.1:51820") || len(strings.Fields(netOutput(t, ns[1], "wg", "show", "wg0", "peers"))) != 2 {
+		t.Fatal("config conflict altered baseline/foreign peer")
+	}
+	report["baseline_config_change_rejected"] = true
 	report["completed"] = true
 }

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,12 @@ import (
 
 const MaxPeers = 32
 const Cooldown = 5 * time.Second
+const MaxCooldown = Cooldown + 2*time.Second
+
+// Initial peers need overlapping installation windows despite worker skew.
+// Include one further probe cycle when the first WG handshake completes at a
+// nonce deadline. This never delays removal after a path has reached active.
+const InitialTrialWindow = 3 * time.Second
 const CandidateMaxAge = 2 * time.Minute
 
 type Candidate struct {
@@ -55,6 +62,7 @@ type journal struct {
 	Interface string               `json:"interface"`
 	Identity  identity             `json:"identity"`
 	Relay     string               `json:"relay"`
+	Config    string               `json:"baseline_config_sha256"`
 	Peers     map[string]Candidate `json:"peers"`
 }
 type envelope struct {
@@ -69,6 +77,8 @@ type Engine struct {
 	backend       backend
 	save          func(journal) error
 	unlock        func()
+	retrySequence uint64
+	trialStarted  map[string]time.Time
 	successes     map[string]int
 	cooldown      map[string]time.Time
 	now           func() time.Time
@@ -95,6 +105,29 @@ func digest(j journal) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
+
+// Only public baseline inputs belong in this digest. Controller transport,
+// credentials, probe timing and direct policy may change without rewriting WG.
+// A service restart must not silently ignore changed address/endpoint/routes.
+func baselineConfig(cfg config.NodeConfig) string {
+	prefixes := append([]string{}, cfg.ServerAllowedIPs...)
+	for i, prefix := range prefixes {
+		if p, err := netip.ParsePrefix(prefix); err == nil {
+			prefixes[i] = p.Masked().String()
+		}
+	}
+	sort.Strings(prefixes)
+	v := struct {
+		Address, PublicKey, Relay, Endpoint, PolicyCIDR              string
+		Prefixes                                                     []string
+		ListenPort, MTU, RelayKeepalive, PolicyTable, PolicyPriority int
+		PolicyEnabled                                                bool
+	}{cfg.VPNIP, cfg.WGPublicKey, cfg.ServerPublicKey, cfg.ServerEndpoint, cfg.PolicyRoutingCIDR, prefixes, cfg.WGListenPort, cfg.MTU, cfg.ServerKeepaliveSec, cfg.PolicyRoutingTable, cfg.PolicyRoutingPriority, config.PolicyRoutingEnabled(&cfg)}
+	b, _ := json.Marshal(v)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 func Open(ctx context.Context, cfg config.NodeConfig) (*Engine, error) {
 	if cfg.WGConfigPath == "" || cfg.WGInterface == "" || relaycatalog.ValidatePublicKey(cfg.WGPublicKey) != nil || relaycatalog.ValidatePublicKey(cfg.ServerPublicKey) != nil {
 		return nil, errors.New("direct dataplane requires configured interface, config path and public keys")
@@ -120,7 +153,7 @@ func Open(ctx context.Context, cfg config.NodeConfig) (*Engine, error) {
 	if s.Identity.PublicKey != cfg.WGPublicKey {
 		return fail(errors.New("interface public key conflict"))
 	}
-	j := journal{Version: 1, Domain: d, Interface: cfg.WGInterface, Identity: s.Identity, Relay: cfg.ServerPublicKey, Peers: map[string]Candidate{}}
+	j := journal{Version: 1, Domain: d, Interface: cfg.WGInterface, Identity: s.Identity, Relay: cfg.ServerPublicKey, Config: baselineConfig(cfg), Peers: map[string]Candidate{}}
 	path := statePath(cfg)
 	if st, err := os.Lstat(path); err == nil {
 		if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 || st.Size() > 128<<10 {
@@ -133,24 +166,12 @@ func Open(ctx context.Context, cfg config.NodeConfig) (*Engine, error) {
 		var v envelope
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.DisallowUnknownFields()
-		if dec.Decode(&v) != nil || dec.Decode(new(any)) != io.EOF || v.Digest != digest(v.Journal) || v.Journal.Version != 1 || v.Journal.Interface != cfg.WGInterface || v.Journal.Relay != cfg.ServerPublicKey || v.Journal.Peers == nil || len(v.Journal.Peers) > MaxPeers {
+		if dec.Decode(&v) != nil || dec.Decode(new(any)) != io.EOF || v.Digest != digest(v.Journal) || v.Journal.Version != 1 || v.Journal.Interface != cfg.WGInterface || v.Journal.Peers == nil || len(v.Journal.Peers) > MaxPeers {
 			return fail(errors.New("invalid direct journal"))
 		}
-		for key, c := range v.Journal.Peers {
-			if key != c.Key || validate(cfg, c) != nil {
-				return fail(errors.New("invalid journal peer"))
-			}
-		}
-		if v.Journal.Domain != d || v.Journal.Identity != s.Identity {
-			// A reboot/recreated interface may discard all old peers. Retire only
-			// metadata; never adopt a peer on a new interface merely by its key.
-			for key := range v.Journal.Peers {
-				if _, exists := s.Peers[key]; exists {
-					return fail(errors.New("direct journal interface identity conflict"))
-				}
-			}
-		} else {
-			j = v.Journal
+		j, err = recoverJournal(cfg, j, v.Journal, s)
+		if err != nil {
+			return fail(err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fail(err)
@@ -171,6 +192,38 @@ func Open(ctx context.Context, cfg config.NodeConfig) (*Engine, error) {
 		return fail(err)
 	}
 	return e, nil
+}
+
+// A replaced interface can retire old metadata only when all old keys are
+// absent. Old candidates are validated against the current config only when
+// recovering the same baseline: changed prefixes/relay must allow explicit
+// dedicated-interface recreation, without adopting peers on that new device.
+func recoverJournal(cfg config.NodeConfig, current, prior journal, s snapshot) (journal, error) {
+	if relaycatalog.ValidatePublicKey(prior.Relay) != nil {
+		return current, errors.New("invalid journal relay")
+	}
+	for key, c := range prior.Peers {
+		if key != c.Key || relaycatalog.ValidatePublicKey(key) != nil {
+			return current, errors.New("invalid journal peer")
+		}
+	}
+	if prior.Domain != current.Domain || prior.Identity != current.Identity {
+		for key := range prior.Peers {
+			if _, exists := s.Peers[key]; exists {
+				return current, errors.New("direct journal interface identity conflict")
+			}
+		}
+		return current, nil
+	}
+	if prior.Config != current.Config || prior.Relay != current.Relay {
+		return current, errors.New("direct baseline configuration changed; stop service and explicitly recreate its dedicated baseline")
+	}
+	for _, c := range prior.Peers {
+		if validate(cfg, c) != nil {
+			return current, errors.New("invalid journal peer")
+		}
+	}
+	return prior, nil
 }
 
 // RecoverExisting preserves an installed journaled baseline on node serve retry.
@@ -217,7 +270,7 @@ func RecoverExisting(ctx context.Context, cfg config.NodeConfig) (bool, error) {
 }
 
 func newEngine(cfg config.NodeConfig, j journal, b backend, save func(journal) error) *Engine {
-	return &Engine{j: j, cfg: cfg, backend: b, save: save, successes: map[string]int{}, cooldown: map[string]time.Time{}, now: time.Now}
+	return &Engine{j: j, cfg: cfg, backend: b, save: save, successes: map[string]int{}, trialStarted: map[string]time.Time{}, cooldown: map[string]time.Time{}, now: time.Now}
 }
 func (e *Engine) persist(next journal) error {
 	err := e.save(next)
@@ -368,6 +421,7 @@ func (e *Engine) remove(ctx context.Context, keys []string) error {
 	}
 	for _, key := range safe {
 		delete(e.successes, key)
+		delete(e.trialStarted, key)
 	}
 	if e.poisoned {
 		// Kernel quiescence remains possible with a failed journal. Retain all
@@ -451,6 +505,7 @@ func (e *Engine) add(ctx context.Context, candidates []Candidate) error {
 		if !matches(s.Peers[c.Key], c) {
 			return errors.New("direct installation readback failed")
 		}
+		e.trialStarted[c.Key] = e.now()
 	}
 	return nil
 }
@@ -509,6 +564,15 @@ func (e *Engine) verifyRelay(ctx context.Context) error {
 	}
 	e.relayVerified = e.now()
 	return nil
+}
+
+// Vary retries by local identity, candidate key and attempt so two workers
+// cannot remain phase-locked when their initial trial windows do not overlap.
+// This is scheduling jitter, not a security nonce. The base cooldown is retained.
+func (e *Engine) retryDelay(c Candidate) time.Duration {
+	e.retrySequence++
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d", e.cfg.WGPublicKey, c.Key, e.retrySequence)))
+	return Cooldown + time.Duration(binary.BigEndian.Uint64(sum[:8])%uint64(MaxCooldown-Cooldown+1))
 }
 
 // Step is single-owner. Network verification is bounded and concurrent so a
@@ -618,8 +682,15 @@ func (e *Engine) Step(ctx context.Context, candidates []Candidate) ([]Status, er
 					reason += "_no_handshake"
 				}
 			}
+			started, initial := e.trialStarted[key]
+			age := e.now().Sub(started)
+			if initial && e.successes[key] < 2 && age >= 0 && age < InitialTrialWindow {
+				e.successes[key] = 0
+				statuses = append(statuses, Status{c.ID, "probing", reason, c.Generation})
+				continue
+			}
 			failed = append(failed, key)
-			e.cooldown[c.ID] = e.now().Add(Cooldown)
+			e.cooldown[c.ID] = e.now().Add(e.retryDelay(c))
 			statuses = append(statuses, Status{c.ID, "relay_unverified", reason, c.Generation})
 		} else {
 			e.successes[key] = min(2, e.successes[key]+1)

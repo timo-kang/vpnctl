@@ -146,10 +146,7 @@ func TestNetns_M3ControlIsolation(t *testing.T) {
 			f.controller.apply(f.spec, 60)
 			approval := f.controller.status()
 			for _, r := range f.recipients {
-				v := r.ready()
-				if !v.ApprovalExpiresAt.Equal(approval.ExpiresAt) {
-					t.Fatal("did not observe short approval")
-				}
+				r.readyApproval(approval.ExpiresAt)
 			}
 			report["approval_expires_at"] = approval.ExpiresAt
 			f.controller.process.stop()

@@ -115,24 +115,24 @@ func TestActiveRequiresOverlayRoundTripAndPeerTraffic(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			e, k, c := fixture(t)
 			k.mode = mode
-			for attempt := 0; attempt < 2; attempt++ {
+			now := time.Now()
+			e.now = func() time.Time { return now }
+			for attempt := 0; attempt < 3; attempt++ {
 				r, err := e.Step(context.Background(), []Candidate{c})
 				if err != nil {
 					t.Fatal(err)
 				}
 				want := "probing"
-				if attempt == 1 {
+				if attempt >= 1 {
 					want = "active"
 				}
 				if mode != "healthy" {
-					want = "relay_unverified"
-					if attempt == 1 {
-						want = "cooldown"
-					}
+					want = []string{"probing", "relay_unverified", "cooldown"}[attempt]
 				}
 				if len(r) != 1 || r[0].State != want {
 					t.Fatal(r, want)
 				}
+				now = now.Add(InitialTrialWindow)
 			}
 			_, exists := k.s.Peers[c.Key]
 			if exists != (mode == "healthy") {
@@ -163,7 +163,7 @@ func TestLocalFailureRecoversWithoutControllerAndRequiresCooldown(t *testing.T) 
 	if _, err = e.Step(context.Background(), []Candidate{c}); err != nil || k.adds != old {
 		t.Fatal("cooldown bypassed", err)
 	}
-	now = now.Add(Cooldown)
+	now = now.Add(MaxCooldown)
 	r, err = e.Step(context.Background(), []Candidate{c})
 	if err != nil || r[0].State != "probing" {
 		t.Fatal("old success reused", r, err)
@@ -393,7 +393,7 @@ func TestMaximumMeshConcurrentFailureAndRepeatedRecovery(t *testing.T) {
 		if len(k.s.Peers) != 1 {
 			t.Fatal("failed mesh peers remain")
 		}
-		now = now.Add(Cooldown)
+		now = now.Add(MaxCooldown)
 	}
 }
 
@@ -518,11 +518,104 @@ func TestMissingRelayResponderDoesNotInvalidateHealthyDirectOrAdmitNewTrial(t *t
 	if _, err = e.Step(context.Background(), []Candidate{c}); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(Cooldown)
+	now = now.Add(MaxCooldown)
 	k.mode = "healthy"
 	adds := k.adds
 	r, err = e.Step(context.Background(), []Candidate{c})
 	if err != nil || r[0].Reason != "relay_baseline_unverified" || k.adds != adds {
 		t.Fatal("unverified standby admitted new direct", r, err)
+	}
+}
+
+func TestBaselineDigestIgnoresControlCredentialsButDetectsWGChange(t *testing.T) {
+	e, _, _ := fixture(t)
+	cfg := e.cfg
+	initial := baselineConfig(cfg)
+	cfg.Controller = "https://new-controller.example"
+	cfg.PKIDir = "new-private-directory"
+	cfg.DirectIntervalSec = 7
+	if baselineConfig(cfg) != initial {
+		t.Fatal("control/probe change demands destructive baseline recreation")
+	}
+	cfg.ServerEndpoint = "192.0.2.9:51820"
+	if baselineConfig(cfg) == initial {
+		t.Fatal("endpoint change silently ignored")
+	}
+}
+
+func TestInitialTrialSurvivesPeerSkewButRequiresConsecutiveProof(t *testing.T) {
+	e, k, c := fixture(t)
+	now := time.Now()
+	e.now = func() time.Time { return now }
+	// A peer can start just after our first one-second nonce request expires.
+	k.mode = "silent"
+	r, err := e.Step(context.Background(), []Candidate{c})
+	if err != nil || r[0].State != "probing" || k.removes != 0 {
+		t.Fatal("initial installation window lost", r, err)
+	}
+	now = now.Add(1100 * time.Millisecond)
+	k.mode = "healthy"
+	r, err = e.Step(context.Background(), []Candidate{c})
+	if err != nil || r[0].State != "probing" {
+		t.Fatal("one proof promoted path", r, err)
+	}
+	// Failure resets proof count, but cannot extend the original trial window.
+	k.mode = "silent"
+	r, err = e.Step(context.Background(), []Candidate{c})
+	if err != nil || r[0].State != "probing" {
+		t.Fatal(r, err)
+	}
+	k.mode = "healthy"
+	r, err = e.Step(context.Background(), []Candidate{c})
+	if err != nil || r[0].State != "probing" {
+		t.Fatal("nonconsecutive proof promoted path", r, err)
+	}
+	k.mode = "silent"
+	now = now.Add(InitialTrialWindow - 1100*time.Millisecond)
+	r, err = e.Step(context.Background(), []Candidate{c})
+	if err != nil || r[0].State != "relay_unverified" || k.removes != 1 {
+		t.Fatal("initial window extended", r, err)
+	}
+}
+
+func TestJournalConfigChangeRequiresNewInterfaceAndAbsentOldKeys(t *testing.T) {
+	e, k, c := fixture(t)
+	prior := e.j
+	prior.Config = baselineConfig(e.cfg)
+	prior.Peers = map[string]Candidate{c.Key: c}
+	cfg := e.cfg
+	cfg.ServerPublicKey = key(9)
+	cfg.ServerAllowedIPs = []string{"10.99.0.0/24"}
+	current := e.j
+	current.Relay = cfg.ServerPublicKey
+	current.Config = baselineConfig(cfg)
+	if _, err := recoverJournal(cfg, current, prior, k.s); err == nil {
+		t.Fatal("live baseline config change ignored")
+	}
+	current.Identity.Index++
+	got, err := recoverJournal(cfg, current, prior, k.s)
+	if err != nil || len(got.Peers) != 0 || got.Config != current.Config {
+		t.Fatal("explicit baseline recreation rejected", got, err)
+	}
+	k.s.Peers[c.Key] = kernelPeer{Key: c.Key}
+	if _, err := recoverJournal(cfg, current, prior, k.s); err == nil {
+		t.Fatal("adopted old key on new interface")
+	}
+}
+
+func TestRetrySchedulesAreBoundedAndVaryAcrossDirectionsAndAttempts(t *testing.T) {
+	a, _, c := fixture(t)
+	b, _, reverse := fixture(t)
+	b.cfg.WGPublicKey, reverse.Key = c.Key, a.cfg.WGPublicKey
+	var previous time.Duration
+	for i := 0; i < 20; i++ {
+		x, y := a.retryDelay(c), b.retryDelay(reverse)
+		if x < Cooldown || x > MaxCooldown || y < Cooldown || y > MaxCooldown {
+			t.Fatal("retry outside declared range", x, y)
+		}
+		if x == y || x == previous {
+			t.Fatal("retry scheduling stayed synchronized", x, y)
+		}
+		previous = x
 	}
 }

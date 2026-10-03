@@ -76,9 +76,11 @@ controller와 node를 함께 업그레이드하고 정상적인 후보 조회·�
 - WG interface/source에 묶인 nonce 왕복 응답, 해당 peer의 handshake, 검사 전후 RX/TX
   증가를 **2회 연속** 확인해야 `active`다. 단순 UDP 성공이나 커널 설치만으로 승격하지 않는다.
 - 로컬 확인 주기는 1초, 각 VPN probe 제한은 1초, 한 작업 예산은 4초다. controller
-  요청과 분리한다. peer probe는 최대 32개를 병렬 실행한다. 실패 시 해당 peer를 회수하고
+  요청과 분리한다. peer probe는 최대 32개를 병렬 실행한다. 초기 설치 후 3초 미만에는
+  상대 worker 시차를 허용하며 `probing`을 유지한다. 실패는 연속 성공 수를 초기화하고
+  이 유예를 연장하지 않는다. 이미 active였거나 초기 유예가 끝난 peer는 실패 시 회수하고
   `relay_unverified`를 기록한다. 제거만으로 relay 통신 성공을 선언하지 않는다.
-- 같은 peer ID는 실패 후 5초 cooldown을 거친다. key/generation 교체로 우회하지 못한다.
+- 같은 peer ID는 실패 후 5~7초 cooldown을 거친다. key/generation 교체로 우회하지 못한다.
   복구에도 2회 확인이 필요하다. endpoint drift는 이전 증거를 폐기한다. WG roaming으로
   endpoint만 바뀐 경우에도 journaled peer는 회수할 수 있으며 다시 시험한다.
 - controller에서 마지막으로 받은 후보는 2분까지만 사용한다. STUN 갱신은 이 시간을
@@ -91,14 +93,14 @@ controller와 node를 함께 업그레이드하고 정상적인 후보 조회·�
 intent가 남아 재시작 복구가 가능하다. 외부 충돌 peer는 보존하면서 다른 소유 peer는 회수한다.
 
 상태는 peer ID·generation별 구조화 로그 `direct dataplane`에 남는다. `pending`은
-새 후보 대기, `probing`은 첫 실제 성공, `active`는 연속 확인, `relay_unverified`는
+새 후보 대기, `probing`은 초기 설치 유예 또는 연속 확인 미완료, `active`는 연속 확인 완료, `relay_unverified`는
 직접 경로 미사용(릴레이 실제 도달 미판정), `cooldown`은 재시험 대기, `blocked`는 커널/
 journal 충돌이다. 새로운 fleet API·metric과 target별 비대칭 표시 통합은 #23의 잔여 범위다.
 
 ## 소유권과 재시작
 
 `<wg_config_path>.direct.json`(0600)에 boot/netns/interface index/alias/public key,
-relay key와 설치할 peer의 공개 속성을 먼저 기록한 뒤 `wg set ... peer`를 실행한다.
+relay key, 공개 baseline 설정 digest와 설치할 peer의 공개 속성을 먼저 기록한 뒤 `wg set ... peer`를 실행한다.
 비밀키·PSK·probe token은 저장하지 않는다. digest는 손상 검출이며 권한 서명이 아니다.
 재시작에서는 journal·커널 정적 속성이 일치한 peer만 정리한다. endpoint는 WG roaming
 속성이므로 달라져도 회수 가능하지만 key/prefix/PSK/keepalive 충돌은 외부 상태로 보존한다.
@@ -117,7 +119,11 @@ journal 쓰기/fsync 실패 후에는 신규 설치를 차단한다. 소유권�
 peer는 저장 장애 중에도 커널에서 회수하고 durable intent는 남겨 둔다. 저장소를 복구한
 뒤 서비스를 재시작해 intent 정리를 마친다. 손상/소유권 충돌에서 journal을 삭제해
 우회하지 않는다. 공개 key·prefix·ifindex와 해당 interface의 실제 소유 주체를 먼저 대조한다.
-relay key/interface/config 경로를 바꿀 때도 기존 서비스를 정상 종료해 소유 peer를 정리하고,
-전용 baseline을 명시적으로 재구성한다. 자동 journal 이관은 지원하지 않는다.
+주소/endpoint/MTU/route 등 baseline 설정이 달라지면 복구는 명시적으로 거절한다.
+변경을 조용히 무시하거나 기존 interface에 전체 syncconf를 재적용하지 않는다. 해당 WG/table이
+전용임을 확인하고 기존 서비스를 정상 종료해 소유 peer를 정리한 뒤, 명시적인 `down`/`up`으로
+baseline을 재생성하고 서비스를 시작한다. 다른 peer/route를 함께 쓰는 interface에는 이 절차를
+실행하지 않고 외부 소유자와 먼저 이관한다. 인증서·controller URL·probe 주기 변경은 baseline
+재생성을 요구하지 않는다. 자동 journal 이관은 지원하지 않는다.
 
 재현 명령과 제한은 [dataplane 검증 기록](../validation/direct-dataplane.md)에 둔다.
