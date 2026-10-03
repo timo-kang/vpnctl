@@ -18,13 +18,14 @@ import (
 )
 
 type fakeKernel struct {
-	mu            sync.Mutex
-	s             snapshot
-	mode          string
-	adds, removes int
-	saved         *journal
-	probeHook     func()
-	relaySilent   bool
+	mu               sync.Mutex
+	s                snapshot
+	mode             string
+	adds, removes    int
+	saved            *journal
+	probeHook        func()
+	probeContextHook func(context.Context)
+	relaySilent      bool
 }
 
 func (k *fakeKernel) Snapshot(context.Context) (snapshot, error) {
@@ -65,6 +66,12 @@ func (k *fakeKernel) Remove(_ context.Context, keys []string) error {
 	return nil
 }
 func (k *fakeKernel) Probe(ctx context.Context, c Candidate) error {
+	if k.probeContextHook != nil {
+		k.probeContextHook(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if k.probeHook != nil {
 		k.probeHook()
 	}
@@ -617,5 +624,37 @@ func TestRetrySchedulesAreBoundedAndVaryAcrossDirectionsAndAttempts(t *testing.T
 			t.Fatal("retry scheduling stayed synchronized", x, y)
 		}
 		previous = x
+	}
+}
+
+func TestUnverifiedTrialProbeCannotRunPastInstallationWindow(t *testing.T) {
+	e, k, c := fixture(t)
+	now := time.Now()
+	e.now = func() time.Time { return now }
+	k.mode = "silent"
+	if _, err := e.Step(context.Background(), []Candidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(InitialTrialWindow - 200*time.Millisecond)
+	deadlines := make(chan time.Duration, 1)
+	k.probeContextHook = func(ctx context.Context) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadlines <- time.Hour
+			return
+		}
+		deadlines <- time.Until(deadline)
+	}
+	if _, err := e.Step(context.Background(), []Candidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	if left := <-deadlines; left > 200*time.Millisecond || left <= 0 {
+		t.Fatal("unverified probe escaped remaining trial budget", left)
+	}
+	k.probeContextHook = nil
+	now = now.Add(200 * time.Millisecond)
+	r, err := e.Step(context.Background(), []Candidate{c})
+	if err != nil || r[0].State != "relay_unverified" || k.removes != 1 {
+		t.Fatal("expired trial survived", r, err)
 	}
 }

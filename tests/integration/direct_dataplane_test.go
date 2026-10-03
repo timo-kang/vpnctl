@@ -266,18 +266,26 @@ func testDirectDataplane(t *testing.T, size int) {
 	lastGood := time.Now()
 	var maxGap time.Duration
 	var retryLosses int
-	for time.Now().Before(ends) {
+	probeHealthy := true
+	// Close the final loss interval while the fault is still present; removing
+	// the fault midway through an unfinished retry would hide its full impact.
+	for time.Now().Before(ends) || !probeHealthy {
 		if state(0, 1) == "active" || state(1, 0) == "active" {
 			t.Fatal("broken WG advertised active despite successful UDP")
 		}
-		if probe() == nil {
+		probeErr := probe()
+		probeHealthy = probeErr == nil
+		// Include the first successful packet after a gap. Checking failures
+		// alone undercounts the outage by the duration of the recovery probe.
+		gap := time.Since(lastGood)
+		maxGap = max(maxGap, gap)
+		if maxGap > 5*time.Second {
+			t.Fatal("retry trial caused prolonged overlay loss", maxGap)
+		}
+		if probeErr == nil {
 			lastGood = time.Now()
 		} else {
 			retryLosses++
-			maxGap = max(maxGap, time.Since(lastGood))
-			if maxGap > 5*time.Second {
-				t.Fatal("retry trial caused prolonged overlay loss", maxGap)
-			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

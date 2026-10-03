@@ -9,7 +9,9 @@
 열어 두어, UDP 성공과 WG 통신 성공을 혼동하는 구현을 검출한다.
 
 5초 이내에 소유 direct peer 제거와 **실제 VPN nonce 왕복**을 요구한다. cooldown보다
-길게 장애를 유지하고 잘못된 active가 없는지 검사한 뒤, 차단을 풀어 재검증을 확인한다.
+길게 장애를 유지하고 잘못된 active가 없는지 검사한다. 마지막 손실 구간도 장애를
+유지한 채 첫 성공 응답까지 측정한 뒤, 차단을 풀어 재검증을 확인한다. 실패 probe의
+마감 시각만으로 손실을 계산하지 않는다.
 외부 IPv4/IPv6 route/rule 보존, concurrent `up` 거절, agent SIGKILL 후 **node serve**
 오프라인 재시작에서 소유 peer 정리와 relay/route 보존도 검사한다. IPv6 DAD가 끝난
 뒤 전체 경로 snapshot을 비교하며 커널 자동 주소 추가를 제품 변경으로 오인하지 않는다.
@@ -91,24 +93,32 @@ race 계측과 배포 바이너리의 자원 계약을 분리하고, 이후 repo
 최종 fixture는 relay probe를 별도 프로세스로 유지하고, 응답기까지 없으면 정상 direct는
 유지하되 새 trial은 거절한다는 조건을 단위 회귀로 검증한다. 해당 실패 원본도 보존한다.
 
-## 최종 로컬 검증 (2026-10-04)
+## 로컬 최종 검증 (2026-10-04)
 
 - production 2CPU/2GiB, 2·3·8·32 node 각 3회: 12/12 통과.
-  최대 최초 fallback 2.033초, 반복 장애 중 최대 관측 손실 4.931초.
-- race 2CPU/2GiB, 2·3·8 node: 3/3 통과. 최대 최초 fallback 1.941초,
-  반복 장애 중 최대 관측 손실 4.273초.
+  첫 성공 응답과 장애 해제 전 마지막 손실 구간까지 포함한 계측에서 최대 최초 fallback
+  2.034초, 반복 장애 중 최대 관측 손실 4.437초.
+- race 2CPU/2GiB, 2·3·8 node: 3/3 통과. 성공 응답까지 포함한 최대 최초 fallback
+  2.038초, 반복 장애 중 최대 관측 손실 4.480초. 최종 CI도 두 profile을 독립 실행한다.
 - controller 동거/분리 실제 만료 시험 각각 2회 통과. 60초 승인 만료와
   supervisor 종료 후 커널 lease 차단 조건을 바꾸지 않았다.
 - 전체 기본 단위 race(기존 장기/규모 전용 job 제외), 변경 패키지 race,
   vet·binary build·integration 진단 단위 검사 통과.
 - 이전 2초 초기 창의 재가입 시험은 네 번 복구 후 다섯 번째에서 실패했다.
-  원본을 보존하고 최종 3초 창/재시도 분산 코드의 재가입 및 전체 CI를 별도로 확인한다.
+  원본을 보존했고 3초 창/재시도 분산 코드의 집중 재가입 시험은 6회 복구로 통과했다.
+  실제 workload는 6분 이상이며 전체 fixture 실행은 451.75초였다.
   정해진 상태·오류 코드 **건수만** 추가 산출물로 기록하며 원본 서비스 로그를 내보내지 않는다.
+  24시간 gate를 대체하지 않는다.
 
-원본은 `/tmp/vpnctl-direct-handshake-cycle`,
-`/tmp/vpnctl-direct-handshake-cycle-integration-race`,
-`/tmp/vpnctl-direct-approval-barrier`에 있다. fixture의 5초 손실 한도에 가까운 표본도
-있으므로 이 결과를 실제 RF/LTE 환경의 보장치로 확장하지 않는다.
+손실 계측 자체도 리뷰해 첫 성공 응답까지의 간격과 장애 제거 전 마지막 손실 구간을
+포함하도록 보강했다. 아직 실제 성공이 없는 초기 probe의 deadline은 kernel 설치 시작부터
+계산한 잔여 시간으로 제한한다. 이전 4.931초 기록은 실패 probe의 마감까지만 계산한
+계측이므로 최종 손실 판정으로 사용하지 않는다.
+
+원본은 `/tmp/vpnctl-direct-complete-loss-window`,
+`/tmp/vpnctl-direct-hard-trial-integration-race`,
+`/tmp/vpnctl-direct-final-rejoin`, `/tmp/vpnctl-direct-approval-barrier`에 있다.
+이전 실패 및 중간 검증 디렉터리도 그대로 보존한다.
 
 ## 판정 범위
 

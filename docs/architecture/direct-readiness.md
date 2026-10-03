@@ -78,7 +78,9 @@ controller와 node를 함께 업그레이드하고 정상적인 후보 조회·�
 - 로컬 확인 주기는 1초, 각 VPN probe 제한은 1초, 한 작업 예산은 4초다. controller
   요청과 분리한다. peer probe는 최대 32개를 병렬 실행한다. 초기 설치 후 3초 미만에는
   상대 worker 시차를 허용하며 `probing`을 유지한다. 실패는 연속 성공 수를 초기화하고
-  이 유예를 연장하지 않는다. 이미 active였거나 초기 유예가 끝난 peer는 실패 시 회수하고
+  이 유예를 연장하지 않는다. 아직 실제 성공이 없는 probe는 kernel 설치 시작부터 계산한
+  초기 예산의 남은 시간까지만 실행하며 새 1초 요청으로 유예를 넘기지 않는다.
+  이미 active였거나 초기 유예가 끝난 peer는 실패 시 회수하고
   `relay_unverified`를 기록한다. 제거만으로 relay 통신 성공을 선언하지 않는다.
 - 같은 peer ID는 실패 후 5~7초 cooldown을 거친다. key/generation 교체로 우회하지 못한다.
   복구에도 2회 확인이 필요하다. endpoint drift는 이전 증거를 폐기한다. WG roaming으로

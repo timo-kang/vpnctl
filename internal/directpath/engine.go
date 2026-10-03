@@ -494,6 +494,7 @@ func (e *Engine) add(ctx context.Context, candidates []Candidate) error {
 	}
 	// One durable batch intent precedes all mutations. A partial command result
 	// remains recoverable; no per-peer subprocess/readback/fsync storm at N² scale.
+	started := e.now()
 	if err = e.backend.Add(ctx, candidates); err != nil {
 		return err
 	}
@@ -505,7 +506,7 @@ func (e *Engine) add(ctx context.Context, candidates []Candidate) error {
 		if !matches(s.Peers[c.Key], c) {
 			return errors.New("direct installation readback failed")
 		}
-		e.trialStarted[c.Key] = e.now()
+		e.trialStarted[c.Key] = started
 	}
 	return nil
 }
@@ -648,8 +649,22 @@ func (e *Engine) Step(ctx context.Context, candidates []Candidate) ([]Status, er
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for key, c := range trials {
+		probeCtx := ctx
+		cancel := func() {}
+		if started, initial := e.trialStarted[key]; initial && e.successes[key] == 0 {
+			// A nearly expired trial must not start another full one-second
+			// request. Bound unverified occupancy from before kernel install.
+			probeCtx, cancel = context.WithTimeout(ctx, InitialTrialWindow-e.now().Sub(started))
+		}
 		wg.Add(1)
-		go func() { defer wg.Done(); err := e.backend.Probe(ctx, c); mu.Lock(); results[key] = err; mu.Unlock() }()
+		go func() {
+			defer wg.Done()
+			defer cancel()
+			err := e.backend.Probe(probeCtx, c)
+			mu.Lock()
+			results[key] = err
+			mu.Unlock()
+		}()
 	}
 	wg.Wait()
 	if ctx.Err() != nil {
