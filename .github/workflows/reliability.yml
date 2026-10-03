@@ -178,13 +178,48 @@ jobs:
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-network-results
           VPNCTL_RACE: '0'
           VPNCTL_TEST_PREVIOUS_BINARY: ${{ runner.temp }}/vpnctl-previous
-        run: ./scripts/test-netns.sh -test.skip='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale|ControlIsolation)$'
+        run: ./scripts/test-netns.sh -test.skip='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale|ControlIsolation)$|^TestNetns_DirectDataplane$'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: wireguard-measurements
           path: ${{ runner.temp }}/vpnctl-network-results
           if-no-files-found: warn
+          retention-days: 14
+
+  direct-dataplane:
+    name: Direct WG verification and offline fallback ${{ matrix.profile }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: production-32
+            race: '0'
+            sizes: '2,3,8,32'
+          - profile: race-8
+            race: '1'
+            sizes: '2,3,8'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Actual packets, controller loss, broken WG with live UDP and service restart
+        env:
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-direct-${{ matrix.profile }}
+          VPNCTL_RACE: ${{ matrix.race }}
+          VPNCTL_DIRECT_SIZES: ${{ matrix.sizes }}
+          VPNCTL_TEST_CPUS: '2'
+          VPNCTL_TEST_MEMORY: 2g
+        run: ./scripts/test-netns.sh -test.run='^TestNetns_DirectDataplane$' -test.timeout=8m
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: direct-dataplane-${{ matrix.profile }}
+          path: ${{ runner.temp }}/vpnctl-direct-${{ matrix.profile }}
+          if-no-files-found: error
           retention-days: 14
 
   m3-control-isolation:

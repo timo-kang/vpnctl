@@ -96,6 +96,10 @@ func ProbePeer(ctx context.Context, localAddr, peerAddr string, timeout time.Dur
 	}
 	defer cleanup()
 
+	return probeConnected(ctx, conn)
+}
+
+func probeConnected(ctx context.Context, conn net.Conn) (time.Duration, error) {
 	nonce, err := randomNonce(8)
 	if err != nil {
 		return 0, contextError(ctx, err)
