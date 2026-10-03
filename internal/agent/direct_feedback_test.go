@@ -16,7 +16,6 @@ import (
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
-	"vpnctl/internal/wireguard"
 )
 
 // Success feedback from one submitted result must not cancel the same round's
@@ -77,13 +76,24 @@ func TestDirectReadinessPromotionDoesNotCancelProbeFeedback(t *testing.T) {
 	cfg := config.NodeConfig{DirectIntervalSec: 1, ServerPublicKey: "hub", ServerEndpoint: "127.0.0.1:51820", ServerAllowedIPs: []string{"10.7.0.0/24"}}
 	go func() {
 		defer close(done)
-		runDirect(ctx, client, cfg, "node", shared, updates, func(p []wireguard.Peer) error { applied <- len(p); return nil })
+		runDirect(ctx, client, cfg, "node", shared, updates, func(s directSnapshot) {
+			n := 0
+			for _, p := range s.peers {
+				if p.P2PReady {
+					n++
+				}
+			}
+			applied <- n
+		})
 	}()
 	defer func() { cancel(); <-done }()
 	peer := api.PeerCandidate{ID: "peer-a", PubKey: "peer-a-key", DirectGeneration: "generation-1", ProbeToken: "ticket-1", VPNIP: "10.7.0.3/32", Endpoint: "127.0.0.1:51821", PublicAddr: remote.LocalAddr(), ProbePort: addr.Port}
 	other := peer
 	other.ID, other.PubKey, other.VPNIP = "peer-b", "peer-b-key", "10.7.0.4/32"
 	updates <- directSnapshot{peers: []api.PeerCandidate{peer, other}}
+	if n := <-applied; n != 0 {
+		t.Fatal("unready candidate admitted", n)
+	}
 	select {
 	case <-entered:
 	case <-time.After(3 * time.Second):
@@ -137,13 +147,17 @@ func TestDirectTicketFeedbackDoesNotStarveUnchangedMeasurements(t *testing.T) {
 }
 
 func TestDirectLegacyReadinessCannotInstallPeer(t *testing.T) {
-	peer := api.PeerCandidate{ID: "peer", PubKey: "key", VPNIP: "10.7.0.3/32", Endpoint: "192.0.2.2:51820", P2PReady: true}
-	if peers := desiredDirectPeers(config.NodeConfig{}, []api.PeerCandidate{peer}); len(peers) != 0 {
-		t.Fatal("legacy controller readiness installed direct peer")
+	cfg, peer := directFixture()
+	peer.DirectGeneration = ""
+	peer.ProbeToken = ""
+	peers, err := directCandidates(cfg, directSnapshot{peers: []api.PeerCandidate{peer}})
+	if err != nil || len(peers) != 0 {
+		t.Fatal("legacy readiness admitted", peers, err)
 	}
 	peer.DirectGeneration = "g1"
 	peer.ProbeToken = "ticket1"
-	if peers := desiredDirectPeers(config.NodeConfig{}, []api.PeerCandidate{peer}); len(peers) != 1 {
-		t.Fatal("generation-bound readiness lost")
+	peers, err = directCandidates(cfg, directSnapshot{peers: []api.PeerCandidate{peer}})
+	if err != nil || len(peers) != 1 {
+		t.Fatal(peers, err)
 	}
 }

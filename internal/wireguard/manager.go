@@ -56,6 +56,29 @@ func (m *Manager) operation() (*Manager, context.CancelFunc) {
 
 // Up brings up the WireGuard interface using ip + wg syncconf.
 func (m *Manager) Up(cfg config.NodeConfig, setConf string) error {
+	unlock, lockErr := LockInterface(cfg.WGInterface)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
+	return m.up(cfg, setConf)
+}
+
+// UpConfigured serializes the config write with the corresponding kernel update.
+// A rejected second writer must not overwrite the running owner's config file.
+func (m *Manager) UpConfigured(cfg config.NodeConfig, conf, setConf string) error {
+	unlock, err := LockInterface(cfg.WGInterface)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := WriteConfig(cfg.WGConfigPath, conf); err != nil {
+		return err
+	}
+	return m.up(cfg, setConf)
+}
+
+func (m *Manager) up(cfg config.NodeConfig, setConf string) error {
 	m, cancel := m.operation()
 	defer cancel()
 	if cfg.WGInterface == "" {
@@ -102,6 +125,11 @@ func (m *Manager) Up(cfg config.NodeConfig, setConf string) error {
 
 // Down removes the WireGuard interface.
 func (m *Manager) Down(cfg config.NodeConfig) error {
+	unlock, lockErr := LockInterface(cfg.WGInterface)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	m, cancel := m.operation()
 	defer cancel()
 	if config.PolicyRoutingEnabled(&cfg) {
@@ -148,6 +176,11 @@ func (m *Manager) Status(iface string) (string, error) {
 
 // ApplyPeers updates WireGuard peers and policy routes for direct paths.
 func (m *Manager) ApplyPeers(cfg config.NodeConfig, peers []Peer) error {
+	unlock, lockErr := LockInterface(cfg.WGInterface)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	m, cancel := m.operation()
 	defer cancel()
 	setConf, err := RenderSetConf(cfg, peers)
@@ -196,6 +229,11 @@ func (m *Manager) installPolicyBaselineRoutes(cfg config.NodeConfig) error {
 
 // ApplyServer ensures the interface is up and syncs peers (controller side).
 func (m *Manager) ApplyServer(cfg ServerConfig, peers []Peer) error {
+	unlock, lockErr := LockInterface(cfg.Interface)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	m, cancel := m.operation()
 	defer cancel()
 	if cfg.Interface == "" {

@@ -25,6 +25,7 @@ import (
 	"vpnctl/internal/config"
 	"vpnctl/internal/controller"
 	"vpnctl/internal/direct"
+	"vpnctl/internal/directpath"
 	"vpnctl/internal/execx"
 	"vpnctl/internal/history"
 	"vpnctl/internal/metrics"
@@ -713,7 +714,11 @@ func nodeServe(args []string) {
 		// Restore the cached relay path before making any controller request.
 		// Incomplete first-time configurations still enroll/sync before WG up.
 		if _, err := wireguard.RenderNode(*cfg.Node); err == nil {
-			if err := upOnce(ctx, *configPath, &cfg); err != nil {
+			recovered, err := directpath.RecoverExisting(ctx, *cfg.Node)
+			if err == nil && !recovered {
+				err = upOnce(ctx, *configPath, &cfg)
+			}
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "restore cached tunnel failed: %v\n", err)
 				credentials.start(sessionCtx)
 				goto retry
@@ -850,14 +855,11 @@ func upOnce(ctx context.Context, configPath string, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	if err := wireguard.WriteConfig(cfg.Node.WGConfigPath, conf); err != nil {
-		return err
-	}
 	setConf, err := wireguard.RenderSetConf(*cfg.Node, nil)
 	if err != nil {
 		return err
 	}
-	return wireguard.DefaultManager().WithContext(ctx).Up(*cfg.Node, setConf)
+	return wireguard.DefaultManager().WithContext(ctx).UpConfigured(*cfg.Node, conf, setConf)
 }
 
 func nodeSyncConfig(args []string) {
@@ -1607,14 +1609,11 @@ func handleUp(args []string) {
 		fmt.Fprint(os.Stdout, conf)
 		return
 	}
-	if err := wireguard.WriteConfig(cfg.Node.WGConfigPath, conf); err != nil {
-		fatal(err)
-	}
 	setConf, err := wireguard.RenderSetConf(*cfg.Node, nil)
 	if err != nil {
 		fatal(err)
 	}
-	fatal(wireguard.DefaultManager().WithContext(ctx).Up(*cfg.Node, setConf))
+	fatal(wireguard.DefaultManager().WithContext(ctx).UpConfigured(*cfg.Node, conf, setConf))
 }
 
 func handleDown(args []string) {
