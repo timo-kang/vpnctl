@@ -223,6 +223,12 @@ func (r *m3Recipient) start(env ...string) {
 	r.watch = startNetworkProcess(r.t, r.ns, filepath.Join(r.results, fmt.Sprintf("%s-supervise-%d.jsonl", r.relay, r.sequence)), env, append(r.args("supervise", ""), "--refresh-interval", "1s")...)
 }
 func (r *m3Recipient) ready() m3SupervisorReport {
+	return r.readyApproval(time.Time{})
+}
+
+// A refresh begun before catalog apply can finish after it. ObservedAt alone
+// is not an approval barrier; match the issued expiration before fault injection.
+func (r *m3Recipient) readyApproval(expires time.Time) m3SupervisorReport {
 	r.t.Helper()
 	after := time.Now()
 	var report m3SupervisorReport
@@ -237,6 +243,9 @@ func (r *m3Recipient) ready() m3SupervisorReport {
 		}
 		if !report.ObservedAt.After(after) || report.Refresh != "success" || !report.ApprovalValid || report.Kernel == nil || !report.Kernel.KernelReady {
 			return fmt.Errorf("not ready: %s", lines[len(lines)-1])
+		}
+		if !expires.IsZero() && !report.ApprovalExpiresAt.Equal(expires) {
+			return fmt.Errorf("approval not updated: got %s, want %s", report.ApprovalExpiresAt, expires)
 		}
 		return nil
 	})

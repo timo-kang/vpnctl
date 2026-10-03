@@ -17,7 +17,6 @@ import (
 	"vpnctl/internal/diagnostic"
 	"vpnctl/internal/direct"
 	"vpnctl/internal/stunutil"
-	"vpnctl/internal/wireguard"
 )
 
 // Run starts the long-running node agent loop.
@@ -73,6 +72,7 @@ func runSession(ctx context.Context, cfg config.NodeConfig, client *api.Client) 
 
 func runSessionWithProbe(ctx context.Context, cfg config.NodeConfig, client *api.Client, shared *direct.Shared) error {
 
+	recoverDirect(ctx, cfg)
 	nodeID, vpnIP, err := register(ctx, client, cfg)
 	if err != nil {
 		return err
@@ -92,6 +92,7 @@ func runSessionWithProbe(ctx context.Context, cfg config.NodeConfig, client *api
 	start := func(fn func()) { workers.Add(1); go func() { defer workers.Done(); fn() }() }
 	var snapshots directSnapshots
 	updates := make(chan directSnapshot, 1)
+	dataplaneUpdates := make(chan directSnapshot, 1)
 	start(func() {
 		periodic(workerCtx, cfg.KeepaliveIntervalSec, func() {
 			_, _, err := register(workerCtx, client, cfg)
@@ -110,7 +111,11 @@ func runSessionWithProbe(ctx context.Context, cfg config.NodeConfig, client *api
 					}
 					return
 				}
-				snapshots.update(updates, func(s *directSnapshot) { s.peers = resp.Peers })
+				snapshots.update(updates, func(s *directSnapshot) {
+					s.peers = resp.Peers
+					s.receivedAt = time.Now()
+					s.receivedBoot = directBootNow()
+				})
 			})
 		})
 		if shared != nil && len(cfg.STUNServers) > 0 {
@@ -133,9 +138,14 @@ func runSessionWithProbe(ctx context.Context, cfg config.NodeConfig, client *api
 				})
 			})
 		}
+		start(func() { runDirectDataplane(workerCtx, cfg, dataplaneUpdates) })
 		start(func() {
-			runDirect(workerCtx, client, cfg, nodeID, shared, updates, func(peers []wireguard.Peer) error {
-				return wireguard.DefaultManager().WithContext(workerCtx).ApplyPeers(cfg, peers)
+			runDirect(workerCtx, client, cfg, nodeID, shared, updates, func(s directSnapshot) {
+				select {
+				case <-dataplaneUpdates:
+				default:
+				}
+				dataplaneUpdates <- s
 			})
 		})
 	}
@@ -317,45 +327,6 @@ func directKeepalive(cfg config.NodeConfig, natType string) int {
 		return cfg.DirectKeepaliveSec
 	}
 	return cfg.KeepaliveSec
-}
-
-func peersEqual(a, b map[string]wireguard.Peer) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		other, ok := b[k]
-		if !ok {
-			return false
-		}
-		if v.PublicKey != other.PublicKey || v.Endpoint != other.Endpoint || v.KeepaliveSec != other.KeepaliveSec {
-			return false
-		}
-		if !stringSlicesEqual(v.AllowedIPs, other.AllowedIPs) {
-			return false
-		}
-	}
-	return true
-}
-
-func peersFromMap(m map[string]wireguard.Peer) []wireguard.Peer {
-	peers := make([]wireguard.Peer, 0, len(m))
-	for _, peer := range m {
-		peers = append(peers, peer)
-	}
-	return peers
-}
-
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func firstScopedCIDR(values []string) string {

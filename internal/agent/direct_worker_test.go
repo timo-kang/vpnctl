@@ -14,7 +14,6 @@ import (
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
-	"vpnctl/internal/wireguard"
 )
 
 func TestCancelledDirectResultCannotOverwriteNewDesiredState(t *testing.T) {
@@ -50,20 +49,22 @@ func TestCancelledDirectResultCannotOverwriteNewDesiredState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	updates := make(chan directSnapshot, 1)
-	applied := make(chan []wireguard.Peer, 10)
+	applied := make(chan directSnapshot, 10)
 	var running, maxRunning atomic.Int32
-	apply := func(peers []wireguard.Peer) error {
+	publish := func(snapshot directSnapshot) {
 		n := running.Add(1)
 		if n > maxRunning.Load() {
 			maxRunning.Store(n)
 		}
 		defer running.Add(-1)
-		applied <- peers
-		return nil
+		applied <- snapshot
 	}
 	done := make(chan struct{})
 	cfg := config.NodeConfig{DirectIntervalSec: 1, ServerPublicKey: "hub", ServerEndpoint: "127.0.0.1:51820", ServerAllowedIPs: []string{"10.7.0.0/24"}}
-	go func() { defer close(done); runDirect(ctx, client, cfg, "node", shared, updates, apply) }()
+	go func() {
+		defer close(done)
+		runDirect(ctx, client, cfg, "node", shared, updates, publish)
+	}()
 	defer func() {
 		cancel()
 		select {
@@ -76,11 +77,11 @@ func TestCancelledDirectResultCannotOverwriteNewDesiredState(t *testing.T) {
 	updates <- directSnapshot{peers: []api.PeerCandidate{peer}}
 	select {
 	case peers := <-applied:
-		if len(peers) != 1 {
+		if len(peers.peers) != 1 || !peers.peers[0].P2PReady {
 			t.Fatal(peers)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("initial apply missing")
+		t.Fatal("initial snapshot missing")
 	}
 	select {
 	case <-entered:
@@ -91,7 +92,7 @@ func TestCancelledDirectResultCannotOverwriteNewDesiredState(t *testing.T) {
 	updates <- directSnapshot{peers: []api.PeerCandidate{peer}}
 	select {
 	case peers := <-applied:
-		if len(peers) != 0 {
+		if len(peers.peers) != 1 || peers.peers[0].P2PReady {
 			t.Fatal("old result restored direct", peers)
 		}
 	case <-time.After(time.Second):
@@ -100,11 +101,11 @@ func TestCancelledDirectResultCannotOverwriteNewDesiredState(t *testing.T) {
 	cancel()
 	<-done
 	if maxRunning.Load() != 1 {
-		t.Fatal("concurrent kernel apply")
+		t.Fatal("concurrent snapshot publication")
 	}
 	select {
 	case peers := <-applied:
-		t.Fatal("late apply", peers)
+		t.Fatal("late snapshot", peers)
 	default:
 	}
 }

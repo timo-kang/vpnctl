@@ -17,7 +17,6 @@ import (
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
 	"vpnctl/internal/direct"
-	"vpnctl/internal/wireguard"
 )
 
 func TestDirectNewCandidatesPromptlyProbeWithBoundedChurn(t *testing.T) {
@@ -61,7 +60,7 @@ func TestDirectNewCandidatesPromptlyProbeWithBoundedChurn(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runDirect(ctx, client, config.NodeConfig{DirectIntervalSec: 30}, "node", shared, updates, func([]wireguard.Peer) error { return nil })
+		runDirect(ctx, client, config.NodeConfig{DirectIntervalSec: 30}, "node", shared, updates, func(directSnapshot) {})
 	}()
 	defer func() { cancel(); <-done }()
 	peer := api.PeerCandidate{ID: "initial", PublicAddr: remote.LocalAddr(), ProbePort: addr.Port}
@@ -143,7 +142,7 @@ func TestDirectWithdrawalPromptlyStartsFreshRound(t *testing.T) {
 	cfg := config.NodeConfig{DirectIntervalSec: 3, ServerPublicKey: "hub", ServerEndpoint: "127.0.0.1:51820", ServerAllowedIPs: []string{"10.7.0.0/24"}}
 	go func() {
 		defer close(done)
-		runDirect(ctx, client, cfg, "node", shared, updates, func([]wireguard.Peer) error { return nil })
+		runDirect(ctx, client, cfg, "node", shared, updates, func(directSnapshot) {})
 	}()
 	defer func() { cancel(); <-done }()
 	peer := api.PeerCandidate{ID: "peer", PubKey: "peer-key", DirectGeneration: "generation-1", ProbeToken: "ticket-1", VPNIP: "10.7.0.3/32", Endpoint: "127.0.0.1:51821", PublicAddr: remote.LocalAddr(), ProbePort: addr.Port, P2PReady: true}

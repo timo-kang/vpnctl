@@ -21,7 +21,6 @@ import (
 	"vpnctl/internal/metrics"
 	"vpnctl/internal/model"
 	"vpnctl/internal/observation"
-	"vpnctl/internal/wireguard"
 )
 
 const directBatchSize = 8
@@ -30,6 +29,8 @@ const directRoundPeers = 32
 type directSnapshot struct {
 	peers               []api.PeerCandidate
 	publicAddr, natType string
+	receivedAt          time.Time
+	receivedBoot        uint64
 }
 type directSnapshots struct {
 	mu      sync.Mutex
@@ -41,7 +42,7 @@ func (s *directSnapshots) update(out chan directSnapshot, change func(*directSna
 	defer s.mu.Unlock()
 	next := s.current
 	change(&next)
-	if slices.Equal(next.peers, s.current.peers) && next.publicAddr == s.current.publicAddr && next.natType == s.current.natType {
+	if slices.Equal(next.peers, s.current.peers) && next.publicAddr == s.current.publicAddr && next.natType == s.current.natType && next.receivedAt.Equal(s.current.receivedAt) && next.receivedBoot == s.current.receivedBoot {
 		return
 	}
 	s.current = next
@@ -53,10 +54,10 @@ func (s *directSnapshots) update(out chan directSnapshot, change func(*directSna
 	out <- next
 }
 
-// This is the only owner of WG peer application. Probe results never apply WG
-// state. Changed probe inputs or readiness withdrawal cancel and drain the old
+// UDP results never apply WG state. Snapshots go to the separate, single-owner
+// local dataplane supervisor. Changed probe inputs or readiness withdrawal cancel and drain the old
 // measurement. Positive readiness feedback alone must not cancel its own round.
-func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, nodeID string, shared *direct.Shared, updates <-chan directSnapshot, applyPeers func([]wireguard.Peer) error) {
+func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, nodeID string, shared *direct.Shared, updates <-chan directSnapshot, publish func(directSnapshot)) {
 	interval := time.Duration(cfg.DirectIntervalSec) * time.Second
 	if interval <= 0 {
 		interval = time.Second
@@ -64,7 +65,6 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	var snapshot directSnapshot
-	active := map[string]wireguard.Peer{}
 	var stop context.CancelFunc
 	var done chan struct{}
 	var lastRound time.Time
@@ -78,18 +78,6 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 	}
 	defer drain()
 	cursor := 0
-	apply := func() {
-		desired := desiredDirectPeers(cfg, snapshot.peers)
-		if cfg.ServerPublicKey == "" || cfg.ServerEndpoint == "" || len(cfg.ServerAllowedIPs) == 0 || peersEqual(active, desired) {
-			return
-		}
-		if err := applyPeers(peersFromMap(desired)); err != nil {
-			slog.Error("apply peers failed", "err", err)
-		} else {
-			active = desired
-			slog.Info("wg peers injected", "count", len(desired))
-		}
-	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -100,7 +88,7 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 				drain()
 			}
 			snapshot = next
-			apply()
+			publish(snapshot)
 			if !preserve {
 				// New candidates and withdrawals need fresh measurements even
 				// while idle. A full production cadence can stack with the remote
@@ -115,7 +103,6 @@ func runDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, n
 			done = nil
 			timer.Reset(interval)
 		case <-timer.C:
-			apply()
 			if shared == nil || len(snapshot.peers) == 0 {
 				timer.Reset(interval)
 				continue
@@ -172,25 +159,6 @@ func sameDirectProbeInputs(before, after directSnapshot) bool {
 		}
 	}
 	return true
-}
-
-func desiredDirectPeers(cfg config.NodeConfig, candidates []api.PeerCandidate) map[string]wireguard.Peer {
-	desired := map[string]wireguard.Peer{}
-	allowedOwner := map[string]string{}
-	for _, peer := range candidates {
-		allowed := normalizeHostIP(peer.VPNIP)
-		// The WG endpoint must never be replaced by the STUN probe socket address.
-		if !peer.P2PReady || peer.DirectGeneration == "" || peer.ProbeToken == "" || allowed == "" || peer.PubKey == "" || peer.Endpoint == "" {
-			continue
-		}
-		if owner, ok := allowedOwner[allowed]; ok && owner != peer.ID {
-			slog.Warn("skip duplicate allowed IP", "peer", peer.ID, "owner", owner)
-			continue
-		}
-		allowedOwner[allowed] = peer.ID
-		desired[peer.ID] = wireguard.Peer{PublicKey: peer.PubKey, Endpoint: peer.Endpoint, AllowedIPs: []string{allowed}, KeepaliveSec: directKeepalive(cfg, peer.NATType)}
-	}
-	return desired
 }
 
 func measureDirect(ctx context.Context, client *api.Client, cfg config.NodeConfig, nodeID string, shared *direct.Shared, snapshot directSnapshot, batch []api.PeerCandidate) {
