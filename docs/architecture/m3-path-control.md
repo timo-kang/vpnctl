@@ -1,12 +1,13 @@
 # M3 경로 제어 계약과 초기 dataplane 결정 (#21/#22/#23/#24/#98)
 
-상태: **catalog/binding v1, node key/cache, 로컬 계획과 후보 prepare/release/recover 구현. 앱 경로 선택·자동 전환은 후속 단계**.
+상태: **catalog/binding v1, node key/cache, 로컬 계획과 후보 prepare/release/recover 구현. target 관측·목표 경로 선택 판단 구현. 앱 경로 적용·자동 전환은 후속 단계**.
 [관리 CLI·인증 API·운영 제한](relay-catalog.md)은 #103의 구현 범위다.
 [후보 cache와 경로 키](node-relay-cache.md)는 #105의 구현 범위다.
 [장치 매핑·inventory·읽기 전용 경로 계획](node-relay-plan.md)은 #109의 구현 범위다.
 [후보의 전송 경로 적용과 소유 자원 복구](node-relay-prepare.md)는 #112의 구현 범위다.
 [릴레이 로컬 키 검증·peer와 반환 경로 적용](relay-peer-apply.md)은 #114의 구현 범위다.
-앱 route 적용, 자동 선택·전환 계약은 아직 구현 준비 상태다.
+[실제 target 관측과 목표 경로 선택 판단](node-target-selection.md)은 #153의 구현 범위다.
+선택 결과는 `applied=false`이며 앱 route 적용·전환 완료는 #23의 후속 단계다.
 #20의 [direct 탐사 세대·재전송 방지](direct-readiness.md)는 UDP 준비 신호를 보호하며,
 실제 WG 검증·로컬 fallback의 완료 판정과 구분한다.
 `TestNetns_M3PathTopology`는 제품 CLI의 후보 준비·해제·중단 복구와,

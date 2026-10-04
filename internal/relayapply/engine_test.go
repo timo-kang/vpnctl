@@ -75,7 +75,11 @@ func (k *fakeKernel) Check(_ context.Context, e Entry, fresh bool) (bool, error)
 	if k.foreign || fresh && len(v) > 0 {
 		return false, ErrConflict
 	}
-	return len(v) == 8, nil
+	want := 8
+	if e.ProbeRouting {
+		want = 10
+	}
+	return len(v) == want, nil
 }
 func (k *fakeKernel) Step(_ context.Context, e Entry, step, key string) error {
 	k.steps++
