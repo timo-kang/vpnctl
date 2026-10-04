@@ -79,6 +79,47 @@ CI는 이 두 profile을 독립 실행한다. 다른 suite와 공유하는 누�
 포함하는 3초 창으로 수정했다. 이 실패 실행도 별도 보존한다. 연속
 2회 성공 조건, 5초 fallback/반복 손실 assertion, 60초 최초 수렴/15초 복구 제한은 유지한다.
 
+2026-10-04 PR #154의 후속 M2 production CI `37182579527`에서는 5~7초 전체
+구간의 jitter도 충분하지 않은 사례를 확인했다. node-0/node-2가 약 5초 어긋난 채
+각각 3초 시도와 6~7초 대기를 반복했다. 06:28:25~06:30:18 UTC의 양방향 기록에
+각각 `overlay_probe_timeout_no_handshake` 24회가 있고, 저장 WG 표본은 peer를
+누락한 상태로 `monitor_restart` 뒤 기존 150초 기한을 넘었다. 고정 코드 timeline에는
+삭제/파싱/읽기 누락이 없었다. 새 selector는 이 fixture에서 실행되지 않는다.
+
+1초 worker에서 cooldown이 정수 주기로 반올림되는 것을 포함한 짧은 모델 검사도
+수정 전 `keys=1/17, skew=2.25s`에서 1분 동안 probe-sized 설치 창이 겹치지 않아
+실패했다. key 순서로 양방향을 5~5.25초 미만과 6.75~7초 미만의 별도 구간에 배치하고,
+구간 내 jitter를 유지하도록 수정했다. 256 key 쌍 × 41개 시작 위상에서 검사하며,
+3초 trial·5~7초 cooldown·즉시 active 실패 회수·연속 두 번 증거 조건은 변경하지 않는다.
+모델 통과는 실제 kernel 복구 SLO 합격을 대신하지 않는다. 수정 후 실제 통신 결과는
+후속 CI와 별도 artifact로 확인한다. 최초 CI `37181524329`에는 이유 timeline이
+없어 그 실패까지 같은 원인으로 확정하지 않는다.
+
+수정 소스 `81bf863`은 2 CPU/2 GiB의 실제 kernel fixture에서 2·8노드 각각 2회,
+총 4회 통과했다. fallback은 1.928~2.037초, 모든 report의 `completed=true`,
+foreign peer 보존과 실제 overlay 왕복을 확인했다. 기존 15초 재복구 조건도 통과했다.
+artifact는 `/tmp/vpnctl-direct-retry-bands-netns`에 보존한다. 관련 directpath/agent/direct
+전체 race 3회 및 selector/relayapply/CLI race도 통과했다. 실제 CI 커널의 장기 cadence
+복구 판정은 후속 M2 production 결과로 확인한다.
+
+이 첫 수정의 CI `37183485105`는 production-32 job 중 **3노드**에서 15초 재복구를,
+race-8 job 중 8노드에서 반복 손실 5.058초를 초과했다. 32노드 subcase 자체는 통과했다.
+실제 timeline은 cooldown 시작 뒤 peer 제거/readback/저장에 걸린 시간으로 5초 직후의
+짧은 지연이 한 worker 주기 일찍 충족되는 경우를 보여준다. 이 경과 시간을 포함한
+회귀도 `shorter=5.023s, longer=6.808s, removal=100ms/0s`에서 수정 전에 실패했다.
+짧은 구간을 **5.75~6초 미만**, 긴 구간을 **6.75~7초 미만**으로 옮기고 제거 후
+0/20/100/500ms의 재개 시차에서도 한 주기의 차이를 유지하는지 검사한다. 기존
+3초 trial·5초 손실·15초 재복구·150초 M2 판정은 완화하지 않는다. 이 모델의 시간
+범위보다 큰 scheduler 지연을 보장한다고 해석하지 않으며 실제 커널 검증을 계속한다.
+
+경계 보강 소스 `13f4804`의 2 CPU/2 GiB 실제 kernel 시험은 production 2·3·8·32노드
+각 2회(8/8), race 2·3·8노드 각 3회(9/9) 통과했다. 최대 fallback 2.051초,
+반복 trial 중 최대 관측 손실 4.492초였고 15초 재복구와 foreign peer 보존도 모두
+통과했다. artifact는 `/tmp/vpnctl-direct-retry-tick-production` 및
+`/tmp/vpnctl-direct-retry-tick-race-netns`다. 실제 Engine의 journal 저장에 100ms가
+걸린 뒤 다섯 번째 tick에서 조기 재설치되는 회귀도 이전 구현에서 실패를 재현하고
+수정 후 통과했다. 최종 CI의 동일 판정 조건도 별도로 확인한다.
+
 CI 승인 단축 시험은 refresh 시작(16:36:39.617 UTC) 뒤 apply(39.659), 보고 완료(39.777)
 순서로 이전 승인 결과를 소비해 실패했다. 보고 시각뿐 아니라 새 승인 만료 시각을
 확인한 뒤 controller를 중단하도록 수정했다. 실제 60초 만료 조건은 그대로 둔다.

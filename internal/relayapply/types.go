@@ -28,6 +28,7 @@ var ErrConflict = errors.New("candidate resource ownership conflict")
 var ErrRecovery = errors.New("candidate recovery required")
 
 type Entry struct {
+	ProbeRouting  bool                `json:"probe_routing,omitempty"`
 	Controller    string              `json:"controller_id"`
 	Node          string              `json:"node_id"`
 	Generation    uint64              `json:"generation"`

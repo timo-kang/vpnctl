@@ -83,6 +83,11 @@ controller와 node를 함께 업그레이드하고 정상적인 후보 조회·�
   이미 active였거나 초기 유예가 끝난 peer는 실패 시 회수하고
   `relay_unverified`를 기록한다. 제거만으로 relay 통신 성공을 선언하지 않는다.
 - 같은 peer ID는 실패 후 5~7초 cooldown을 거친다. key/generation 교체로 우회하지 못한다.
+  양쪽 key의 정렬 순서로 5.75~6초 미만/6.75~7초 미만 구간을 나눠, 1초 worker가
+  지연을 반올림해도 양방향의 재시도 주기가 계속 같아지지 않게 한다. 각 구간 안에서는
+  시도별 jitter를 사용한다. peer 제거·readback·저장이 cooldown 시작 뒤에 수행되는
+  시간을 고려해 정수 초 경계 직후의 지연을 피한다. 이것은 재시도 일정이며 정상 경로의
+  증거는 실제 WG/nonce 검사다.
   복구에도 2회 확인이 필요하다. endpoint drift는 이전 증거를 폐기한다. WG roaming으로
   endpoint만 바뀐 경우에도 journaled peer는 회수할 수 있으며 다시 시험한다.
 - controller에서 마지막으로 받은 후보는 2분까지만 사용한다. STUN 갱신은 이 시간을

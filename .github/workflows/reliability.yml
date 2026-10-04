@@ -107,7 +107,7 @@ jobs:
       # Concurrent SQLite race packages on two CPUs can starve live producers
       # past their unchanged 45s convergence budget. Every test still runs.
       - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
-      - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic)|^TestCATransition' -count=1
+      - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic|DirectDiagnostics)|^TestCATransition' -count=1
       - name: VM runner isolation and evidence regressions (no guest power actions)
         run: python3 -m unittest discover -s tests/vm -p 'test_*.py' -v
       - run: go vet ./...
@@ -219,6 +219,36 @@ jobs:
         with:
           name: direct-dataplane-${{ matrix.profile }}
           path: ${{ runner.temp }}/vpnctl-direct-${{ matrix.profile }}
+          if-no-files-found: error
+          retention-days: 14
+
+  m3-target-selection:
+    name: M3 target observation and desired path (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: production
+            race: '0'
+          - profile: race
+            race: '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Two relays, two underlays, controller outage, target faults and ownership
+        env:
+          VPNCTL_RACE: ${{ matrix.race }}
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-target-selection
+        run: ./scripts/test-m3-target-selection.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: m3-target-selection-${{ matrix.profile }}
+          path: ${{ runner.temp }}/vpnctl-target-selection
           if-no-files-found: error
           retention-days: 14
 

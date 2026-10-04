@@ -17,6 +17,7 @@ func runNodeRelayApply(args []string) error {
 	fs := flag.NewFlagSet("node relay "+args[0], flag.ContinueOnError)
 	configPath := fs.String("config", "", "enrolled node configuration")
 	cacheDir := fs.String("cache-dir", "", "private relay cache directory")
+	probeRoutes := fs.Bool("probe-routes", false, "prepare owned target routes for explicit candidate-source probes")
 	path := fs.String("path-id", "", "approved path ID (prepare/release)")
 	controller := fs.String("controller-id", "", "expected controller identity (prepare)")
 	timeout := fs.Duration("timeout", relayapply.MaxDuration, "operation deadline, at most 1m; rollback has an independent 1m budget")
@@ -28,6 +29,9 @@ func runNodeRelayApply(args []string) error {
 	}
 	if (args[0] == "prepare" || args[0] == "release") != (*path != "") {
 		return fmt.Errorf("prepare/release require --path-id; inspect/recover do not accept it")
+	}
+	if *probeRoutes && args[0] != "prepare" {
+		return fmt.Errorf("probe-routes is only accepted by prepare")
 	}
 	if *controller != "" && args[0] != "prepare" {
 		return fmt.Errorf("controller-id is only accepted by prepare")
@@ -63,7 +67,11 @@ func runNodeRelayApply(args []string) error {
 	var out relayapply.Result
 	switch args[0] {
 	case "prepare":
-		out, err = engine.Prepare(ctx, *path, *controller)
+		if *probeRoutes {
+			out, err = engine.PrepareProbe(ctx, *path, *controller)
+		} else {
+			out, err = engine.Prepare(ctx, *path, *controller)
+		}
 	case "inspect":
 		out, err = engine.Inspect(ctx)
 	case "release":

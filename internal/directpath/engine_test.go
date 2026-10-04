@@ -627,6 +627,99 @@ func TestRetrySchedulesAreBoundedAndVaryAcrossDirectionsAndAttempts(t *testing.T
 	}
 }
 
+// Model the one-second worker's quantization, not just distinct subsecond hash
+// values. Both three-second installation windows must overlap long enough for
+// an actual probe. Equal rounded periods can otherwise stay out of phase.
+func TestRetryWindowsRendezvousAcrossWorkerPhases(t *testing.T) {
+	type window struct{ from, until time.Duration }
+	windows := func(local, remote byte, phase time.Duration) []window {
+		e := &Engine{cfg: config.NodeConfig{WGPublicKey: key(local)}}
+		var out []window
+		for from := phase; from < time.Minute; {
+			out = append(out, window{from, from + InitialTrialWindow})
+			delay := e.retryDelay(Candidate{Key: key(remote)})
+			// A cooldown is inspected once each second; fractional jitter is
+			// rounded up, exactly the information lost by the old unit test.
+			delay = (delay + time.Second - 1) / time.Second * time.Second
+			from += InitialTrialWindow + delay
+		}
+		return out
+	}
+	for local := byte(1); local <= 16; local++ {
+		for remote := byte(17); remote <= 32; remote++ {
+			for skew := time.Duration(0); skew <= 10*time.Second; skew += 250 * time.Millisecond {
+				a, b := windows(local, remote, 0), windows(remote, local, skew)
+				met := false
+				for _, x := range a {
+					for _, y := range b {
+						if min(x.until, y.until)-max(x.from, y.from) >= time.Second {
+							met = true
+						}
+					}
+				}
+				if !met {
+					t.Fatalf("no probe-sized overlap within one minute: keys=%d/%d skew=%s", local, remote, skew)
+				}
+			}
+		}
+	}
+}
+
+func TestRetryBandsStayOneWorkerTickApartAfterRemoval(t *testing.T) {
+	a, _, c := fixture(t)
+	b, _, reverse := fixture(t)
+	b.cfg.WGPublicKey, reverse.Key = c.Key, a.cfg.WGPublicKey
+	for attempt := 0; attempt < 32; attempt++ {
+		x, y := a.retryDelay(c), b.retryDelay(reverse)
+		if x > y {
+			x, y = y, x
+		}
+		// Cooldown starts before Remove/readback/journal completion. Their
+		// elapsed time must not advance one endpoint by a whole worker tick,
+		// making adjacent three-second trials occupy five seconds together.
+		for _, afterA := range []time.Duration{0, 20 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond} {
+			for _, afterB := range []time.Duration{0, 20 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond} {
+				round := func(d time.Duration) time.Duration { return (d + time.Second - 1) / time.Second * time.Second }
+				if round(y-afterB)-round(x-afterA) != time.Second {
+					t.Fatalf("removal changed retry separation: shorter=%s longer=%s removal=%s/%s", x, y, afterA, afterB)
+				}
+			}
+		}
+	}
+}
+
+func TestRemovalPersistenceCannotAdvanceShortRetryByOneTick(t *testing.T) {
+	e, k, c := fixture(t)
+	now := time.Now()
+	e.now = func() time.Time { return now }
+	for i := 0; i < 2; i++ {
+		if _, err := e.Step(context.Background(), []Candidate{c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save := e.save
+	e.save = func(j journal) error {
+		if len(j.Peers) == 0 {
+			now = now.Add(100 * time.Millisecond)
+		}
+		return save(j)
+	}
+	k.mode = "silent"
+	if _, err := e.Step(context.Background(), []Candidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	adds := k.adds
+	now = now.Add(5 * time.Second)
+	r, err := e.Step(context.Background(), []Candidate{c})
+	if err != nil || k.adds != adds || r[0].State != "cooldown" {
+		t.Fatal("removal persistence advanced the retry into the fifth worker tick", r, err)
+	}
+	now = now.Add(time.Second)
+	if _, err := e.Step(context.Background(), []Candidate{c}); err != nil || k.adds != adds+1 {
+		t.Fatal("sixth tick did not admit the bounded retry", err)
+	}
+}
+
 func TestUnverifiedTrialProbeCannotRunPastInstallationWindow(t *testing.T) {
 	e, k, c := fixture(t)
 	now := time.Now()

@@ -159,6 +159,15 @@ func (e *Engine) stillApproved(entry Entry) error {
 	return errors.New("binding unavailable")
 }
 func (e *Engine) Prepare(ctx context.Context, path, controller string) (Result, error) {
+	return e.prepare(ctx, path, controller, false)
+}
+
+// PrepareProbe adds approved target routes and a source-/32 rule inside the
+// owned candidate table. It permits explicit-source probes, not unbound apps.
+func (e *Engine) PrepareProbe(ctx context.Context, path, controller string) (Result, error) {
+	return e.prepare(ctx, path, controller, true)
+}
+func (e *Engine) prepare(ctx context.Context, path, controller string, probeRouting bool) (Result, error) {
 	if e.uncertain {
 		return failure(path, "reopen_journal_required", relaycache.ErrUncertain)
 	}
@@ -168,12 +177,13 @@ func (e *Engine) Prepare(ctx context.Context, path, controller string) (Result, 
 	if err != nil {
 		return failure(path, "approval_or_inventory_unavailable", err)
 	}
+	entry.ProbeRouting = probeRouting
 	if i := e.index(path); i >= 0 {
 		old := e.journal.Entries[i]
 		if old.Phase != "prepared" {
 			return failure(path, "pending_journal", ErrRecovery)
 		}
-		if old.Controller != entry.Controller || !reflect.DeepEqual(old.Candidate, entry.Candidate) {
+		if old.ProbeRouting != entry.ProbeRouting || old.Controller != entry.Controller || !reflect.DeepEqual(old.Candidate, entry.Candidate) {
 			return failure(path, "release_previous_candidate_first", ErrConflict)
 		}
 		ready, err := e.backend.Check(ctx, old, false)
@@ -227,6 +237,9 @@ func (e *Engine) Prepare(ctx context.Context, path, controller string) (Result, 
 		return failure(path, "journal_save_failed", err)
 	}
 	steps := []string{"link", "tag", "guard", "endpoint", "rule", "address", "wg", "up"}
+	if probeRouting {
+		steps = append(steps, "probe-targets", "probe-source")
+	}
 	for _, step := range steps {
 		if ctx.Err() != nil {
 			err = ctx.Err()

@@ -7,7 +7,7 @@ WireGuard 인터페이스와 암호화 전송 경로를 설치한다. `inspect`�
 
 `prepared`와 `kernel_ready=true`는 커널 설정이 현재 승인과 일치한다는 뜻이다.
 `uplink_health`는 항상 `unknown`이다. 이 단계에는 relay peer 배포, target route 선택,
-자동 전환과 서버 도달성 probe가 포함되지 않는다. 서버 도달성은 별도로 검증해야 한다.
+자동 전환이 포함되지 않는다. `--probe-routes`로 준비하면 [실제 target 관측·선택 판단](node-target-selection.md)을 실행할 수 있다.
 
 ## 호출과 배포
 
@@ -45,7 +45,10 @@ prepare에는 `--controller-id`를 추가해 기대하는 controller 신원을 �
 후보 table에는 선택한 device/source/gateway의 endpoint route와 `unreachable default`만 둔다.
 endpoint route가 사라져도 mark 조회가 main table로 넘어가지 않게 한다. gateway 경로는
 해당 장치를 명시한 `onlink` route로 설치한다. MTU는 초기 후보 계약에서 1280이다.
-내부 주소에 `noprefixroute`를 사용하며 앱 target route를 설치하지 않는다.
+내부 주소에 `noprefixroute`를 사용한다. 기본 prepare는 target route를 설치하지 않는다.
+명시적인 `--probe-routes`는 같은 소유 table에 승인 target route와 내부 source /32 rule을
+추가한다. 일반 unbound 앱의 route 선택은 하지 않으며 자세한 반환 경로·복구 계약은
+[target 관측 문서](node-target-selection.md)를 따른다.
 각 명령은 add/delete를 사용하고 기존 테이블을 flush하거나 타인의 경로를 replace하지 않는다.
 
 WireGuard 생성 시 alias가 보존되지 않는 커널이 있으므로 생성 요청에 저장된 임의 ifindex와

@@ -228,7 +228,8 @@ func conflicts(s snapshot, e Entry, fresh bool) error {
 			return ErrConflict
 		}
 	}
-	guards, endpoints, rules := 0, 0, 0
+	guards, endpoints, rules, sourceRules := 0, 0, 0, 0
+	targets := map[string]bool{}
 	for _, r := range s.routes {
 		if n(r, "table") == 255 && n(r, "type") == 2 && str(r, "dst") == strings.TrimSuffix(e.Candidate.InnerAddress, "/32") && str(r, "dev") != p.WGInterface {
 			return ErrConflict
@@ -242,15 +243,27 @@ func conflicts(s snapshot, e Entry, fresh bool) error {
 				guards++
 			case routeMatches(r, e, false):
 				endpoints++
+			case probeRouteMatches(r, e):
+				if targets[strings.TrimSuffix(str(r, "dst"), "/32")] {
+					return ErrConflict
+				}
+				targets[strings.TrimSuffix(str(r, "dst"), "/32")] = true
 			default:
 				return ErrConflict
 			}
 		}
-		if str(r, "dev") == p.WGInterface && n(r, "table") != 255 {
+		if str(r, "dev") == p.WGInterface && n(r, "table") != 255 && !probeRouteMatches(r, e) {
 			return ErrConflict
-		} // no app routes owned here
+		} // only explicitly journaled source-probe routes are owned here
 	}
 	for _, r := range s.rules {
+		if !fresh && probeRuleMatches(r, e) {
+			sourceRules++
+			continue
+		}
+		if e.ProbeRouting && n(r, "priority") == probePriority(e) {
+			return ErrConflict
+		}
 		if !fresh && ruleMatches(r, e) {
 			rules++
 			continue
@@ -261,6 +274,9 @@ func conflicts(s snapshot, e Entry, fresh bool) error {
 		// The builtin local lookup is allowed; every other earlier rule that
 		// could capture this mark is conservatively rejected, including goto.
 		local := n(r, "priority") == 0 && n(r, "table") == 255 && str(r, "src") == "all" && only(r, "priority", "src", "table", "protocol")
+		if e.ProbeRouting && !local && n(r, "priority") < probePriority(e) && markMatch(r, 0) && probeSourceMayMatch(r, e) {
+			return ErrConflict
+		}
 		if !local && n(r, "priority") < p.RulePriority && markMatch(r, p.FWMark) {
 			return ErrConflict
 		}
@@ -268,7 +284,7 @@ func conflicts(s snapshot, e Entry, fresh bool) error {
 			return ErrConflict
 		}
 	}
-	if guards > 1 || endpoints > 1 || rules > 1 {
+	if guards > 1 || endpoints > 1 || rules > 1 || sourceRules > 1 {
 		return ErrConflict
 	}
 	return nil
@@ -292,15 +308,20 @@ func (k kernel) Check(ctx context.Context, e Entry, fresh bool) (bool, error) {
 	if !hasFlag(l, "UP") || n(l, "mtu") != 1280 || s.marks[p.WGInterface] != p.FWMark {
 		return false, nil
 	}
-	guard, endpoint, rule := false, false, false
+	guard, endpoint, rule, sourceRule := false, false, false, false
+	probeRoutes := 0
 	for _, r := range s.routes {
 		guard = guard || routeMatches(r, e, true)
 		endpoint = endpoint || routeMatches(r, e, false)
+		if probeRouteMatches(r, e) {
+			probeRoutes++
+		}
 	}
 	for _, r := range s.rules {
 		rule = rule || ruleMatches(r, e)
+		sourceRule = sourceRule || probeRuleMatches(r, e)
 	}
-	if !guard || !endpoint || !rule {
+	if !guard || !endpoint || !rule || e.ProbeRouting && (!sourceRule || probeRoutes != len(prefixes(e))) {
 		return false, nil
 	}
 	return k.wireState(ctx, e, false)
@@ -433,6 +454,30 @@ func (k kernel) Step(ctx context.Context, e Entry, step, key string) error {
 		name = "wg"
 		args = []string{"setconf", p.WGInterface, "/dev/stdin"}
 		input = fmt.Sprintf("[Interface]\nPrivateKey = %s\nFwMark = %d\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = %s\nPersistentKeepalive = 0\n", key, p.FWMark, e.Candidate.RelayPublicKey, e.Candidate.Endpoint, strings.Join(prefixes(e), ","))
+	case "probe-targets":
+		if !e.ProbeRouting {
+			return ErrConflict
+		}
+		for _, prefix := range prefixes(e) {
+			// Recheck ownership before each mutation; partial route installation is
+			// recoverable from the existing durable prepare intent.
+			current, err := k.snapshot(ctx)
+			if err != nil {
+				return err
+			}
+			if err = conflicts(current, e, false); err != nil {
+				return err
+			}
+			if _, err = k.run(ctx, "", "ip", probeRouteArgs(e, "add", prefix)...); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "probe-source":
+		if !e.ProbeRouting {
+			return ErrConflict
+		}
+		args = probeRuleArgs(e, "add")
 	case "up":
 		args = []string{"link", "set", "dev", p.WGInterface, "up"}
 	default:
@@ -444,7 +489,11 @@ func (k kernel) Step(ctx context.Context, e Entry, step, key string) error {
 func (k kernel) Remove(ctx context.Context, e Entry) error {
 	// Stop the WG socket before deleting its guard. Reinspect before every
 	// removal; a partial cleanup remains recoverable from the original intent.
-	for _, step := range []string{"link", "rule", "endpoint", "guard"} {
+	steps := []string{"link", "rule", "endpoint", "guard"}
+	if e.ProbeRouting {
+		steps = []string{"link", "probe-source", "rule", "endpoint", "guard"}
+	}
+	for _, step := range steps {
 		s, err := k.snapshot(ctx)
 		if err != nil {
 			return err
@@ -463,6 +512,12 @@ func (k kernel) Remove(ctx context.Context, e Entry) error {
 					return err
 				}
 				args = []string{"link", "del", "dev", e.Candidate.Pin.WGInterface}
+			}
+		case "probe-source":
+			for _, r := range s.rules {
+				if probeRuleMatches(r, e) {
+					args = probeRuleArgs(e, "del")
+				}
 			}
 		case "rule":
 			for _, r := range s.rules {
