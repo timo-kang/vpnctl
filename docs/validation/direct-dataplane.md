@@ -95,6 +95,13 @@ CI는 이 두 profile을 독립 실행한다. 다른 suite와 공유하는 누�
 후속 CI와 별도 artifact로 확인한다. 최초 CI `37181524329`에는 이유 timeline이
 없어 그 실패까지 같은 원인으로 확정하지 않는다.
 
+수정 소스 `81bf863`은 2 CPU/2 GiB의 실제 kernel fixture에서 2·8노드 각각 2회,
+총 4회 통과했다. fallback은 1.928~2.037초, 모든 report의 `completed=true`,
+foreign peer 보존과 실제 overlay 왕복을 확인했다. 기존 15초 재복구 조건도 통과했다.
+artifact는 `/tmp/vpnctl-direct-retry-bands-netns`에 보존한다. 관련 directpath/agent/direct
+전체 race 3회 및 selector/relayapply/CLI race도 통과했다. 실제 CI 커널의 장기 cadence
+복구 판정은 후속 M2 production 결과로 확인한다.
+
 CI 승인 단축 시험은 refresh 시작(16:36:39.617 UTC) 뒤 apply(39.659), 보고 완료(39.777)
 순서로 이전 승인 결과를 소비해 실패했다. 보고 시각뿐 아니라 새 승인 만료 시각을
 확인한 뒤 controller를 중단하도록 수정했다. 실제 60초 만료 조건은 그대로 둔다.
