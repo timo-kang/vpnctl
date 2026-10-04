@@ -81,52 +81,8 @@ func runM2Soak(t *testing.T, rejoinOnly bool) {
 	}
 	t.Log("soak results:", results)
 	exposeSoakArtifact(t, results)
-	// Export only counts of a fixed diagnostic vocabulary, never log lines,
-	// identifiers, keys, endpoints, credentials or arbitrary error text.
-	t.Cleanup(func() {
-		vocabulary := map[string]string{
-			"active": "state=active ", "probing": "state=probing ",
-			"cooldown": "state=cooldown ", "relay_unverified": "state=relay_unverified ",
-			"engine_unavailable":        "direct dataplane unavailable",
-			"recovery_blocked":          "direct recovery blocked",
-			"verification_blocked":      "direct dataplane blocked",
-			"tunnel_restore_failed":     "restore cached tunnel failed",
-			"baseline_config_changed":   "direct baseline configuration changed",
-			"interface_key_conflict":    "interface public key conflict",
-			"journal_identity_conflict": "direct journal interface identity conflict",
-			"peer_ownership_conflict":   "direct peer ownership conflict",
-			"invalid_journal":           "invalid direct journal",
-			"foreign_peer_conflict":     "unowned direct peer already exists",
-			"relay_baseline_changed":    "relay baseline changed",
-		}
-		counts := map[string]map[string]int{}
-		for n := 0; n < size; n++ {
-			b, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("node-%d.log", n)))
-			if err != nil {
-				continue
-			}
-			classes := map[string]int{}
-			for _, line := range strings.Split(string(b), "\n") {
-				for code, literal := range vocabulary {
-					if strings.Contains(line, literal) {
-						classes[code]++
-					}
-				}
-			}
-			counts[strconv.Itoa(n)] = classes
-		}
-		raw, err := json.MarshalIndent(counts, "", "  ")
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		path := filepath.Join(results, "direct-diagnostic-counts.json")
-		if err := os.WriteFile(path, raw, 0600); err != nil {
-			t.Error(err)
-		} else {
-			exposeSoakArtifact(t, path)
-		}
-	})
+	// Fixed codes and parsed timestamps only; never export raw process logs.
+	t.Cleanup(func() { writeSoakDirectDiagnostics(t, dir, results, size) })
 	trace, e := os.OpenFile(filepath.Join(results, "trace.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if e != nil {
 		t.Fatal(e)

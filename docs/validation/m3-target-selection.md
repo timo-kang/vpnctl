@@ -50,6 +50,15 @@ suite commit/dirty 상태, CPU/memory/race 설정과 함께 확인한다. 후보
 
 ## 남은 통합 gate
 
+PR #154의 최초 CI `37181524329`는 새 target selection production/race를 포함해
+17개 job이 통과했으나 M2 production이 `target_restart` 복구 기한 150초를 초과했다.
+node-1의 저장 WG 표본에는 node-2가 빠졌고 종료 직전 kernel에는 존재했다. 반복 direct
+전환 원인이 원본의 상태 건수만으로 구분되지 않아 #121에 연결하고 병합을 보류했다.
+후속 진단은 고정 원인 코드별 건수와 파싱한 시각만 저장한다. 노드별 최근 512개 로그
+기록의 코드·시각, 초과 삭제 건수, 파싱/읽기 누락 여부를 명시하며 원문·키·주소·임의
+오류는 내보내지 않는다. 이 진단은 기존 stored-WG/freshness/150초 판정에 관여하지 않는다.
+별도 main 재현 또는 후속 CI의 성공만으로 최초 실패의 원인을 해결했다고 보지 않는다.
+
 #23에서 실제 앱 route stage/validate/commit/rollback과 selection 세대 fencing을 연결해야 한다.
 #22의 장치/address/route 변경·복구, #24의 target 응답 payload·NAT source·기존/새 TCP 세션,
 실제 NetworkManager/Netplan/udev 공존과 failover SLO는 별도 검증한다. 관측 CLI의 임시 선택 이력은
