@@ -665,6 +665,29 @@ func TestRetryWindowsRendezvousAcrossWorkerPhases(t *testing.T) {
 	}
 }
 
+func TestRetryBandsStayOneWorkerTickApartAfterRemoval(t *testing.T) {
+	a, _, c := fixture(t)
+	b, _, reverse := fixture(t)
+	b.cfg.WGPublicKey, reverse.Key = c.Key, a.cfg.WGPublicKey
+	for attempt := 0; attempt < 32; attempt++ {
+		x, y := a.retryDelay(c), b.retryDelay(reverse)
+		if x > y {
+			x, y = y, x
+		}
+		// Cooldown starts before Remove/readback/journal completion. Their
+		// elapsed time must not advance one endpoint by a whole worker tick,
+		// making adjacent three-second trials occupy five seconds together.
+		for _, afterA := range []time.Duration{0, 20 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond} {
+			for _, afterB := range []time.Duration{0, 20 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond} {
+				round := func(d time.Duration) time.Duration { return (d + time.Second - 1) / time.Second * time.Second }
+				if round(y-afterB)-round(x-afterA) != time.Second {
+					t.Fatalf("removal changed retry separation: shorter=%s longer=%s removal=%s/%s", x, y, afterA, afterB)
+				}
+			}
+		}
+	}
+}
+
 func TestUnverifiedTrialProbeCannotRunPastInstallationWindow(t *testing.T) {
 	e, k, c := fixture(t)
 	now := time.Now()

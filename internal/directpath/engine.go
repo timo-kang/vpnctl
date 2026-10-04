@@ -577,7 +577,11 @@ func (e *Engine) retryDelay(c Candidate) time.Duration {
 	e.retrySequence++
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d", e.cfg.WGPublicKey, c.Key, e.retrySequence)))
 	const spread = 250 * time.Millisecond
-	base := Cooldown
+	// Stay near the upper end of each second. Removal/readback/journal work
+	// happens after cooldown starts; a delay just above five seconds can be
+	// reached on the fifth worker tick, shifting the pair by two ticks instead
+	// of one and lengthening their combined application loss.
+	base := Cooldown + time.Second - spread
 	if e.cfg.WGPublicKey > c.Key {
 		base = MaxCooldown - spread
 	}

@@ -102,6 +102,16 @@ artifact는 `/tmp/vpnctl-direct-retry-bands-netns`에 보존한다. 관련 direc
 전체 race 3회 및 selector/relayapply/CLI race도 통과했다. 실제 CI 커널의 장기 cadence
 복구 판정은 후속 M2 production 결과로 확인한다.
 
+이 첫 수정의 CI `37183485105`는 production-32 job 중 **3노드**에서 15초 재복구를,
+race-8 job 중 8노드에서 반복 손실 5.058초를 초과했다. 32노드 subcase 자체는 통과했다.
+실제 timeline은 cooldown 시작 뒤 peer 제거/readback/저장에 걸린 시간으로 5초 직후의
+짧은 지연이 한 worker 주기 일찍 충족되는 경우를 보여준다. 이 경과 시간을 포함한
+회귀도 `shorter=5.023s, longer=6.808s, removal=100ms/0s`에서 수정 전에 실패했다.
+짧은 구간을 **5.75~6초 미만**, 긴 구간을 **6.75~7초 미만**으로 옮기고 제거 후
+0/20/100/500ms의 재개 시차에서도 한 주기의 차이를 유지하는지 검사한다. 기존
+3초 trial·5초 손실·15초 재복구·150초 M2 판정은 완화하지 않는다. 이 모델의 시간
+범위보다 큰 scheduler 지연을 보장한다고 해석하지 않으며 실제 커널 검증을 계속한다.
+
 CI 승인 단축 시험은 refresh 시작(16:36:39.617 UTC) 뒤 apply(39.659), 보고 완료(39.777)
 순서로 이전 승인 결과를 소비해 실패했다. 보고 시각뿐 아니라 새 승인 만료 시각을
 확인한 뒤 controller를 중단하도록 수정했다. 실제 60초 만료 조건은 그대로 둔다.
