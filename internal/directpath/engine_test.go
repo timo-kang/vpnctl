@@ -627,6 +627,44 @@ func TestRetrySchedulesAreBoundedAndVaryAcrossDirectionsAndAttempts(t *testing.T
 	}
 }
 
+// Model the one-second worker's quantization, not just distinct subsecond hash
+// values. Both three-second installation windows must overlap long enough for
+// an actual probe. Equal rounded periods can otherwise stay out of phase.
+func TestRetryWindowsRendezvousAcrossWorkerPhases(t *testing.T) {
+	type window struct{ from, until time.Duration }
+	windows := func(local, remote byte, phase time.Duration) []window {
+		e := &Engine{cfg: config.NodeConfig{WGPublicKey: key(local)}}
+		var out []window
+		for from := phase; from < time.Minute; {
+			out = append(out, window{from, from + InitialTrialWindow})
+			delay := e.retryDelay(Candidate{Key: key(remote)})
+			// A cooldown is inspected once each second; fractional jitter is
+			// rounded up, exactly the information lost by the old unit test.
+			delay = (delay + time.Second - 1) / time.Second * time.Second
+			from += InitialTrialWindow + delay
+		}
+		return out
+	}
+	for local := byte(1); local <= 16; local++ {
+		for remote := byte(17); remote <= 32; remote++ {
+			for skew := time.Duration(0); skew <= 10*time.Second; skew += 250 * time.Millisecond {
+				a, b := windows(local, remote, 0), windows(remote, local, skew)
+				met := false
+				for _, x := range a {
+					for _, y := range b {
+						if min(x.until, y.until)-max(x.from, y.from) >= time.Second {
+							met = true
+						}
+					}
+				}
+				if !met {
+					t.Fatalf("no probe-sized overlap within one minute: keys=%d/%d skew=%s", local, remote, skew)
+				}
+			}
+		}
+	}
+}
+
 func TestUnverifiedTrialProbeCannotRunPastInstallationWindow(t *testing.T) {
 	e, k, c := fixture(t)
 	now := time.Now()

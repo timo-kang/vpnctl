@@ -62,6 +62,9 @@ node-1의 저장 WG 표본에는 node-2가 빠졌고 종료 직전 kernel에는 
 기록의 코드·시각, 초과 삭제 건수, 파싱/읽기 누락 여부를 명시하며 원문·키·주소·임의
 오류는 내보내지 않는다. 이 진단은 기존 stored-WG/freshness/150초 판정에 관여하지 않는다.
 별도 main 재현 또는 후속 CI의 성공만으로 최초 실패의 원인을 해결했다고 보지 않는다.
+진단을 넣은 두 번째 CI `37182579527`도 M2 production에서 실패했으며, 이번에는
+양쪽 직접 peer의 설치 창이 겹치지 않는 반복을 확인했다. 재시도 일정 수정과 짧은
+수정 전 실패 재현은 [직접 경로 검증 기록](direct-dataplane.md)에 정리한다.
 
 #23에서 실제 앱 route stage/validate/commit/rollback과 selection 세대 fencing을 연결해야 한다.
 #22의 장치/address/route 변경·복구, #24의 target 응답 payload·NAT source·기존/새 TCP 세션,

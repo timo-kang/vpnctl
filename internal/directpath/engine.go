@@ -567,13 +567,21 @@ func (e *Engine) verifyRelay(ctx context.Context) error {
 	return nil
 }
 
-// Vary retries by local identity, candidate key and attempt so two workers
-// cannot remain phase-locked when their initial trial windows do not overlap.
-// This is scheduling jitter, not a security nonce. The base cooldown is retained.
+// Put opposite directions in separate cooldown bands. With one-second workers,
+// broad 5..7s jitter rounds to the same two periods on both nodes and can leave
+// three-second installation windows out of phase for minutes. Canonical key
+// ordering makes one endpoint retry sooner; a small per-attempt jitter still
+// spreads fleet work without erasing that difference. Budgets are unchanged.
+// This is scheduling jitter, not a security nonce or a network-health proof.
 func (e *Engine) retryDelay(c Candidate) time.Duration {
 	e.retrySequence++
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d", e.cfg.WGPublicKey, c.Key, e.retrySequence)))
-	return Cooldown + time.Duration(binary.BigEndian.Uint64(sum[:8])%uint64(MaxCooldown-Cooldown+1))
+	const spread = 250 * time.Millisecond
+	base := Cooldown
+	if e.cfg.WGPublicKey > c.Key {
+		base = MaxCooldown - spread
+	}
+	return base + time.Duration(binary.BigEndian.Uint64(sum[:8])%uint64(spread))
 }
 
 // Step is single-owner. Network verification is bounded and concurrent so a
