@@ -688,6 +688,38 @@ func TestRetryBandsStayOneWorkerTickApartAfterRemoval(t *testing.T) {
 	}
 }
 
+func TestRemovalPersistenceCannotAdvanceShortRetryByOneTick(t *testing.T) {
+	e, k, c := fixture(t)
+	now := time.Now()
+	e.now = func() time.Time { return now }
+	for i := 0; i < 2; i++ {
+		if _, err := e.Step(context.Background(), []Candidate{c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save := e.save
+	e.save = func(j journal) error {
+		if len(j.Peers) == 0 {
+			now = now.Add(100 * time.Millisecond)
+		}
+		return save(j)
+	}
+	k.mode = "silent"
+	if _, err := e.Step(context.Background(), []Candidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	adds := k.adds
+	now = now.Add(5 * time.Second)
+	r, err := e.Step(context.Background(), []Candidate{c})
+	if err != nil || k.adds != adds || r[0].State != "cooldown" {
+		t.Fatal("removal persistence advanced the retry into the fifth worker tick", r, err)
+	}
+	now = now.Add(time.Second)
+	if _, err := e.Step(context.Background(), []Candidate{c}); err != nil || k.adds != adds+1 {
+		t.Fatal("sixth tick did not admit the bounded retry", err)
+	}
+}
+
 func TestUnverifiedTrialProbeCannotRunPastInstallationWindow(t *testing.T) {
 	e, k, c := fixture(t)
 	now := time.Now()

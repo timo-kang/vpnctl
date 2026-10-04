@@ -112,6 +112,14 @@ race-8 job 중 8노드에서 반복 손실 5.058초를 초과했다. 32노드 su
 3초 trial·5초 손실·15초 재복구·150초 M2 판정은 완화하지 않는다. 이 모델의 시간
 범위보다 큰 scheduler 지연을 보장한다고 해석하지 않으며 실제 커널 검증을 계속한다.
 
+경계 보강 소스 `13f4804`의 2 CPU/2 GiB 실제 kernel 시험은 production 2·3·8·32노드
+각 2회(8/8), race 2·3·8노드 각 3회(9/9) 통과했다. 최대 fallback 2.051초,
+반복 trial 중 최대 관측 손실 4.492초였고 15초 재복구와 foreign peer 보존도 모두
+통과했다. artifact는 `/tmp/vpnctl-direct-retry-tick-production` 및
+`/tmp/vpnctl-direct-retry-tick-race-netns`다. 실제 Engine의 journal 저장에 100ms가
+걸린 뒤 다섯 번째 tick에서 조기 재설치되는 회귀도 이전 구현에서 실패를 재현하고
+수정 후 통과했다. 최종 CI의 동일 판정 조건도 별도로 확인한다.
+
 CI 승인 단축 시험은 refresh 시작(16:36:39.617 UTC) 뒤 apply(39.659), 보고 완료(39.777)
 순서로 이전 승인 결과를 소비해 실패했다. 보고 시각뿐 아니라 새 승인 만료 시각을
 확인한 뒤 controller를 중단하도록 수정했다. 실제 60초 만료 조건은 그대로 둔다.
