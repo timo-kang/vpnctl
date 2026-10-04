@@ -44,6 +44,10 @@ suite commit/dirty 상태, CPU/memory/race 설정과 함께 확인한다. 후보
    이전 소비자 객체에 덮어 읽어도 경로가 지워지는 회귀 검증을 추가했다.
 5. **Go network timeout 분류 누락:** `net.Error.Timeout()`도 timeout으로 분류한다. 권한·fd 고갈·취소는
    통신 실패 비율에 넣지 않는다.
+6. **승인 세대 변경 시 철회 시각 잔존:** 새 세대의 첫 표본에서 이전 추천을 철회하면서도
+   `changed_at`에 과거 선택 시각이 남았다. 공통 상태 전환 처리로 철회 시각을 기록하며,
+   변경 없는 후속 unknown 표본에서는 시각을 유지하고 재확인 후 선택 시에는 갱신한다.
+   수정 전 실패를 재현했으며 두 번의 새 증거를 요구하는 규칙은 유지했다.
 
 초기 실패는 `/tmp/vpnctl-target-selection-initial`, `...-route-check`, `...-owned-routes`에
 그대로 보존했다. 실행 중 실험을 취소하거나 같은 run 결과를 덮어쓰지 않았다.

@@ -137,7 +137,8 @@ func (s *Selector) Decide(report relayapply.TargetReport) Decision {
 		s.generation, s.approvalUntil = report.Generation, report.ApprovalUntil
 		s.authorityStarted, s.authorityBoot, s.authorityBudget = now, boot, report.ApprovalUntil.Sub(now)
 		s.histories = map[string]*history{}
-		s.selected = ""
+		// Fresh authority needs consecutive proof again. Let finish withdraw
+		// the prior selection so ChangedAt records this withdrawal, too.
 	} else if !report.ApprovalUntil.Equal(s.approvalUntil) {
 		return reject("approval_changed_without_generation")
 	}

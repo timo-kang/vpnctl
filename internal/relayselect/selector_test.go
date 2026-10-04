@@ -227,6 +227,30 @@ func TestWithdrawalExplicitlyClearsSerializedDesiredPath(t *testing.T) {
 		t.Fatal("previous desired path survived withdrawal", prior, err)
 	}
 }
+
+func TestGenerationWithdrawalReportsActualChangeTime(t *testing.T) {
+	f := newScenario(t)
+	f.step("reachable")
+	selected := f.step("reachable")
+	wantPath(t, selected, "p0")
+	f.generation++
+	withdrawn := f.step("reachable")
+	wantPath(t, withdrawn, "")
+	if !withdrawn.Changed || withdrawn.PreviousPathID != "p0" || !withdrawn.ChangedAt.Equal(f.at) || !withdrawn.ChangedAt.After(selected.ChangedAt) {
+		t.Fatal("generation withdrawal retained the old selection timestamp", withdrawn)
+	}
+	stillUnknown := f.step("unknown")
+	if stillUnknown.Changed || !stillUnknown.ChangedAt.Equal(withdrawn.ChangedAt) {
+		t.Fatal("unchanged withdrawal moved its timestamp", stillUnknown)
+	}
+	wantPath(t, f.step("reachable"), "")
+	recovered := f.step("reachable")
+	wantPath(t, recovered, "p0")
+	if !recovered.Changed || !recovered.ChangedAt.Equal(f.at) {
+		t.Fatal("freshly confirmed selection did not record its change time", recovered)
+	}
+}
+
 func TestRankingUsesPriorityThenCostAndDeterministicTie(t *testing.T) {
 	for _, mode := range []string{"priority", "cost", "tie"} {
 		t.Run(mode, func(t *testing.T) {
