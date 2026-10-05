@@ -98,7 +98,11 @@ func TestNetns_M3TargetApplicationFailover(t *testing.T) {
 			f := applicationFixture(t, placement == "separate", 4)
 			applicationFallback(t, f)
 			logfile := filepath.Join(f.results, "application-watch.jsonl")
-			watcher := startNetworkProcess(t, f.robot, logfile, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "100ms", "--probe-timeout", "150ms", "--hold-down", "2s", "--minimum-dwell", "3s")
+			// The recovery window must span multiple real observations even with
+			// race instrumentation on a constrained runner. Production budgets stay
+			// unchanged; assert elapsed time from the actual committed route below.
+			const dwell = 15 * time.Second
+			watcher := startNetworkProcess(t, f.robot, logfile, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "100ms", "--probe-timeout", "150ms", "--hold-down", "10s", "--minimum-dwell", dwell.String())
 			after := time.Now()
 			phases := []map[string]any{}
 			await := func(name, path, source string) relayapply.TargetReconcileResult {
@@ -148,11 +152,14 @@ func TestNetns_M3TargetApplicationFailover(t *testing.T) {
 			await("all_unavailable", "", "")
 			netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "up")
 			after = time.Now()
-			await("alternate_recovery", "p11", "198.18.0.12")
+			alternate := await("alternate_recovery", "p11", "198.18.0.12")
 			netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "up")
 			netOutput(t, f.robot, "nft", "delete", "table", "inet", "application_fault")
 			after = time.Now()
-			await("preferred_recovery", "p00", "198.18.0.11")
+			preferred := await("preferred_recovery", "p00", "198.18.0.11")
+			if alternate.Application.Reservation.ChangedAt == nil || preferred.Application.Reservation.ChangedAt == nil || preferred.Application.Reservation.ChangedAt.Sub(*alternate.Application.Reservation.ChangedAt) < dwell {
+				t.Fatal("preferred recovery preceded minimum committed dwell", alternate, preferred)
+			}
 			// Foreign peer must be preserved while a valid alternative actually carries apps.
 			_, foreign := wgKeyPair(t)
 			iface := f.plan.Paths[0].Pin.WGInterface
@@ -171,7 +178,7 @@ func TestNetns_M3TargetApplicationFailover(t *testing.T) {
 			delayed := false
 			for _, line := range strings.Split(string(b), "\n") {
 				var v relayapply.TargetReconcileResult
-				if json.Unmarshal([]byte(line), &v) == nil && v.Applied && (v.Selection.Reason == "minimum_dwell" || v.Selection.Reason == "recovery_hold_down") {
+				if json.Unmarshal([]byte(line), &v) == nil && v.StartedAt.After(alternate.FinishedAt) && v.FinishedAt.Before(preferred.FinishedAt) && v.Applied && v.Selection.DesiredPathID == "p11" && (v.Selection.Reason == "minimum_dwell" || v.Selection.Reason == "recovery_hold_down") {
 					delayed = true
 				}
 			}

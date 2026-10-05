@@ -48,6 +48,17 @@ verification runs stay inside the invocation's disposable network-none container
    only that specific additional safe outcome, still requiring unavailable refresh,
    blocked kernel, failed real TCP and no offline rearm. All other phases stay strict.
 
+9. **Race CI exposed invalid test timing/admission assumptions:** a four-candidate
+   observation took 2–3s, so a 2s recovery hold and 3s dwell could both elapse before
+   the next complete observation. The fixture now spans multiple observations and
+   checks actual committed route timestamps as well as the delayed decision.
+   Eight-candidate supervision can also consume the one-second admission budget;
+   `ownership_unavailable` correctly makes no claim that quarantine was installed.
+   The slow-app fixture now watches until two completed negative/quarantined cycles,
+   counts busy admissions separately and keeps sampling all eight kernel leases and
+   second-app payload throughout, within a 90s fixture watchdog. Product lock,
+   observation, mutation and lease deadlines are unchanged.
+
 ## Evidence and failure preservation
 
 Local full production/race application suites passed, as did the legacy node
@@ -94,6 +105,11 @@ fixture re-preparation; control isolation exposed the interrupted-refresh test
 assumption; M2 smoke failed before testing because the Go module proxy returned
 an HTTP/2 INTERNAL_ERROR downloading `github.com/wlynxg/anet@v0.0.5`. No product
 timeout or lease bound was enlarged to address these failures.
+
+Run `37330628596` is also retained: production application validation passed;
+race exposed the timing/admission assumptions above, without a data-race report.
+Logs/artifacts are under `/tmp/vpnctl-pr160-app-race-second*`. All running jobs
+were allowed to finish before publishing the follow-up change.
 
 No failed run is hidden by rerunning into the same output directory. Older M2
 24-hour evidence is unchanged; this work does not restart or replace it.

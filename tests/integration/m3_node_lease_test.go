@@ -196,13 +196,25 @@ func checkProtectedSlowProbes(t *testing.T, f *m3AuthorityFixture, apply bool) {
  ip daddr 198.18.0.2 tcp dport 9192 counter drop
  }
 }`)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
+	budget := 50 * time.Second
+	if apply {
+		// Include admission retries without changing the product's one-second
+		// lock or twenty-second observation budgets. Busy is not proof of
+		// quarantine and must not count as a completed slow observation.
+		budget = 90 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	args := []string{integrationBinary(t), "node", "relay", "select"}
 	if apply {
 		args = []string{integrationBinary(t), "node", "relay", "target", "reconcile"}
 	}
-	args = append(args, "--config", f.node, "--target-id", "app", "--samples", "2", "--interval", "100ms", "--probe-timeout", "2s")
+	args = append(args, "--config", f.node, "--target-id", "app", "--probe-timeout", "2s")
+	if apply {
+		args = append(args, "--watch", "--interval", "2s")
+	} else {
+		args = append(args, "--samples", "2", "--interval", "100ms")
+	}
 	cmd := netCommand(ctx, f.robot, args...)
 	output, err := os.Create(filepath.Join(f.results, "slow-selection.jsonl"))
 	if err != nil {
@@ -223,11 +235,35 @@ func checkProtectedSlowProbes(t *testing.T, f *m3AuthorityFixture, apply bool) {
 	go func() { done <- cmd.Wait() }()
 	samples := 0
 	started := time.Now()
+	stopping := false
+	completedApplications := func(data []byte) (negative, busy int) {
+		t.Helper()
+		lines := strings.Split(string(data), "\n")
+		// The running encoder can have an incomplete final line.
+		for _, line := range lines[:len(lines)-1] {
+			var result relayapply.TargetReconcileResult
+			if json.Unmarshal([]byte(line), &result) != nil || result.Applied || result.Selection.Applied || result.Application.Activated || result.Selection.DesiredPathID != "" || result.Selection.TargetID != "app" || result.Selection.SchemaVersion != 1 || result.Selection.Error() == nil {
+				t.Fatal("invalid slow application decision", line)
+			}
+			if result.Selection.Reason == "ownership_unavailable" {
+				if result.Application.Guarded || result.Application.Reason != "ownership_unavailable" {
+					t.Fatal("busy admission claimed quarantine", line)
+				}
+				busy++
+				continue
+			}
+			if !result.Application.Guarded {
+				t.Fatal("slow apply escaped quarantine", line)
+			}
+			negative++
+		}
+		return
+	}
 	for {
 		select {
 		case err := <-done:
 			var exit *exec.ExitError
-			if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			if ctx.Err() != nil || apply && (!stopping || err != nil) || !apply && (!errors.As(err, &exit) || exit.ExitCode() != 1) {
 				t.Fatal("selector did not finish with a bounded negative decision", err, ctx.Err())
 			}
 			if samples < 5 || time.Since(started) < 8*time.Second {
@@ -238,32 +274,48 @@ func checkProtectedSlowProbes(t *testing.T, f *m3AuthorityFixture, apply bool) {
 				t.Fatal(err)
 			}
 			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-			if len(lines) != 2 {
+			negative, busy := 0, 0
+			if apply {
+				negative, busy = completedApplications(b)
+				if negative < 2 || negative+busy != len(lines) {
+					t.Fatal("missing completed slow application observations", string(b))
+				}
+			} else if len(lines) != 2 {
 				t.Fatal("missing slow observation decisions", string(b))
 			}
 			for _, line := range lines {
-				var decision relayselect.Decision
 				if apply {
-					var result relayapply.TargetReconcileResult
-					if json.Unmarshal([]byte(line), &result) != nil || result.Applied || !result.Application.Guarded {
-						t.Fatal("slow apply escaped quarantine", line)
-					}
-					decision = result.Selection
-				} else if err := json.Unmarshal([]byte(line), &decision); err != nil {
+					break
+				}
+				var decision relayselect.Decision
+				if err := json.Unmarshal([]byte(line), &decision); err != nil {
 					t.Fatal(err)
 				}
 				if decision.SchemaVersion != 1 || decision.TargetID != "app" || decision.Applied || decision.DesiredPathID != "" || decision.Error() == nil {
 					t.Fatal("invalid slow observation decision", line)
 				}
+				negative++
 			}
 			counter := netOutput(t, f.target, "nft", "list", "table", "inet", "slow_node_target")
 			if !strings.Contains(counter, "counter packets ") || strings.Contains(counter, "counter packets 0 bytes 0") {
 				t.Fatal("target blackhole did not receive packets")
 			}
 			netOutput(t, f.target, "nft", "delete", "table", "inet", "slow_node_target")
-			writeM3Report(t, filepath.Join(f.results, "node-slow-probes.json"), map[string]any{"completed": !t.Failed(), "samples": samples, "duration_seconds": time.Since(started).Seconds(), "all_eight_kernel_leases_active": true, "negative_decisions": len(lines), "blackhole_packets_observed": true, "application_reconcile": apply, "second_app_payload_verified": apply})
+			writeM3Report(t, filepath.Join(f.results, "node-slow-probes.json"), map[string]any{"completed": !t.Failed(), "samples": samples, "duration_seconds": time.Since(started).Seconds(), "all_eight_kernel_leases_active": true, "negative_decisions": negative, "busy_admissions": busy, "blackhole_packets_observed": true, "application_reconcile": apply, "second_app_payload_verified": apply})
 			return
 		default:
+		}
+		if apply && !stopping {
+			b, err := os.ReadFile(output.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if negative, _ := completedApplications(b); negative >= 2 {
+				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal("stop completed slow workload", err)
+				}
+				stopping = true
+			}
 		}
 		probeCtx, stop := context.WithTimeout(ctx, 3*time.Second)
 		probe := netCommand(probeCtx, f.robot, f.worker, "-test.run=^TestNetworkWorker$")
