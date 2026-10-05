@@ -290,6 +290,11 @@ func TestTargetGuardJournalValidation(t *testing.T) {
 	}
 	original := e.journal.Targets[0]
 	for _, mutate := range []func(*TargetGuard){
+		func(g *TargetGuard) { g.AllocationSlot++ },
+		func(g *TargetGuard) {
+			g.AllocationSlot = maxTargetAllocationSlot + 1
+			g.Table, g.Priority = targetAllocatedSlots(*g)
+		},
 		func(g *TargetGuard) { g.Table++ }, func(g *TargetGuard) { g.Priority++ }, func(g *TargetGuard) { g.Owner = "vpnctl:bad" }, func(g *TargetGuard) { g.Node = "elsewhere" }, func(g *TargetGuard) { g.Phase = "active" }, func(g *TargetGuard) { g.Prefixes = []string{"0.0.0.0/0"} }, func(g *TargetGuard) { g.Prefixes = []string{"198.18.0.2/32", "198.18.0.2/32"} },
 	} {
 		copy := original

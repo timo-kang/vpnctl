@@ -59,6 +59,16 @@ verification runs stay inside the invocation's disposable network-none container
    second-app payload throughout, within a 90s fixture watchdog. Product lock,
    observation, mutation and lease deadlines are unchanged.
 
+10. **Owned target hash collision (blocking, #161):** final node-lease race CI
+    reproduced disjoint `app`/`app2` targets with the same priority 32551 for
+    controller `7895f2cf50e105e75f4ecf1677eac81d`. The old allocator had no fallback.
+    A bounded allocation slot now avoids only journal-owned table/priority
+    collisions and is persisted before kernel changes. Existing target tuples
+    never move; foreign kernel conflicts still fail. Slot zero preserves legacy
+    JSON/digest encoding. Tests include the exact CI identity, 32 targets sharing
+    one initial priority, interrupted reservation recovery, deletion/reopen
+    stability, invalid slots and a forced real-kernel collision.
+
 ## Evidence and failure preservation
 
 Local full production/race application suites passed, as did the legacy node
@@ -110,6 +120,14 @@ Run `37330628596` is also retained: production application validation passed;
 race exposed the timing/admission assumptions above, without a data-race report.
 Logs/artifacts are under `/tmp/vpnctl-pr160-app-race-second*`. All running jobs
 were allowed to finish before publishing the follow-up change.
+
+Run `37334104350` is retained: both application profiles passed, but node-lease
+race found the real allocation defect #161 above. Its original logs/artifacts
+are `/tmp/vpnctl-pr160-node-race-2cf1b09*`. The first new forced-collision fixture
+was correctly refused for modifying bound path identities, then for skipping the
+required disable revision before retirement. It now disables the old paths and
+approves new path IDs for the new target set through the public API. No fixture
+identity is rerolled to hide collisions.
 
 No failed run is hidden by rerunning into the same output directory. Older M2
 24-hour evidence is unchanged; this work does not restart or replace it.

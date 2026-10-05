@@ -53,6 +53,11 @@ namespace의 `conf/all/rp_filter=0`과 새 WG가 상속할 `conf/default/rp_filt
    경로 조회, 승인·lease·소유권을 재검증한다.
 5. `active`, 적용 시각, 검증 시각을 저장한 뒤에만 `applied=true, application.activated=true`를 낸다.
 
+Target 예약의 기본 table/priority 해시가 다른 소유 target과 겹치면 제한된 대체 슬롯을
+선택하고 `allocation_slot`을 intent와 함께 저장한다. 기존 예약은 이동하지 않으며, 다른
+target을 삭제해도 남은 예약의 슬롯은 바뀌지 않는다. 외부 커널 자원과 충돌하면 계속 거절한다.
+slot 0은 기존 배정·직렬화를 유지하고, 비영 slot을 모르는 구버전은 journal을 거절한다.
+
 관측 JSON을 다시 입력하여 적용하는 API는 없다. `selection.applied`는 추천 계약상 false이고,
 최상위 `applied`가 이번 실제 적용 결과다. `application.proof.evidence=unbound_tcp_connect`는
 서버 TCP 연결 확인이며 HTTP/앱 업무 성공은 아니다. 통합 시험의 독립 클라이언트가 nonce payload와

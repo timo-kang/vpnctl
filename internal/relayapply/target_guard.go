@@ -24,6 +24,7 @@ import (
 // Reservations persist across approval expiry: withdrawing approval must not
 // reopen a previously blocked target through the machine's default route.
 type TargetGuard struct {
+	AllocationSlot     uint32       `json:"allocation_slot,omitempty"`     // zero preserves legacy reservations
 	ApplicationVersion int          `json:"application_version,omitempty"` // persists while quarantined
 	Controller         string       `json:"controller_id"`
 	Node               string       `json:"node_id"`
@@ -40,6 +41,11 @@ type TargetGuard struct {
 	VerifiedAt         *time.Time   `json:"app_verified_at,omitempty"`
 	ChangedAt          *time.Time   `json:"route_changed_at,omitempty"`
 }
+
+// Each existing reservation can exclude at most one table and one priority in
+// the linear probe sequence. 2*N+1 choices therefore suffice for N owned targets.
+// Foreign kernel objects are not part of this search: they still cause conflict.
+const maxTargetAllocationSlot = 2 * (relaycatalog.MaxTargets - 1)
 
 type TargetGuardResult struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -62,6 +68,25 @@ type targetBackend interface {
 func targetSlots(controller, node, target string) (uint32, uint32) {
 	h := sha256.Sum256([]byte(controller + "\x00" + node + "\x00" + target))
 	return 700000 + binary.BigEndian.Uint32(h[:4])%524288, 32000 + binary.BigEndian.Uint32(h[4:8])%760
+}
+func targetAllocatedSlots(e TargetGuard) (uint32, uint32) {
+	table, priority := targetSlots(e.Controller, e.Node, e.TargetID)
+	return 700000 + (table-700000+e.AllocationSlot)%524288, 32000 + (priority-32000+e.AllocationSlot)%760
+}
+func allocateTargetSlots(entry TargetGuard, owned []TargetGuard) (TargetGuard, error) {
+	if len(owned) >= relaycatalog.MaxTargets {
+		return entry, relaycatalog.ErrCapacity
+	}
+	for slot := uint32(0); slot <= maxTargetAllocationSlot; slot++ {
+		entry.AllocationSlot = slot
+		entry.Table, entry.Priority = targetAllocatedSlots(entry)
+		if !slices.ContainsFunc(owned, func(old TargetGuard) bool {
+			return old.Table == entry.Table || old.Priority == entry.Priority
+		}) {
+			return entry, nil
+		}
+	}
+	return entry, relaycatalog.ErrCapacity
 }
 func guardPrefixesOverlap(a, b []string) bool {
 	for _, x := range a {
@@ -94,8 +119,8 @@ func validateTargetGuards(entries []TargetGuard, node string) error {
 		return errors.New("too many target reservations")
 	}
 	for i, e := range entries {
-		table, priority := targetSlots(e.Controller, e.Node, e.TargetID)
-		if e.Controller == "" || e.Node != node || !validGuardID(e.TargetID) || e.Generation == 0 || e.Table != table || e.Priority != priority || e.Metric < 100000 || e.Metric > 0x3fffffff+100000 || len(e.Owner) != 39 || !strings.HasPrefix(e.Owner, "vpnctl:") || validateTargetPhase(e) != nil {
+		table, priority := targetAllocatedSlots(e)
+		if e.Controller == "" || e.Node != node || !validGuardID(e.TargetID) || e.Generation == 0 || e.AllocationSlot > maxTargetAllocationSlot || e.Table != table || e.Priority != priority || e.Metric < 100000 || e.Metric > 0x3fffffff+100000 || len(e.Owner) != 39 || !strings.HasPrefix(e.Owner, "vpnctl:") || validateTargetPhase(e) != nil {
 			return errors.New("invalid target reservation")
 		}
 		if _, err := hex.DecodeString(e.Owner[7:]); err != nil {
@@ -177,8 +202,10 @@ func (e *Engine) ReserveTarget(parent context.Context, id, controller string) (T
 	if err != nil {
 		return e.targetFailure(id, "owner_unavailable", err)
 	}
-	table, priority := targetSlots(r.ControllerID, r.NodeID, id)
-	entry := TargetGuard{Controller: r.ControllerID, Node: r.NodeID, Generation: r.ObservedGeneration, TargetID: id, Prefixes: prefixes, Owner: owner, Metric: metric, Table: table, Priority: priority, Phase: "reserving"}
+	entry, err := allocateTargetSlots(TargetGuard{Controller: r.ControllerID, Node: r.NodeID, Generation: r.ObservedGeneration, TargetID: id, Prefixes: prefixes, Owner: owner, Metric: metric, Phase: "reserving"}, e.journal.Targets)
+	if err != nil {
+		return e.targetFailure(id, "target_reservation_conflict", err)
+	}
 	proposed := append(slices.Clone(e.journal.Targets), entry)
 	if err = validateTargetGuards(proposed, e.journal.Node); err != nil {
 		return e.targetFailure(id, "target_reservation_conflict", err)
