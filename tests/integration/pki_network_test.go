@@ -406,7 +406,10 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		}
 		return nil
 	})
-	rolledBack := action("ca.rollback")
+	// Rollback may commit after a lost IPC response, just like activate/retire.
+	// Preserve the 2s RPC budget and observe the exact generation/signer before
+	// accepting or retrying the transition under the shared 15s convergence gate.
+	rolledBack := awaitAction("ca.rollback")
 	if rolledBack.Active != retired.Active {
 		t.Fatal("rollback did not restore prior issuer")
 	}

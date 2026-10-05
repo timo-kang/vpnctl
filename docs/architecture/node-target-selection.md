@@ -120,3 +120,6 @@ recover를 검사한다. 선택 명령 전후 route/rule이 같고 일반 unboun
 1/3/8/32 node × 최대 8후보의 반복 flap·bounded history는 선택기 단위 검증이며,
 32-node 실제 dataplane 부하 실증은 아니다. #23의 실제 앱 route 적용/rollback, #22의 underlay
 세대 변경·복구, #24의 NAT source·기존/새 세션 및 SLO, 실제 네트워크 관리자 공존은 남아 있다.
+
+앱 경로 활성화 전에 사용할 target 전용 차단·복구 기반은
+[앱 target 예약](node-target-reservation.md)을 참고한다. 이 예약도 실제 릴레이 활성화는 하지 않는다.

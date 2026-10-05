@@ -44,6 +44,21 @@ func convergeCATransition(ctx context.Context, call func(context.Context, api.Ad
 			return nil, errors.New("CA activation did not start from prepared state")
 		}
 		want.Phase, want.Active, want.Previous, want.Pending = "overlap", before.Pending, before.Active, ""
+	case "ca.rollback":
+		switch before.Phase {
+		case "prepared":
+			if before.Pending == "" || before.Previous != "" {
+				return nil, errors.New("CA rollback did not start from prepared state")
+			}
+			want.Phase, want.Pending = "stable", ""
+		case "overlap":
+			if before.Previous == "" || before.Pending != "" {
+				return nil, errors.New("CA rollback did not start from overlap state")
+			}
+			want.Phase, want.Active, want.Previous = "rollback", before.Previous, before.Active
+		default:
+			return nil, errors.New("CA rollback did not start from a reversible state")
+		}
 	case "ca.retire":
 		if (before.Phase != "overlap" && before.Phase != "rollback") || before.Previous == "" || before.Pending != "" {
 			return nil, errors.New("CA retirement did not start from overlap/rollback")
@@ -186,5 +201,61 @@ func TestCATransitionPreservesRejectionAfterStatusTimeout(t *testing.T) {
 	status, err := convergeCATransition(ctx, call, "ca.retire")
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, rejected) || status == nil || status.Generation != 3 || status.Phase != "overlap" || reads != 2 || mutations != 1 {
 		t.Fatalf("status=%+v err=%v reads=%d mutations=%d", status, err, reads, mutations)
+	}
+}
+
+func TestCATransitionRollbackLostResponseRequiresExactCommit(t *testing.T) {
+	for _, phase := range []string{"prepared", "overlap"} {
+		for _, fault := range []string{"lost_response", "wrong_signer", "wrong_generation", "wrong_phase", "never_committed"} {
+			t.Run(phase+"/"+fault, func(t *testing.T) {
+				state := pki.AuthorityStatus{Generation: 5, Phase: phase, Active: "old", Pending: "new"}
+				if phase == "overlap" {
+					state.Active, state.Previous, state.Pending = "new", "old", ""
+				}
+				mutations, reads := 0, 0
+				call := func(_ context.Context, req api.AdminRequest) (api.AdminResponse, error) {
+					if req.Operation == "pki.status" {
+						reads++
+						if reads == 2 {
+							return api.AdminResponse{}, context.DeadlineExceeded
+						}
+						copy := state
+						return api.AdminResponse{PKI: &copy}, nil
+					}
+					if req.Operation != "ca.rollback" {
+						t.Fatalf("unexpected operation %s", req.Operation)
+					}
+					mutations++
+					if fault != "never_committed" {
+						state.Generation = 6
+						if phase == "prepared" {
+							state.Phase, state.Pending = "stable", ""
+						} else {
+							state.Phase, state.Active, state.Previous = "rollback", "old", "new"
+						}
+						if fault == "wrong_signer" {
+							state.Active = "unrelated"
+						}
+						if fault == "wrong_generation" {
+							state.Generation++
+						}
+						if fault == "wrong_phase" {
+							state.Phase = "unrelated"
+						}
+					}
+					return api.AdminResponse{}, context.DeadlineExceeded
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 450*time.Millisecond)
+				defer cancel()
+				got, err := convergeCATransition(ctx, call, "ca.rollback")
+				if fault == "lost_response" {
+					if err != nil || got == nil || got.Generation != 6 || got.Active != "old" || mutations != 1 || reads != 3 {
+						t.Fatalf("got=%+v err=%v mutations=%d reads=%d", got, err, mutations, reads)
+					}
+				} else if err == nil || mutations == 0 {
+					t.Fatal("unrelated or absent rollback not exercised/rejected", got, err)
+				}
+			})
+		}
 	}
 }

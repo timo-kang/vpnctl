@@ -40,10 +40,11 @@ type Entry struct {
 	Phase         string              `json:"phase"`
 }
 type Journal struct {
-	Version int     `json:"version"`
-	Node    string  `json:"node_id"`
-	Domain  string  `json:"kernel_domain"`
-	Entries []Entry `json:"entries"`
+	Version int           `json:"version"`
+	Node    string        `json:"node_id"`
+	Domain  string        `json:"kernel_domain"`
+	Entries []Entry       `json:"entries"`
+	Targets []TargetGuard `json:"targets,omitempty"`
 }
 type Result struct {
 	SchemaVersion int          `json:"schema_version"`
@@ -69,6 +70,7 @@ type Engine struct {
 	cache     *relaycache.Store
 	journal   Journal
 	backend   backend
+	targets   targetBackend
 	underlays []relayplan.Underlay
 	collector relayplan.Collector
 	unlock    func()
