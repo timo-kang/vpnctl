@@ -61,3 +61,17 @@ production/race 결과를 구분한다. 결과에는 배치, 후보 수, phase�
 공개 kernel inventory와 binary digest가 남는다. controller/relay 동거와 분리, 후보 1/4/8,
 다중 target, blackhole/릴레이 장애, controller 단절, 전체 불가, 수동 pin, SIGKILL, 만료/철회를 다룬다.
 장기/물리 시험과 실제 네트워크 관리자 공존은 여기의 통과로 대체하지 않는다.
+
+## Capacity qualification
+
+The current application integration profiles use 2 CPU / 2 GiB for production
+and 4 CPU / 2 GiB for the race build, with up to eight prepared candidates and
+two targets. These are test profiles, not minimum hardware guarantees. A 2 CPU
+race run exceeded the 10s observation freshness window with eight healthy
+candidates and correctly retained quarantine. Mixed healthy/slow candidates and
+CPU contention can also consume the freshness budget; available physical uplink
+does not by itself guarantee activation under overload. Keep observation/admission
+records when diagnosing this state. [Issue #162](https://github.com/timo-kang/vpnctl/issues/162)
+tracks bounded scheduling, supported capacity and operational availability before
+hardware-wide or failover-SLO qualification. Do not increase approval/lease
+lifetimes or accept stale evidence to work around insufficient processing capacity.

@@ -128,3 +128,12 @@ automatic failover, process death and node-only approval expiry/revocation.
 The fixture provisions rp_filter only inside its owned robot namespace using
 a temporary private proc mount. No host sysctl, network, clock or power changes.
 See [deployment prerequisites](../../docs/deployment/node-application-routing.md).
+
+CI keeps the production application profile at 2 CPU / 2 GiB and runs the race
+profile at 4 CPU / 2 GiB, with identical deadlines and assertions. Reproduce the
+race profile with `VPNCTL_RACE=1 VPNCTL_TEST_CPUS=4 ./scripts/test-m3-target-application.sh`.
+The wrapper default remains 2 CPU; use a new `VPNCTL_ARTIFACT_DIR` for each run.
+Eight healthy candidates exceeded observation freshness in a 2 CPU race run;
+[issue #162](https://github.com/timo-kang/vpnctl/issues/162) tracks that capacity
+boundary and mixed healthy/slow candidate scheduling. A pass on these profiles
+does not establish availability on arbitrary robot hardware.

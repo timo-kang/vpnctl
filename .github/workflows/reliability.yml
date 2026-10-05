@@ -295,8 +295,10 @@ jobs:
         include:
           - profile: production
             race: '0'
+            cpus: '2'
           - profile: race
             race: '1'
+            cpus: '4'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -307,6 +309,7 @@ jobs:
       - name: Unbound apps, failover, quarantine, interrupted commits and approval faults
         env:
           VPNCTL_RACE: ${{ matrix.race }}
+          VPNCTL_TEST_CPUS: ${{ matrix.cpus }}
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-target-application
         run: ./scripts/test-m3-target-application.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

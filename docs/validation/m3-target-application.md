@@ -95,6 +95,18 @@ verification runs stay inside the invocation's disposable network-none container
     candidates to remain ineligible, and the selected path to be prepared. The
     complete 1/4/8 matrix in both profiles is rerun; product behavior is unchanged.
 
+14. **Eight-path observation capacity (#162):** run `37344418818` passed the
+    production app profile and both node profiles, but the 2 CPU app race profile
+    could not confirm eight healthy paths within the unchanged 10s freshness
+    window. Complete observations took 9.09–11.85s; the watch interval and admission
+    added to the gap. TCP connects were mostly 1–3ms or less. Per-candidate full
+    lease sweeps amplify kernel/inventory work. The selector correctly kept the
+    target guarded. The app race profile now uses 4 CPU, while production keeps
+    2 CPU; both retain 2 GiB, every assertion and all product deadlines. This is
+    a validation resource profile, not a fix or qualification for the 2 CPU race
+    capacity limit. #162 remains open for scheduling/cost improvement and mixed
+    healthy/slow paths, before general operational availability can be claimed.
+
 ## Evidence and failure preservation
 
 Local full production/race application suites passed, as did the legacy node
@@ -160,6 +172,15 @@ The original app race log for `37337660581` is retained at
 before the admission-contract follow-up is pushed. No product deadline is changed.
 The companion node admission log is `/tmp/vpnctl-pr160-node-race-a28d908.log`.
 
+Run `37344418818` completed 21/22 checks. Failed app race logs/artifacts are
+`/tmp/vpnctl-pr160-app-race-cb9be34*`; healthy 8-path observation gaps explain the
+failure above. The complete run finished before the resource-profile change.
+Go's [race detector documentation](https://go.dev/doc/articles/race_detector)
+reports typical execution overhead of 2–20 times, and GitHub's
+[public Ubuntu runner specification](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)
+provides 4 CPU for this public repository. Neither establishes a product minimum:
+production/race capacity and mixed slow-path liveness remain tracked in #162.
+
 No failed run is hidden by rerunning into the same output directory. Older M2
 24-hour evidence is unchanged; this work does not restart or replace it.
 
@@ -169,5 +190,5 @@ Merge requires unit/race, vet/build and both kernel profiles on the PR's tested
 revision. Production output proves TCP connect and WG transfer, not business
 application health; payload/NAT are independent integration evidence. Existing
 TCP session migration is not promised. Actual NetworkManager/Netplan/udev
-coexistence, physical/VM power boundaries (#128/#135), multi-node operational
+coexistence, physical/VM power boundaries (#128/#135), observation capacity (#162), multi-node operational
 failover SLO and the rest of #23/M3 remain separate gates.
