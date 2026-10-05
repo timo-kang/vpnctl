@@ -20,6 +20,17 @@ route 활성화는 여전히 하지 않는다. 운영 계약과 배포 절차는
 supervisor가 종료되는 문제를 수정했다. 실패 실행은 끝까지 완료했고 결과 디렉터리를
 덮어쓰거나 기존 실행을 취소하지 않았다.
 
+첫 CI `37287971474`의 race 시험에서는 8후보 첫 관측이 약 7초 걸려 두 표본을
+수집하는 CLI를 공통 시험 도우미의 10초 제한이 종료시켰다. 최초 표본의 8후보는
+모두 TCP/WG 증거가 정상이었다. 전용 시험 호출을 `2 × 20초 + 5초`로 바꿔 제품의
+배치 20초, 프로브 1초, 갱신 5초, 임대 10초 제한을 유지하면서 두 표본을 검증한다.
+최종 결과의 모든 준비 후보가 reachable/eligible인지 검사하고 소요 시간을 남긴다.
+원본 실패 로그와 artifact는 `/tmp/vpnctl-pr158-node-race-failed*`에 보존했다.
+수정 후 CPU를 1개로 제한한 colocated/separate × 8후보 race 시험도 195.79초에
+통과했다. 두 target의 모든 후보가 최종 reachable/eligible 상태였으며,
+40.63초의 느린 관측 동안 78회 표본에서 8개 커널 임대가 모두 활성 상태였다.
+증거는 `/tmp/vpnctl-node-lease-race-budget-fix`에 보존했다.
+
 ## 로컬 검증 근거
 
 Linux `7.0.0-30-generic`, Docker `--network none`, 실행마다 2 CPU / 2 GiB.

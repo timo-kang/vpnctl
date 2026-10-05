@@ -17,6 +17,7 @@ import (
 
 	"vpnctl/internal/relayapply"
 	"vpnctl/internal/relayguard"
+	"vpnctl/internal/relayselect"
 )
 
 func TestNetns_M3NodeLease(t *testing.T) {
@@ -114,10 +115,10 @@ func TestNetns_M3NodeLease(t *testing.T) {
 				// Let the selector own the lock for a batch; it must maintain leases
 				// cooperatively without changing the application target reservation.
 				netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", "app")
-				netOutput(t, f.robot, integrationBinary(t), "node", "relay", "select", "--config", f.node, "--target-id", "app", "--samples", "2", "--interval", "100ms")
+				checkNodeLeaseSelection(t, f, "app")
 				if size == 8 {
 					netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", "app2")
-					netOutput(t, f.robot, integrationBinary(t), "node", "relay", "select", "--config", f.node, "--target-id", "app2", "--samples", "2", "--interval", "100ms")
+					checkNodeLeaseSelection(t, f, "app2")
 					phases = append(phases, "two_target_observation_and_quarantine")
 					if placement == "separate" {
 						checkNodeLeaseSlowProbes(t, f)
@@ -146,6 +147,41 @@ func TestNetns_M3NodeLease(t *testing.T) {
 			})
 		}
 	}
+}
+
+func checkNodeLeaseSelection(t *testing.T, f *m3AuthorityFixture, target string) {
+	t.Helper()
+	// netOutput is for a single short command (10s). This CLI intentionally
+	// collects two independent batches, each with a 20s product deadline,
+	// plus bounded admission and a 100ms interval. Do not kill batch two merely
+	// because eight healthy candidates cost more under the race instrumenter.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*relayapply.MaxTargetProbeDuration+5*time.Second)
+	defer cancel()
+	started := time.Now()
+	b, err := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "select", "--config", f.node, "--target-id", target, "--samples", "2", "--interval", "100ms").CombinedOutput()
+	if err != nil {
+		t.Fatalf("two-batch selection: %v: %s", err, b)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	var decision relayselect.Decision
+	if len(lines) != 2 || json.Unmarshal([]byte(lines[1]), &decision) != nil || decision.Applied || decision.DesiredPathID == "" || decision.TargetID != target {
+		t.Fatal("invalid final selection", string(b))
+	}
+	for _, path := range f.plan.Paths {
+		found := false
+		for _, candidate := range decision.Candidates {
+			if candidate.PathID == path.PathID {
+				found = true
+				if candidate.State != "reachable" || !candidate.Eligible {
+					t.Fatal("prepared candidate not confirmed", candidate)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing prepared candidate", path.PathID)
+		}
+	}
+	writeM3Report(t, filepath.Join(f.results, "node-selection-"+target+".json"), map[string]any{"completed": !t.Failed(), "duration_seconds": time.Since(started).Seconds(), "samples": len(lines), "prepared_candidates": len(f.plan.Paths), "decision": decision})
 }
 
 func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
