@@ -2,8 +2,8 @@
 
 Base: main `503d052d4e01cf2cbe31dc1b81acc275302891c5` (PR #158).
 Scope: ordinary local IPv4 mark-zero applications through protected relay candidates.
-No host network, clock, suspend, reboot or mount changes. Every kernel mutation in
-verification runs is inside the invocation's disposable network-none container/netns.
+No host network, clock, suspend, reboot or mount changes. Local network mutations in
+verification runs stay inside the invocation's disposable network-none container/netns.
 
 ## Review findings and fixes
 
@@ -41,8 +41,18 @@ verification runs is inside the invocation's disposable network-none container/n
    context cancellation. Selection/reconcile now finish their bounded cleanup and
    return normally on the signal context; real operation failures remain in JSON.
 
+8. **Existing CI assumed cached approval survives every SIGKILL:** a crash during
+   refresh correctly leaves `refresh_interrupted` metadata denial. The old control
+   isolation test wrongly demanded `approval_valid=true` on offline restart.
+   Supervision now exposes `approval_blocked_reason`; the restart assertion accepts
+   only that specific additional safe outcome, still requiring unavailable refresh,
+   blocked kernel, failed real TCP and no offline rearm. All other phases stay strict.
+
 ## Evidence and failure preservation
 
+Local full production/race application suites passed, as did the legacy node
+lease/target guard/selection kernel regression and the 176.59s control-isolation
+regression. Full `go test -race ./...`, targeted race and vet/build also passed.
 The final PR CI must pass both production and race profiles before merge. The
 committed test suite exercises:
 
@@ -70,13 +80,20 @@ Local artifacts retained under `/tmp/vpnctl-app-*`:
 
 | Run | Result / learning |
 | --- | --- |
-| `first`, `target-matrix` | Prototype unbound routes/payload passed; insufficient existing-socket isolation was subsequently found. |
+| `target-first`, `target-matrix` | Prototype unbound routes/payload passed; insufficient existing-socket isolation was subsequently found. |
 | `device-probes`, `device-diagnostic` | Scoped probes failed under rp_filter=2; public rules/routes/counters retained. |
 | `device-rpf`, `isolation` | Fixture setup failures: missing sysctl utility, then Docker's read-only proc/sys. Reused the existing private netns proc-mount pattern. |
 | `isolation-v2`, `production` | Quarantine/SIGKILL/approval and later all six size placements passed; exposed detached-rule release defect and nft fixture syntax error. |
 | `failover-slow` | Failover phases and slow probes succeeded; normal watcher SIGTERM incorrectly returned exit 1. |
 | `foreign` | Ownership preservation held; address restoration alone did not rebuild deleted endpoint routes. Test now requires explicit re-preparation. |
-| `final-production`, `final-race` | Full revised kernel suites; final results and immutable CI artifacts are recorded on the PR. |
+| `final-production`, `final-race` | All phases except foreign-state passed; the intended explicit re-prepare call had not landed in the fixture. The corrected call is covered by `foreign-fixed` and `foreign-fixed-race`. |
+| `verified-production`, `verified-race` | Corrected complete suites; immutable final CI results are recorded on the PR. |
+
+PR #160 run `37327271704` is retained: app production/race exposed the missing
+fixture re-preparation; control isolation exposed the interrupted-refresh test
+assumption; M2 smoke failed before testing because the Go module proxy returned
+an HTTP/2 INTERNAL_ERROR downloading `github.com/wlynxg/anet@v0.0.5`. No product
+timeout or lease bound was enlarged to address these failures.
 
 No failed run is hidden by rerunning into the same output directory. Older M2
 24-hour evidence is unchanged; this work does not restart or replace it.

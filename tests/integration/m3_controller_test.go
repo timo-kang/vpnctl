@@ -124,14 +124,15 @@ func (f *m3Controller) enroll(ns, id string) string {
 }
 
 type m3SupervisorReport struct {
-	ObservedAt        time.Time                    `json:"observed_at"`
-	CycleMS           int64                        `json:"cycle_ms"`
-	State             string                       `json:"state"`
-	Reason            string                       `json:"reason"`
-	Refresh           string                       `json:"refresh"`
-	ApprovalValid     bool                         `json:"approval_valid"`
-	ApprovalExpiresAt time.Time                    `json:"approval_expires_at"`
-	Kernel            *relayapply.DeploymentResult `json:"kernel"`
+	ObservedAt            time.Time                    `json:"observed_at"`
+	CycleMS               int64                        `json:"cycle_ms"`
+	State                 string                       `json:"state"`
+	Reason                string                       `json:"reason"`
+	Refresh               string                       `json:"refresh"`
+	ApprovalBlockedReason string                       `json:"approval_blocked_reason"`
+	ApprovalValid         bool                         `json:"approval_valid"`
+	ApprovalExpiresAt     time.Time                    `json:"approval_expires_at"`
+	Kernel                *relayapply.DeploymentResult `json:"kernel"`
 }
 type m3Recipient struct {
 	t                                      *testing.T

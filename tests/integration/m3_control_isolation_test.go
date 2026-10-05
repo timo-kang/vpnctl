@@ -171,7 +171,11 @@ func TestNetns_M3ControlIsolation(t *testing.T) {
 			phase("relay0_kernel_lease_expired", otherRelay)
 			f.recipients[0].start()
 			restarted := time.Now()
-			f.recipients[0].awaitOffline(restarted, true, false)
+			// SIGKILL may interrupt the durable refresh intent. That explicitly
+			// invalidates metadata until fresh authority; never require the
+			// restart to undo that fail-closed decision merely to pass a test.
+			restartedState := f.recipients[0].awaitOfflineState(restarted, true, false, true)
+			report["offline_restart_state"] = restartedState
 			for i := 0; i < 3; i++ {
 				phase("offline_restart_cannot_rearm", otherRelay)
 			}
@@ -234,6 +238,9 @@ func TestNetns_M3ControlIsolation(t *testing.T) {
 }
 
 func (r *m3Recipient) awaitOffline(after time.Time, approved, ready bool) m3SupervisorReport {
+	return r.awaitOfflineState(after, approved, ready, false)
+}
+func (r *m3Recipient) awaitOfflineState(after time.Time, approved, ready, allowInterrupted bool) m3SupervisorReport {
 	r.t.Helper()
 	var v m3SupervisorReport
 	eventually(r.t, 8*time.Second, "offline supervisor "+r.relay, func() error {
@@ -245,7 +252,11 @@ func (r *m3Recipient) awaitOffline(after time.Time, approved, ready bool) m3Supe
 		if err := json.Unmarshal([]byte(lines[len(lines)-1]), &v); err != nil {
 			return err
 		}
-		if !v.ObservedAt.After(after) || v.Refresh != "unavailable" || v.ApprovalValid != approved || v.Kernel == nil || v.Kernel.KernelReady != ready {
+		approvalMatches := v.ApprovalValid == approved
+		if allowInterrupted && approved && !ready && !v.ApprovalValid && v.ApprovalBlockedReason == "refresh_interrupted" {
+			approvalMatches = true
+		}
+		if !v.ObservedAt.After(after) || v.Refresh != "unavailable" || !approvalMatches || v.Kernel == nil || v.Kernel.KernelReady != ready {
 			return fmt.Errorf("unexpected offline state: %s", lines[len(lines)-1])
 		}
 		return nil

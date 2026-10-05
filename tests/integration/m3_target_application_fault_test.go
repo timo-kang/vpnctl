@@ -359,7 +359,16 @@ func TestNetns_M3TargetApplicationForeignState(t *testing.T) {
 		case "underlay-address":
 			netOutput(t, f.robot, "ip", "addr", "del", "192.0.2.10/24", "dev", "wan0")
 			snapshot = func() string { return netOutput(t, f.robot, "ip", "-j", "address", "show", "dev", "wan0") }
-			undo = func() { netOutput(t, f.robot, "ip", "addr", "add", "192.0.2.10/24", "dev", "wan0") }
+			undo = func() {
+				netOutput(t, f.robot, "ip", "addr", "add", "192.0.2.10/24", "dev", "wan0")
+				// Removing the source also removes its endpoint routes. Recreate
+				// those candidates explicitly; never expect automatic drift repair.
+				for _, index := range []int{0, 2} {
+					path := f.plan.Paths[index].PathID
+					f.nodeCall("release", path)
+					netOutput(t, f.robot, integrationBinary(t), "node", "relay", "prepare", "--config", f.node, "--path-id", path, "--app-routes")
+				}
+			}
 		}
 		before := snapshot()
 		applicationReconcile(t, f, "app", false, "--mode", "manual", "--path-id", "p00")

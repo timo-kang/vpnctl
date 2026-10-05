@@ -19,18 +19,19 @@ import (
 )
 
 type relaySupervisionReport struct {
-	SchemaVersion     int                          `json:"schema_version"`
-	ObservedAt        time.Time                    `json:"observed_at"`
-	CycleMS           int64                        `json:"cycle_ms"`
-	State             string                       `json:"state"`
-	Reason            string                       `json:"reason,omitempty"`
-	Refresh           string                       `json:"refresh"`
-	ApprovalValid     bool                         `json:"approval_valid"`
-	ApprovalState     string                       `json:"approval_state"`
-	LastRefreshAt     time.Time                    `json:"last_refresh_at,omitempty"`
-	LastSuccessAt     time.Time                    `json:"last_success_at,omitempty"`
-	ApprovalExpiresAt time.Time                    `json:"approval_expires_at,omitempty"`
-	Kernel            *relayapply.DeploymentResult `json:"kernel,omitempty"`
+	SchemaVersion         int                          `json:"schema_version"`
+	ObservedAt            time.Time                    `json:"observed_at"`
+	CycleMS               int64                        `json:"cycle_ms"`
+	State                 string                       `json:"state"`
+	Reason                string                       `json:"reason,omitempty"`
+	Refresh               string                       `json:"refresh"`
+	ApprovalValid         bool                         `json:"approval_valid"`
+	ApprovalBlockedReason string                       `json:"approval_blocked_reason,omitempty"`
+	ApprovalState         string                       `json:"approval_state"`
+	LastRefreshAt         time.Time                    `json:"last_refresh_at,omitempty"`
+	LastSuccessAt         time.Time                    `json:"last_success_at,omitempty"`
+	ApprovalExpiresAt     time.Time                    `json:"approval_expires_at,omitempty"`
+	Kernel                *relayapply.DeploymentResult `json:"kernel,omitempty"`
 }
 
 const relayKernelRetryInterval = 25 * time.Millisecond
@@ -78,6 +79,7 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	}
 	out.ApprovalValid = report.ApprovalValid
 	out.ApprovalState = report.Validity
+	out.ApprovalBlockedReason = report.BlockedReason
 	out.LastRefreshAt = report.Refresh.CompletedAt
 	out.LastSuccessAt = report.Refresh.LastSuccessAt
 	if report.Deployment != nil {
@@ -89,6 +91,7 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	latest, statusErr := c.Status()
 	out.ApprovalValid = latest.ApprovalValid && statusErr == nil
 	out.ApprovalState = latest.Validity
+	out.ApprovalBlockedReason = latest.BlockedReason
 	if enforceErr != nil {
 		out.Reason = kernel.Reason
 		return out, enforceErr
