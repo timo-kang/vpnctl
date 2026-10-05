@@ -173,13 +173,30 @@ func checkNodeLeaseSelection(t *testing.T, f *m3AuthorityFixture, target string)
 			}
 			count++
 		}
-		if count < 2 || decision.Applied || decision.DesiredPathID == "" || decision.TargetID != target || len(decision.Candidates) != len(f.plan.Paths) {
+		if count < 2 || decision.Applied || decision.DesiredPathID == "" || decision.TargetID != target {
 			return fmt.Errorf("selection incomplete: %s", decision.Reason)
 		}
+		prepared := make(map[string]bool, len(f.plan.Paths))
+		for _, path := range f.plan.Paths {
+			prepared[path.PathID] = true
+		}
+		if !prepared[decision.DesiredPathID] {
+			return fmt.Errorf("unprepared path selected: %s", decision.DesiredPathID)
+		}
 		for _, candidate := range decision.Candidates {
+			if !prepared[candidate.PathID] {
+				if candidate.Eligible {
+					return fmt.Errorf("unprepared path eligible: %s", candidate.PathID)
+				}
+				continue
+			}
 			if candidate.State != "reachable" || !candidate.Eligible {
 				return fmt.Errorf("%s not confirmed: %s", candidate.PathID, candidate.Exclusion)
 			}
+			delete(prepared, candidate.PathID)
+		}
+		if len(prepared) != 0 {
+			return fmt.Errorf("missing prepared candidate observations: %v", prepared)
 		}
 		return nil
 	})

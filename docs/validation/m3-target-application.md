@@ -87,6 +87,14 @@ verification runs stay inside the invocation's disposable network-none container
     are not replayed. Node selection checks also use watch until all candidates
     have fresh confirmations. Held-cache CLI tests verify both deadline and output.
 
+13. **The revised node fixture confused catalog and prepared population:** run
+    `37341468321` passed both 16-case app profiles and the 4/8-candidate node
+    cases, but the new readiness predicate incorrectly expected catalog count to
+    equal prepared count in the one-candidate fixture (the catalog still has four
+    paths). It now requires all prepared candidates to be confirmed, unprepared
+    candidates to remain ineligible, and the selected path to be prepared. The
+    complete 1/4/8 matrix in both profiles is rerun; product behavior is unchanged.
+
 ## Evidence and failure preservation
 
 Local full production/race application suites passed, as did the legacy node
