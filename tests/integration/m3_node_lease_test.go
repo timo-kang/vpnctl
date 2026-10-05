@@ -116,10 +116,10 @@ func TestNetns_M3NodeLease(t *testing.T) {
 				phases = append(phases, "restart_fresh_approval_rearms")
 				// Let the selector own the lock for a batch; it must maintain leases
 				// cooperatively without changing the application target reservation.
-				netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", "app")
+				nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", "app")
 				checkNodeLeaseSelection(t, f, "app")
 				if size == 8 {
-					netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", "app2")
+					nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", "app2")
 					checkNodeLeaseSelection(t, f, "app2")
 					phases = append(phases, "two_target_observation_and_quarantine")
 					if placement == "separate" {
@@ -143,7 +143,7 @@ func TestNetns_M3NodeLease(t *testing.T) {
 				for _, p := range paths {
 					f.nodeCall("release", p.PathID)
 				}
-				netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "inspect", "--config", f.node, "--target-id", "app")
+				nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "inspect", "--config", f.node, "--target-id", "app")
 				phases = append(phases, "release_preserves_target_quarantine")
 				complete = true
 			})
@@ -153,22 +153,37 @@ func TestNetns_M3NodeLease(t *testing.T) {
 
 func checkNodeLeaseSelection(t *testing.T, f *m3AuthorityFixture, target string) {
 	t.Helper()
-	// netOutput is for a single short command (10s). This CLI intentionally
-	// collects two independent batches, each with a 20s product deadline,
-	// plus bounded admission and a 100ms interval. Do not kill batch two merely
-	// because eight healthy candidates cost more under the race instrumenter.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*relayapply.MaxTargetProbeDuration+5*time.Second)
-	defer cancel()
+	// A lock admission failure is not a completed observation. Keep the same
+	// selector alive until two fresh confirmations exist for every candidate.
 	started := time.Now()
-	b, err := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "select", "--config", f.node, "--target-id", target, "--samples", "2", "--interval", "100ms").CombinedOutput()
-	if err != nil {
-		t.Fatalf("two-batch selection: %v: %s", err, b)
-	}
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	logfile := filepath.Join(f.results, "node-selection-"+target+".jsonl")
+	watch := startNetworkProcess(t, f.robot, logfile, nil, integrationBinary(t), "node", "relay", "select", "--config", f.node, "--target-id", target, "--watch", "--interval", "500ms")
 	var decision relayselect.Decision
-	if len(lines) != 2 || json.Unmarshal([]byte(lines[1]), &decision) != nil || decision.Applied || decision.DesiredPathID == "" || decision.TargetID != target {
-		t.Fatal("invalid final selection", string(b))
-	}
+	count := 0
+	eventually(t, 90*time.Second, "all candidates freshly confirmed ("+logfile+")", func() error {
+		b, err := os.ReadFile(logfile)
+		if err != nil {
+			return err
+		}
+		lines := strings.Split(string(b), "\n")
+		count = 0
+		for _, line := range lines[:len(lines)-1] {
+			if err := json.Unmarshal([]byte(line), &decision); err != nil {
+				return err
+			}
+			count++
+		}
+		if count < 2 || decision.Applied || decision.DesiredPathID == "" || decision.TargetID != target || len(decision.Candidates) != len(f.plan.Paths) {
+			return fmt.Errorf("selection incomplete: %s", decision.Reason)
+		}
+		for _, candidate := range decision.Candidates {
+			if candidate.State != "reachable" || !candidate.Eligible {
+				return fmt.Errorf("%s not confirmed: %s", candidate.PathID, candidate.Exclusion)
+			}
+		}
+		return nil
+	})
+	watch.terminate(t)
 	for _, path := range f.plan.Paths {
 		found := false
 		for _, candidate := range decision.Candidates {
@@ -183,7 +198,7 @@ func checkNodeLeaseSelection(t *testing.T, f *m3AuthorityFixture, target string)
 			t.Fatal("missing prepared candidate", path.PathID)
 		}
 	}
-	writeM3Report(t, filepath.Join(f.results, "node-selection-"+target+".json"), map[string]any{"completed": !t.Failed(), "duration_seconds": time.Since(started).Seconds(), "samples": len(lines), "prepared_candidates": len(f.plan.Paths), "decision": decision})
+	writeM3Report(t, filepath.Join(f.results, "node-selection-"+target+".json"), map[string]any{"completed": !t.Failed(), "duration_seconds": time.Since(started).Seconds(), "samples": count, "prepared_candidates": len(f.plan.Paths), "decision": decision})
 }
 
 func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {

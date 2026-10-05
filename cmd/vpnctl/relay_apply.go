@@ -64,6 +64,10 @@ func runNodeRelayApply(args []string) error {
 	defer cancel()
 	cache, engine, err := openNodeRelayEngine(ctx, cfg.Node, dir)
 	if err != nil {
+		out := relayapply.Result{SchemaVersion: 1, PathID: *path, State: "blocked", Reason: "ownership_unavailable", UplinkHealth: "unknown", Paths: []relayapply.PathResult{}}
+		if encodeErr := json.NewEncoder(os.Stdout).Encode(out); encodeErr != nil {
+			return encodeErr
+		}
 		return err
 	}
 	defer cache.Close()

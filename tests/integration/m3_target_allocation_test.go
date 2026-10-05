@@ -55,7 +55,7 @@ func TestNetns_M3TargetApplicationSlotCollision(t *testing.T) {
 	f.nodeCall("refresh", "")
 	call := func(action, target string) relayapply.TargetGuardResult {
 		t.Helper()
-		b := netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", action, "--config", f.node, "--target-id", target)
+		b := nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", action, "--config", f.node, "--target-id", target)
 		var out relayapply.TargetGuardResult
 		if json.Unmarshal([]byte(b), &out) != nil || out.Activated || action != "release" && !out.Guarded {
 			t.Fatal("invalid reservation", b)

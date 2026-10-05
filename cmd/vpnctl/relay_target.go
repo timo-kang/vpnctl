@@ -52,6 +52,10 @@ func runNodeRelayTarget(args []string) error {
 	defer cancel()
 	cache, engine, err := openNodeRelayEngine(ctx, cfg.Node, dir)
 	if err != nil {
+		out := relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: *target, State: "blocked", Reason: "ownership_unavailable"}
+		if encodeErr := json.NewEncoder(os.Stdout).Encode(out); encodeErr != nil {
+			return encodeErr
+		}
 		return err
 	}
 	defer cache.Close()

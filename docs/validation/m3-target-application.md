@@ -69,6 +69,24 @@ verification runs stay inside the invocation's disposable network-none container
     one initial priority, interrupted reservation recovery, deletion/reopen
     stability, invalid slots and a forced real-kernel collision.
 
+11. **The success fixture also assumed two lock admissions:** run `37337660581`
+    reproduced one busy admission followed by one healthy confirming observation
+    for the second app at eight candidates. The product correctly withheld
+    activation. Successful integration transitions now run the operational watch
+    loop with a bounded 90s fixture deadline, preserve every busy/negative result,
+    and require at least two admitted cycles plus actual application proof before
+    terminating normally. Negative one-shot exit checks remain in the suite.
+
+12. **One-shot admission was not machine-readable:** the same run's node-lease
+    race test encountered the one-second admission limit during the second target
+    reservation. Prepare/inspect/recover/release and target commands now emit a
+    blocked `ownership_unavailable` result before returning the admission error,
+    without claiming kernel readiness or quarantine. The fixture retries only this
+    pre-operation result inside its existing 65s watchdog and preserves every
+    attempt; admitted operation failures, uncertain changes and foreign conflicts
+    are not replayed. Node selection checks also use watch until all candidates
+    have fresh confirmations. Held-cache CLI tests verify both deadline and output.
+
 ## Evidence and failure preservation
 
 Local full production/race application suites passed, as did the legacy node
@@ -128,6 +146,11 @@ was correctly refused for modifying bound path identities, then for skipping the
 required disable revision before retirement. It now disables the old paths and
 approves new path IDs for the new target set through the public API. No fixture
 identity is rerolled to hide collisions.
+
+The original app race log for `37337660581` is retained at
+`/tmp/vpnctl-pr160-app-race-a28d908.log`; its other jobs are allowed to finish
+before the admission-contract follow-up is pushed. No product deadline is changed.
+The companion node admission log is `/tmp/vpnctl-pr160-node-race-a28d908.log`.
 
 No failed run is hidden by rerunning into the same output directory. Older M2
 24-hour evidence is unchanged; this work does not restart or replace it.

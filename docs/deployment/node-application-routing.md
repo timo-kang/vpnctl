@@ -34,6 +34,12 @@ JSONL의 최상위 `applied`, `application.state/reason/activated/guarded`, 후�
 `journal_save_failed`, `kernel_conflict_or_unavailable`은 운영 조치가 필요하다.
 `rolled_back`은 서비스가 이전 경로로 살아 있어도 변경 자체는 실패한 결과다.
 
+단발성 prepare/inspect/recover/release와 target 명령이 잠금에 진입하지 못하면
+`ownership_unavailable`과 함께 실패한다. 이 결과는 커널 변경·차단 완료를 뜻하지 않는다.
+외부 자동화는 이 진입 전 실패만 별도 제한시간 안에서 재시도할 수 있다. 이미 진입한 작업의
+오류나 불확실한 journal commit을 동일 방식으로 재실행하지 말고 inspect/recover 절차를 따른다.
+`--samples 2`도 두 번의 잠금 진입 성공을 보장하지 않으므로 지속 관측에는 `--watch`를 사용한다.
+
 중단된 변경은 같은 binary/신원/cache/netns에서 `target recover`로 차단 상태를 복구하고,
 새 유효 승인을 받은 supervise와 reconcile로 재개한다. foreign 상태는 원 소유자가 정리한다.
 만료/철회 후에도 reserve는 유지한다. `target release`는 운영자가 default fallback 영향을

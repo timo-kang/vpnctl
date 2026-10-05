@@ -44,7 +44,7 @@ func applicationFixture(t *testing.T, separate bool, size int) *m3AuthorityFixtu
 	startNodeLeaseWatch(t, f, "application-node-supervisor")
 	awaitApplicationCandidates(t, f)
 	for _, target := range []string{"app", "app2"} {
-		netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", target)
+		nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", target)
 	}
 	return f
 }
@@ -99,6 +99,48 @@ func awaitApplicationCandidates(t *testing.T, f *m3AuthorityFixture) {
 }
 func applicationReconcile(t *testing.T, f *m3AuthorityFixture, target string, success bool, extra ...string) relayapply.TargetReconcileResult {
 	t.Helper()
+	if success {
+		// A finite two-attempt CLI invocation can legitimately consume an
+		// attempt on lock admission. Exercise operational convergence with one
+		// continuous selector instead of assuming both attempts observed paths.
+		log, err := os.CreateTemp(f.results, "reconcile-"+target+"-*.jsonl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := log.Close(); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", target, "--watch", "--interval", "500ms"}
+		watch := startNetworkProcess(t, f.robot, log.Name(), nil, append(args, extra...)...)
+		var out relayapply.TargetReconcileResult
+		eventually(t, 90*time.Second, "verified application convergence ("+log.Name()+")", func() error {
+			b, err := os.ReadFile(log.Name())
+			if err != nil {
+				return err
+			}
+			admitted := 0
+			lines := strings.Split(string(b), "\n")
+			for _, line := range lines[:len(lines)-1] {
+				var result relayapply.TargetReconcileResult
+				if json.Unmarshal([]byte(line), &result) != nil || result.SchemaVersion != 1 {
+					return fmt.Errorf("invalid application output: %s", line)
+				}
+				if result.Selection.Reason != "ownership_unavailable" {
+					admitted++
+				}
+				out = result
+			}
+			if out.Applied {
+				if admitted < 2 || !out.Application.Activated || out.Application.Proof == nil {
+					t.Fatal("application without completed confirmation and proof", out)
+				}
+				return nil
+			}
+			return fmt.Errorf("state=%s reason=%s admitted=%d", out.Application.State, out.Selection.Reason, admitted)
+		})
+		watch.terminate(t)
+		return out
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*relayapply.MaxDuration+5*time.Second)
 	defer cancel()
 	args := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", target, "--samples", "2", "--interval", "100ms"}
@@ -140,7 +182,7 @@ func TestNetns_M3TargetApplication(t *testing.T) {
 				if p := applicationPayload(t, f, "198.18.0.3"); !p.OK || p.Source != "198.18.0.11" {
 					t.Fatal("second target payload", p)
 				}
-				netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "inspect", "--config", f.node, "--target-id", "app")
+				nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "inspect", "--config", f.node, "--target-id", "app")
 				if size > 1 {
 					out = applicationReconcile(t, f, "app", true, "--mode", "manual", "--path-id", f.plan.Paths[size-1].PathID)
 					if p := applicationPayload(t, f, m3Target); !p.OK || p.Source != "198.18.0.12" {

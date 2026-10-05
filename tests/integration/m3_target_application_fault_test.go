@@ -85,7 +85,7 @@ func TestNetns_M3TargetApplicationQuarantine(t *testing.T) {
 	awaitApplicationCandidates(t, f)
 	requireApplicationBlocked(t, f, stream, cutoff)
 	// Explicit release is the only operation allowed to expose the default.
-	netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "release", "--config", f.node, "--target-id", "app")
+	nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "release", "--config", f.node, "--target-id", "app")
 	if p := applicationPayload(t, f, m3Target); !p.OK || p.Source != "203.0.113.1" {
 		t.Fatal("fallback baseline absent", p)
 	}
@@ -234,7 +234,7 @@ func TestNetns_M3TargetApplicationCrash(t *testing.T) {
 			if !applicationCandidate(t, f, f.plan.Paths[1]).OK {
 				t.Fatal("unrelated candidate starved")
 			}
-			netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "recover", "--config", f.node, "--target-id", "app")
+			nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "recover", "--config", f.node, "--target-id", "app")
 			if applicationPayload(t, f, m3Target).OK {
 				t.Fatal("recovery replayed stale path")
 			}
@@ -386,7 +386,7 @@ func TestNetns_M3TargetApplicationForeignState(t *testing.T) {
 			t.Fatal("other target lost", kind, p)
 		}
 		undo()
-		netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "recover", "--config", f.node, "--target-id", "app")
+		nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "recover", "--config", f.node, "--target-id", "app")
 		awaitApplicationCandidates(t, f)
 		phases = append(phases, kind)
 	}
