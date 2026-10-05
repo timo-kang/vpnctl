@@ -93,6 +93,7 @@ func open(cache *relaycache.Store, underlays []relayplan.Underlay, domain string
 		return nil, err
 	}
 	e := &Engine{cache: cache, underlays: underlays, backend: b, save: cache.SaveApplyJournal, journal: Journal{Version: 1, Node: r.NodeID, Domain: domain, Entries: []Entry{}}}
+	e.targets = targetKernel{kernel{run: command}}
 	raw, err := cache.ApplyJournal()
 	if err != nil {
 		return nil, err
@@ -107,6 +108,9 @@ func open(cache *relaycache.Store, underlays []relayplan.Underlay, domain string
 		return nil, errors.New("apply journal is corrupt")
 	}
 	j := env.Journal
+	if err = validateTargetGuards(j.Targets, j.Node); err != nil {
+		return nil, err
+	}
 	if j.Version != 1 || j.Node != r.NodeID || j.Domain != domain || len(j.Entries) > maxEntries || j.Entries == nil {
 		return nil, errors.New("apply journal identity or kernel domain mismatch")
 	}

@@ -79,6 +79,7 @@ Usage:
   vpnctl node relay refresh|status --config <path> [--cache-dir <private-dir> --timeout 2m]
   vpnctl node relay plan --config <path> [--cache-dir <private-dir> --controller-id <id> --timeout 20s]
   vpnctl node relay select --config <path> --target-id <id> [--watch --mode auto|manual --path-id <id>]
+  vpnctl node relay target reserve|inspect|recover|release --config <path> --target-id <id> (reserve blocks app traffic)
   vpnctl node relay prepare|release --config <path> --path-id <id> [--cache-dir <private-dir> --timeout 1m]
   vpnctl node relay inspect|recover --config <path> [--cache-dir <private-dir> --timeout 1m]
   vpnctl direct serve --config <path> [--listen :0]

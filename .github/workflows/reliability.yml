@@ -244,6 +244,11 @@ jobs:
           VPNCTL_RACE: ${{ matrix.race }}
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-target-selection
         run: ./scripts/test-m3-target-selection.sh
+      - name: Application target quarantine, transit preservation and crash recovery
+        env:
+          VPNCTL_RACE: ${{ matrix.race }}
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-target-selection
+        run: ./scripts/test-m3-target-guard.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
