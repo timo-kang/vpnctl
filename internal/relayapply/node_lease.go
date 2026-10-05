@@ -61,7 +61,7 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 		p := PathResult{PathID: old.Candidate.PathID, Phase: old.Phase}
 		entry := old
 		approved := false
-		if !e.uncertain && approvalErr == nil && old.Phase == "prepared" && old.Controller == w.Controller && old.Node == w.Node && w.Generation >= old.Generation {
+		if !e.uncertain && !e.pendingTargetReferences(old.Candidate.PathID) && approvalErr == nil && old.Phase == "prepared" && old.Controller == w.Controller && old.Node == w.Node && w.Generation >= old.Generation {
 			for _, candidate := range plan.Paths {
 				if reflect.DeepEqual(candidate, old.Candidate) {
 					approved = true

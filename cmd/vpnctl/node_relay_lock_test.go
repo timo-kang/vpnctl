@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -30,14 +31,34 @@ func TestNodeCommandsRespectHeldCacheAndOverallDeadline(t *testing.T) {
 	for _, target := range []bool{false, true} {
 		args := []string{"inspect", "--config", path, "--cache-dir", filepath.Join(dir, "cache"), "--timeout", "80ms"}
 		start := time.Now()
-		if target {
-			args = append(args, "--target-id", "app")
-			err = runNodeRelayTarget(args)
-		} else {
-			err = runNodeRelayApply(args)
+		capture, createErr := os.CreateTemp(dir, "output-*")
+		if createErr != nil {
+			t.Fatal(createErr)
 		}
+		t.Cleanup(func() { capture.Close() })
+		func() {
+			saved := os.Stdout
+			defer func() { os.Stdout = saved }()
+			os.Stdout = capture
+			if target {
+				args = append(args, "--target-id", "app")
+				err = runNodeRelayTarget(args)
+			} else {
+				err = runNodeRelayApply(args)
+			}
+		}()
 		if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) < 60*time.Millisecond || time.Since(start) > time.Second {
 			t.Fatal("unbounded or fail-fast admission", err, time.Since(start))
+		}
+		b, readErr := os.ReadFile(capture.Name())
+		var result struct {
+			Reason      string `json:"reason"`
+			KernelReady bool   `json:"kernel_ready"`
+			Activated   bool   `json:"activated"`
+			Guarded     bool   `json:"guarded"`
+		}
+		if readErr != nil || json.Unmarshal(b, &result) != nil || result.Reason != "ownership_unavailable" || result.KernelReady || result.Activated || result.Guarded {
+			t.Fatal("admission failure claimed a kernel result", string(b), readErr)
 		}
 	}
 }

@@ -18,6 +18,7 @@ func runNodeRelayApply(args []string) error {
 	configPath := fs.String("config", "", "enrolled node configuration")
 	cacheDir := fs.String("cache-dir", "", "private relay cache directory")
 	probeRoutes := fs.Bool("probe-routes", false, "prepare owned target routes for explicit candidate-source probes")
+	appRoutes := fs.Bool("app-routes", false, "prepare expiring application candidate with device-bound probes; implies --lease --probe-routes")
 	lease := fs.Bool("lease", false, "install initially closed BOOTTIME/nft expiry protection; requires node relay supervise")
 	path := fs.String("path-id", "", "approved path ID (prepare/release)")
 	controller := fs.String("controller-id", "", "expected controller identity (prepare)")
@@ -33,6 +34,9 @@ func runNodeRelayApply(args []string) error {
 	}
 	if *probeRoutes && args[0] != "prepare" {
 		return fmt.Errorf("probe-routes is only accepted by prepare")
+	}
+	if *appRoutes && args[0] != "prepare" {
+		return fmt.Errorf("app-routes is only accepted by prepare")
 	}
 	if *lease && args[0] != "prepare" {
 		return fmt.Errorf("lease is only accepted by prepare")
@@ -60,6 +64,10 @@ func runNodeRelayApply(args []string) error {
 	defer cancel()
 	cache, engine, err := openNodeRelayEngine(ctx, cfg.Node, dir)
 	if err != nil {
+		out := relayapply.Result{SchemaVersion: 1, PathID: *path, State: "blocked", Reason: "ownership_unavailable", UplinkHealth: "unknown", Paths: []relayapply.PathResult{}}
+		if encodeErr := json.NewEncoder(os.Stdout).Encode(out); encodeErr != nil {
+			return encodeErr
+		}
 		return err
 	}
 	defer cache.Close()
@@ -67,7 +75,9 @@ func runNodeRelayApply(args []string) error {
 	var out relayapply.Result
 	switch args[0] {
 	case "prepare":
-		if *lease {
+		if *appRoutes {
+			out, err = engine.PrepareApplication(ctx, *path, *controller)
+		} else if *lease {
 			out, err = engine.PrepareProtected(ctx, *path, *controller, *probeRoutes)
 		} else if *probeRoutes {
 			out, err = engine.PrepareProbe(ctx, *path, *controller)

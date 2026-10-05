@@ -18,7 +18,10 @@ import (
 const protocol = "186"
 
 type object map[string]any
-type kernel struct{ run commandFunc }
+type kernel struct {
+	run     commandFunc
+	targets func() []TargetGuard
+}
 type snapshot struct {
 	links, routes, rules []object
 	marks                map[string]uint32
@@ -290,11 +293,21 @@ func conflicts(s snapshot, e Entry, fresh bool) error {
 	return nil
 }
 func (k kernel) Check(ctx context.Context, e Entry, fresh bool) (bool, error) {
+	if err := k.checkProbeEnvironment(ctx, e, fresh); err != nil {
+		return false, err
+	}
 	s, err := k.snapshot(ctx)
 	if err != nil {
 		return false, err
 	}
-	if err = conflicts(s, e, fresh); err != nil {
+	checked := s
+	if !fresh && k.targets != nil {
+		checked, err = candidateApplicationSnapshot(s, e, k.targets())
+		if err != nil {
+			return false, err
+		}
+	}
+	if err = conflicts(checked, e, fresh); err != nil {
 		return false, err
 	}
 	if fresh {
@@ -492,6 +505,11 @@ func (k kernel) Remove(ctx context.Context, e Entry) error {
 	steps := []string{"link", "rule", "endpoint", "guard"}
 	if e.ProbeRouting {
 		steps = []string{"link", "probe-source", "rule", "endpoint", "guard"}
+		if e.ProbeScope == 1 {
+			// Delete device references first; link removal otherwise detaches the
+			// rule. The transport guard remains until the WG socket is gone.
+			steps = []string{"probe-source", "link", "rule", "endpoint", "guard"}
+		}
 	}
 	for _, step := range steps {
 		s, err := k.snapshot(ctx)

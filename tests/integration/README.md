@@ -118,3 +118,22 @@ VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-m3-kernel-delay \
 controller 단절 중 유효 승인 유지, supervisor 사망·offline 재시작, 실제 승인 만료와
 새 승인 복구를 별도 uplink TCP로 검사한다. [구성과 판정](../../docs/validation/m3-control-isolation.md)에
 fixture 경로 선택과 제품 자동전환의 경계, 재사용 입력·결과를 명시한다.
+
+## Application target routing
+
+`scripts/test-m3-target-application.sh` runs the #159 application contract in
+disposable network-none containers: colocated/separate controllers, 1/4/8
+prepared candidates, unbound payload/NAT evidence, quarantine of existing TCP,
+automatic failover, process death and node-only approval expiry/revocation.
+The fixture provisions rp_filter only inside its owned robot namespace using
+a temporary private proc mount. No host sysctl, network, clock or power changes.
+See [deployment prerequisites](../../docs/deployment/node-application-routing.md).
+
+CI keeps the production application profile at 2 CPU / 2 GiB and runs the race
+profile at 4 CPU / 2 GiB, with identical deadlines and assertions. Reproduce the
+race profile with `VPNCTL_RACE=1 VPNCTL_TEST_CPUS=4 ./scripts/test-m3-target-application.sh`.
+The wrapper default remains 2 CPU; use a new `VPNCTL_ARTIFACT_DIR` for each run.
+Eight healthy candidates exceeded observation freshness in a 2 CPU race run;
+[issue #162](https://github.com/timo-kang/vpnctl/issues/162) tracks that capacity
+boundary and mixed healthy/slow candidate scheduling. A pass on these profiles
+does not establish availability on arbitrary robot hardware.

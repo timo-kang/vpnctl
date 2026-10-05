@@ -14,8 +14,11 @@ import (
 )
 
 func runNodeRelayTarget(args []string) error {
+	if len(args) > 0 && args[0] == "reconcile" {
+		return runNodeRelaySelection(args[1:], true)
+	}
 	if len(args) == 0 || args[0] != "reserve" && args[0] != "inspect" && args[0] != "recover" && args[0] != "release" {
-		return fmt.Errorf("node relay target reserve|inspect|recover|release required; reserve blocks application traffic")
+		return fmt.Errorf("node relay target reserve|inspect|recover|release|reconcile required; reconcile applies application routes")
 	}
 	fs := flag.NewFlagSet("node relay target "+args[0], flag.ContinueOnError)
 	configPath := fs.String("config", "", "enrolled node configuration")
@@ -49,6 +52,10 @@ func runNodeRelayTarget(args []string) error {
 	defer cancel()
 	cache, engine, err := openNodeRelayEngine(ctx, cfg.Node, dir)
 	if err != nil {
+		out := relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: *target, State: "blocked", Reason: "ownership_unavailable"}
+		if encodeErr := json.NewEncoder(os.Stdout).Encode(out); encodeErr != nil {
+			return encodeErr
+		}
 		return err
 	}
 	defer cache.Close()

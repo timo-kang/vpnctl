@@ -77,6 +77,10 @@ func open(cache *relaycache.Store, underlays []relayplan.Underlay, domain string
 	}
 	e := &Engine{cache: cache, underlays: underlays, backend: b, save: cache.SaveApplyJournal, journal: Journal{Version: 1, Node: r.NodeID, Domain: domain, Entries: []Entry{}}}
 	e.targets = targetKernel{kernel{run: command}}
+	if k, ok := e.backend.(nodeKernel); ok {
+		k.targets = func() []TargetGuard { return e.journal.Targets }
+		e.backend = k
+	}
 	raw, err := cache.ApplyJournal()
 	if err != nil {
 		return nil, err
@@ -146,21 +150,28 @@ func (e *Engine) stillApproved(entry Entry) error {
 	return errors.New("binding unavailable")
 }
 func (e *Engine) Prepare(ctx context.Context, path, controller string) (Result, error) {
-	return e.prepare(ctx, path, controller, false, false)
+	return e.prepare(ctx, path, controller, false, false, 0)
 }
 
 // PrepareProbe adds approved target routes and a source-/32 rule inside the
-// owned candidate table. It permits explicit-source probes, not unbound apps.
+// owned candidate table for source-specific diagnostics. Application routing
+// requires PrepareApplication to isolate probes from existing app sockets.
 func (e *Engine) PrepareProbe(ctx context.Context, path, controller string) (Result, error) {
-	return e.prepare(ctx, path, controller, true, false)
+	return e.prepare(ctx, path, controller, true, false, 0)
 }
 
 // PrepareProtected creates an initially closed, independently expiring
 // candidate. Supervision with a fresh authenticated response opens its lease.
 func (e *Engine) PrepareProtected(ctx context.Context, path, controller string, probeRouting bool) (Result, error) {
-	return e.prepare(ctx, path, controller, probeRouting, true)
+	return e.prepare(ctx, path, controller, probeRouting, true, 0)
 }
-func (e *Engine) prepare(ctx context.Context, path, controller string, probeRouting, protected bool) (Result, error) {
+
+// PrepareApplication protects ordinary app flows from the probe bypass by
+// requiring probes to bind the candidate WG device, not just its source IP.
+func (e *Engine) PrepareApplication(ctx context.Context, path, controller string) (Result, error) {
+	return e.prepare(ctx, path, controller, true, true, 1)
+}
+func (e *Engine) prepare(ctx context.Context, path, controller string, probeRouting, protected bool, scope int) (Result, error) {
 	if e.uncertain {
 		return failure(path, "reopen_journal_required", relaycache.ErrUncertain)
 	}
@@ -170,7 +181,14 @@ func (e *Engine) prepare(ctx context.Context, path, controller string, probeRout
 	if err != nil {
 		return failure(path, "approval_or_inventory_unavailable", err)
 	}
-	entry.ProbeRouting = probeRouting
+	entry.ProbeRouting, entry.ProbeScope = probeRouting, scope
+	if probeRouting && scope != 1 {
+		for _, g := range e.journal.Targets {
+			if g.ApplicationVersion == 1 && guardPrefixesOverlap(g.Prefixes, prefixes(entry)) {
+				return failure(path, "application_requires_device_bound_probes", ErrConflict)
+			}
+		}
+	}
 	if protected {
 		w, _, _, err := e.cache.LeaseApproval()
 		if err != nil || w.Domain != e.journal.Domain || w.Controller != entry.Controller || w.Generation != entry.Generation {
@@ -183,7 +201,7 @@ func (e *Engine) prepare(ctx context.Context, path, controller string, probeRout
 		if old.Phase != "prepared" {
 			return failure(path, "pending_journal", ErrRecovery)
 		}
-		if old.LeaseVersion != entry.LeaseVersion || old.ProbeRouting != entry.ProbeRouting || old.Controller != entry.Controller || !reflect.DeepEqual(old.Candidate, entry.Candidate) {
+		if old.LeaseVersion != entry.LeaseVersion || old.ProbeRouting != entry.ProbeRouting || old.ProbeScope != entry.ProbeScope || old.Controller != entry.Controller || !reflect.DeepEqual(old.Candidate, entry.Candidate) {
 			return failure(path, "release_previous_candidate_first", ErrConflict)
 		}
 		ready, err := e.backend.Check(ctx, old, false)
@@ -330,6 +348,13 @@ func (e *Engine) Release(ctx context.Context, path string) (Result, error) {
 		return failure(path, "path_not_owned", ErrConflict)
 	}
 	entry := e.journal.Entries[i]
+	for _, g := range e.journal.Targets {
+		if targetReferences(g, path) {
+			if _, err := e.quarantineTarget(ctx, g.TargetID); err != nil {
+				return failure(path, "target_quarantine_required", err)
+			}
+		}
+	}
 	entry.Phase = "releasing"
 	e.journal.Entries[i] = entry
 	if err := e.persist(); err != nil {

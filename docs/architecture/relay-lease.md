@@ -258,3 +258,9 @@ nft table 조회는 table을 직접 읽고, 실패한 경우에만 전체 목록
 `lease_renewal` 단계, 열거된 원인(`deadline`, `lease_expired`, `ownership_conflict` 등),
 실제로 관측한 fresh 승인의 경과 시간을 남긴다. 원시 명령 출력·오류 문자열·키는 싣지 않는다.
 이 목록은 성공한 다른 endpoint의 통신이나 앱 uplink 상태를 추정하는 근거가 아니다.
+
+Supervision JSON also exposes `approval_blocked_reason`. In particular, a process
+killed during a persisted refresh intent may restart with `approval_state=valid`
+but `approval_valid=false, approval_blocked_reason=refresh_interrupted`. The
+metadata expiry has not elapsed, but that interrupted authority cannot be used
+to continue or rearm traffic until a fresh authenticated approval succeeds.

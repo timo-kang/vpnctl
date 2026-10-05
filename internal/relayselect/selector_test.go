@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"vpnctl/internal/relayapply"
+	"vpnctl/internal/relayobserve"
 )
 
 type scenario struct {
@@ -34,12 +34,12 @@ func newScenario(t *testing.T) *scenario {
 	s.boot = func() (time.Duration, error) { return f.boot, nil }
 	return f
 }
-func (f *scenario) report(states ...string) relayapply.TargetReport {
+func (f *scenario) report(states ...string) relayobserve.TargetReport {
 	f.at = f.at.Add(time.Second)
 	f.boot += time.Second
-	r := relayapply.TargetReport{SchemaVersion: 1, ControllerID: "controller", NodeID: "robot", Generation: f.generation, TargetID: "app", StartedAt: f.at.Add(-100 * time.Millisecond), ObservedAt: f.at, BootTime: f.boot, ApprovalUntil: f.until, Valid: true}
+	r := relayobserve.TargetReport{SchemaVersion: 1, ControllerID: "controller", NodeID: "robot", Generation: f.generation, TargetID: "app", StartedAt: f.at.Add(-100 * time.Millisecond), ObservedAt: f.at, BootTime: f.boot, ApprovalUntil: f.until, Valid: true}
 	for i, state := range states {
-		r.Paths = append(r.Paths, relayapply.TargetObservation{PathID: fmt.Sprintf("p%d", i), RelayID: fmt.Sprintf("r%d", i/2), UnderlayID: fmt.Sprintf("u%d", i%2), Priority: i, Cost: i, Fingerprint: strings.Repeat(fmt.Sprint(i), 64), State: state, Reason: state, ObservedAt: f.at.Add(-50 * time.Millisecond), ConnectTime: time.Millisecond, Handshake: 1, RXDelta: 100, TXDelta: 100})
+		r.Paths = append(r.Paths, relayobserve.TargetObservation{PathID: fmt.Sprintf("p%d", i), RelayID: fmt.Sprintf("r%d", i/2), UnderlayID: fmt.Sprintf("u%d", i%2), Priority: i, Cost: i, Fingerprint: strings.Repeat(fmt.Sprint(i), 64), State: state, Reason: state, ObservedAt: f.at.Add(-50 * time.Millisecond), ConnectTime: time.Millisecond, Handshake: 1, RXDelta: 100, TXDelta: 100})
 	}
 	return r
 }
@@ -276,4 +276,23 @@ func TestRankingUsesPriorityThenCostAndDeterministicTie(t *testing.T) {
 			wantPath(t, d, expected)
 		})
 	}
+}
+
+func TestRecordAppliedAnchorsRealDwellWithoutGrantingHealth(t *testing.T) {
+	f := newScenario(t)
+	f.step("reachable", "reachable")
+	wantPath(t, f.step("reachable", "reachable"), "p0")
+	// A failed switch restored p1 later than the recommendation timestamp.
+	at := f.at
+	f.s.RecordApplied("p1", at)
+	for i := 0; i < 9; i++ {
+		d := f.step("reachable", "reachable")
+		wantPath(t, d, "p1")
+		if d.Reason != "minimum_dwell" {
+			t.Fatal(d)
+		}
+	}
+	wantPath(t, f.step("reachable", "reachable"), "p0")
+	f.s.RecordApplied("p1", f.at)
+	wantPath(t, f.step("reachable", "unknown"), "p0") // applied history cannot authorize a failed path
 }

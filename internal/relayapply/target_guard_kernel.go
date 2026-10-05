@@ -68,15 +68,27 @@ func targetDestinationOverlaps(o object, e TargetGuard) bool {
 }
 func targetGuardOwnership(s snapshot, e TargetGuard, fresh bool) (bool, map[string]bool, error) {
 	route := false
+	apps := map[string]bool{}
 	rules := map[string]bool{}
 	for _, o := range s.routes {
 		if n(o, "table") != e.Table {
 			continue
 		}
-		if fresh || !guardRouteMatches(o, e) || route {
+		if fresh {
 			return false, nil, ErrConflict
 		}
-		route = true
+		if guardRouteMatches(o, e) && !route {
+			route = true
+			continue
+		}
+		prefix := applicationRoutePrefix(o, e, e.Active)
+		if prefix == "" {
+			prefix = applicationRoutePrefix(o, e, e.Pending)
+		}
+		if prefix == "" || apps[prefix] {
+			return false, nil, ErrConflict
+		}
+		apps[prefix] = true
 	}
 	for _, o := range s.rules {
 		if n(o, "table") != e.Table && n(o, "priority") != e.Priority {
@@ -130,7 +142,7 @@ func targetGuardConflicts(s snapshot, e TargetGuard, entries []Entry, fresh bool
 		// No arbitrary source-, UID-, interface- or port-specific rule is adopted.
 		probe := false
 		for _, entry := range entries {
-			probe = probe || entry.Phase == "prepared" && probeRuleMatches(o, entry)
+			probe = probe || entry.Phase == "prepared" && (e.ApplicationVersion == 0 || entry.ProbeScope == 1) && probeRuleMatches(o, entry)
 		}
 		if !probe {
 			return false, ErrConflict
@@ -185,6 +197,11 @@ func (k targetKernel) Ensure(ctx context.Context, e TargetGuard, entries []Entry
 	return nil
 }
 func (k targetKernel) Remove(ctx context.Context, e TargetGuard) error {
+	if e.Active != nil || e.Pending != nil {
+		if err := k.SetRoutes(ctx, e, nil, nil); err != nil {
+			return err
+		}
+	}
 	for _, prefix := range append(append([]string{}, e.Prefixes...), "") {
 		s, err := k.snapshot(ctx)
 		if err != nil {

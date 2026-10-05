@@ -175,13 +175,43 @@ func (f *m3AuthorityFixture) nodeCall(action, path string) []byte {
 	if path != "" {
 		a = append(a, "--path-id", path)
 	}
+	return []byte(nodeAdmissionOutput(f.t, f, a...))
+}
+
+// Retry only an explicit failure before ownership admission. Operation errors
+// (including uncertain mutations and foreign conflicts) are never replayed.
+func nodeAdmissionOutput(t *testing.T, f *m3AuthorityFixture, args ...string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
 	defer cancel()
-	b, err := netCommand(ctx, f.robot, a...).CombinedOutput()
+	log, err := os.CreateTemp(f.results, "node-admission-*.log")
 	if err != nil {
-		f.t.Fatalf("node %s: %v %s", action, err, b)
+		t.Fatal(err)
 	}
-	return b
+	defer log.Close()
+	for {
+		b, err := netCommand(ctx, f.robot, args...).CombinedOutput()
+		if _, writeErr := log.Write(b); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if err == nil {
+			return strings.TrimSpace(string(b))
+		}
+		var out struct {
+			SchemaVersion int             `json:"schema_version"`
+			State         string          `json:"state"`
+			Reason        string          `json:"reason"`
+			KernelReady   bool            `json:"kernel_ready"`
+			Activated     bool            `json:"activated"`
+			Guarded       bool            `json:"guarded"`
+			Reservation   json.RawMessage `json:"reservation"`
+		}
+		first, _, _ := strings.Cut(string(b), "\n")
+		if ctx.Err() != nil || json.Unmarshal([]byte(first), &out) != nil || out.SchemaVersion != 1 || out.State != "blocked" || out.Reason != "ownership_unavailable" || out.KernelReady || out.Activated || out.Guarded || len(out.Reservation) != 0 {
+			t.Fatalf("node operation failed: %v %s (attempts: %s)", err, b, log.Name())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (f *m3AuthorityFixture) releaseNodeCandidates() {

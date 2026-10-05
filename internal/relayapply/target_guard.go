@@ -19,31 +19,44 @@ import (
 )
 
 // TargetGuard reserves routing for locally originated IPv4 applications with mark zero.
-// It deliberately installs only terminal unreachable routes, never a usable path.
+// Reserve installs only terminal unreachable routes. Reconcile may later add
+// journaled application routes, without removing the terminal guard.
 // Reservations persist across approval expiry: withdrawing approval must not
 // reopen a previously blocked target through the machine's default route.
 type TargetGuard struct {
-	Controller string   `json:"controller_id"`
-	Node       string   `json:"node_id"`
-	Generation uint64   `json:"generation"`
-	TargetID   string   `json:"target_id"`
-	Prefixes   []string `json:"prefixes"`
-	Owner      string   `json:"owner"`
-	Table      uint32   `json:"table"`
-	Priority   uint32   `json:"priority"`
-	Metric     uint32   `json:"metric"`
-	Phase      string   `json:"phase"` // reserving, guarded, releasing
+	AllocationSlot     uint32       `json:"allocation_slot,omitempty"`     // zero preserves legacy reservations
+	ApplicationVersion int          `json:"application_version,omitempty"` // persists while quarantined
+	Controller         string       `json:"controller_id"`
+	Node               string       `json:"node_id"`
+	Generation         uint64       `json:"generation"`
+	TargetID           string       `json:"target_id"`
+	Prefixes           []string     `json:"prefixes"`
+	Owner              string       `json:"owner"`
+	Table              uint32       `json:"table"`
+	Priority           uint32       `json:"priority"`
+	Metric             uint32       `json:"metric"`
+	Phase              string       `json:"phase"` // reserving, guarded, switching, active, releasing
+	Active             *TargetRoute `json:"active_route,omitempty"`
+	Pending            *TargetRoute `json:"pending_route,omitempty"`
+	VerifiedAt         *time.Time   `json:"app_verified_at,omitempty"`
+	ChangedAt          *time.Time   `json:"route_changed_at,omitempty"`
 }
 
+// Each existing reservation can exclude at most one table and one priority in
+// the linear probe sequence. 2*N+1 choices therefore suffice for N owned targets.
+// Foreign kernel objects are not part of this search: they still cause conflict.
+const maxTargetAllocationSlot = 2 * (relaycatalog.MaxTargets - 1)
+
 type TargetGuardResult struct {
-	SchemaVersion int          `json:"schema_version"`
-	State         string       `json:"state"`
-	Reason        string       `json:"reason,omitempty"`
-	TargetID      string       `json:"target_id"`
-	Generation    uint64       `json:"generation"`
-	Activated     bool         `json:"activated"`
-	Guarded       bool         `json:"guarded"`
-	Reservation   *TargetGuard `json:"reservation,omitempty"`
+	SchemaVersion int               `json:"schema_version"`
+	State         string            `json:"state"`
+	Reason        string            `json:"reason,omitempty"`
+	TargetID      string            `json:"target_id"`
+	Generation    uint64            `json:"generation"`
+	Activated     bool              `json:"activated"`
+	Guarded       bool              `json:"guarded"`
+	Reservation   *TargetGuard      `json:"reservation,omitempty"`
+	Proof         *ApplicationProof `json:"proof,omitempty"`
 }
 
 type targetBackend interface {
@@ -55,6 +68,25 @@ type targetBackend interface {
 func targetSlots(controller, node, target string) (uint32, uint32) {
 	h := sha256.Sum256([]byte(controller + "\x00" + node + "\x00" + target))
 	return 700000 + binary.BigEndian.Uint32(h[:4])%524288, 32000 + binary.BigEndian.Uint32(h[4:8])%760
+}
+func targetAllocatedSlots(e TargetGuard) (uint32, uint32) {
+	table, priority := targetSlots(e.Controller, e.Node, e.TargetID)
+	return 700000 + (table-700000+e.AllocationSlot)%524288, 32000 + (priority-32000+e.AllocationSlot)%760
+}
+func allocateTargetSlots(entry TargetGuard, owned []TargetGuard) (TargetGuard, error) {
+	if len(owned) >= relaycatalog.MaxTargets {
+		return entry, relaycatalog.ErrCapacity
+	}
+	for slot := uint32(0); slot <= maxTargetAllocationSlot; slot++ {
+		entry.AllocationSlot = slot
+		entry.Table, entry.Priority = targetAllocatedSlots(entry)
+		if !slices.ContainsFunc(owned, func(old TargetGuard) bool {
+			return old.Table == entry.Table || old.Priority == entry.Priority
+		}) {
+			return entry, nil
+		}
+	}
+	return entry, relaycatalog.ErrCapacity
 }
 func guardPrefixesOverlap(a, b []string) bool {
 	for _, x := range a {
@@ -87,8 +119,8 @@ func validateTargetGuards(entries []TargetGuard, node string) error {
 		return errors.New("too many target reservations")
 	}
 	for i, e := range entries {
-		table, priority := targetSlots(e.Controller, e.Node, e.TargetID)
-		if e.Controller == "" || e.Node != node || !validGuardID(e.TargetID) || e.Generation == 0 || e.Table != table || e.Priority != priority || e.Metric < 100000 || e.Metric > 0x3fffffff+100000 || len(e.Owner) != 39 || !strings.HasPrefix(e.Owner, "vpnctl:") || (e.Phase != "reserving" && e.Phase != "guarded" && e.Phase != "releasing") {
+		table, priority := targetAllocatedSlots(e)
+		if e.Controller == "" || e.Node != node || !validGuardID(e.TargetID) || e.Generation == 0 || e.AllocationSlot > maxTargetAllocationSlot || e.Table != table || e.Priority != priority || e.Metric < 100000 || e.Metric > 0x3fffffff+100000 || len(e.Owner) != 39 || !strings.HasPrefix(e.Owner, "vpnctl:") || validateTargetPhase(e) != nil {
 			return errors.New("invalid target reservation")
 		}
 		if _, err := hex.DecodeString(e.Owner[7:]); err != nil {
@@ -161,7 +193,7 @@ func (e *Engine) ReserveTarget(parent context.Context, id, controller string) (T
 		if old.Controller != r.ControllerID || !slices.Equal(old.Prefixes, prefixes) {
 			return e.targetFailure(id, "reservation_definition_changed", ErrConflict)
 		}
-		if old.Phase != "guarded" {
+		if old.Phase != "guarded" && old.Phase != "active" {
 			return e.targetFailure(id, "pending_target_journal", ErrRecovery)
 		}
 		return e.InspectTarget(ctx, id)
@@ -170,8 +202,10 @@ func (e *Engine) ReserveTarget(parent context.Context, id, controller string) (T
 	if err != nil {
 		return e.targetFailure(id, "owner_unavailable", err)
 	}
-	table, priority := targetSlots(r.ControllerID, r.NodeID, id)
-	entry := TargetGuard{Controller: r.ControllerID, Node: r.NodeID, Generation: r.ObservedGeneration, TargetID: id, Prefixes: prefixes, Owner: owner, Metric: metric, Table: table, Priority: priority, Phase: "reserving"}
+	entry, err := allocateTargetSlots(TargetGuard{Controller: r.ControllerID, Node: r.NodeID, Generation: r.ObservedGeneration, TargetID: id, Prefixes: prefixes, Owner: owner, Metric: metric, Phase: "reserving"}, e.journal.Targets)
+	if err != nil {
+		return e.targetFailure(id, "target_reservation_conflict", err)
+	}
 	proposed := append(slices.Clone(e.journal.Targets), entry)
 	if err = validateTargetGuards(proposed, e.journal.Node); err != nil {
 		return e.targetFailure(id, "target_reservation_conflict", err)
@@ -216,6 +250,9 @@ func (e *Engine) InspectTarget(parent context.Context, id string) (TargetGuardRe
 	ctx, cancel := context.WithTimeout(parent, MaxDuration)
 	defer cancel()
 	entry := e.journal.Targets[i]
+	if entry.Phase == "active" {
+		return e.inspectActiveTarget(ctx, entry)
+	}
 	ready, err := e.targets.Check(ctx, entry, e.journal.Entries, false)
 	if err != nil {
 		return e.targetFailure(id, "kernel_conflict_or_unavailable", err)
@@ -238,7 +275,10 @@ func (e *Engine) RecoverTarget(parent context.Context, id string) (TargetGuardRe
 	if e.journal.Targets[i].Phase == "releasing" {
 		return e.ReleaseTarget(parent, id)
 	}
-	if e.journal.Targets[i].Phase == "guarded" {
+	if e.journal.Targets[i].Phase == "switching" {
+		return e.quarantineTarget(parent, id)
+	}
+	if e.journal.Targets[i].Phase == "guarded" || e.journal.Targets[i].Phase == "active" {
 		return e.InspectTarget(parent, id)
 	}
 	ctx, cancel := context.WithTimeout(parent, MaxDuration)

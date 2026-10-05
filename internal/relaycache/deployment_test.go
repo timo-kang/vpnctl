@@ -366,11 +366,11 @@ func TestDeploymentInterruptedProcess(t *testing.T) {
 	}
 	s = openDeployment(t, dir)
 	r, e := s.Status()
-	if e != nil || r.ApprovalValid || r.Refresh.Result != "in_progress" {
+	if e != nil || r.ApprovalValid || r.Refresh.Result != "in_progress" || r.BlockedReason != "refresh_interrupted" {
 		t.Fatal("interrupted refresh became valid", r, e)
 	}
 	r, e = s.Refresh(context.Background(), deploymentResponse(relaycatalog.DeploymentView{}, io.EOF))
-	if e == nil || r.ApprovalValid {
+	if e == nil || r.ApprovalValid || r.BlockedReason != "refresh_interrupted" {
 		t.Fatal("timeout cleared interrupted refresh")
 	}
 	approveDeployment(t, s, v)

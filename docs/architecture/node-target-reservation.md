@@ -3,7 +3,8 @@
 `node relay target reserve`는 승인된 target으로 향하는 **로컬 발신 IPv4, mark=0 새 앱 흐름을
 차단**한다. 앱 경로를 적용하기 전에 사용하는 소유권·실패 경계다. 현재 릴레이 추천은
 `node relay select`로 확인하며, 이 예약 기능은 선택된 릴레이로 트래픽을 열지 않는다.
-`activated=false`는 항상 출력한다. #155는 #23의 첫 단계이고 자동 전환 완료가 아니다.
+예약만 수행하면 `activated=false`다. 별도 [target reconcile](node-target-application.md) 적용 뒤의
+inspect/recover는 실제 앱 연결을 재검증하여 `activated=true`를 출력할 수 있다.
 
 ```sh
 vpnctl node relay target reserve --config node.yaml --target-id app
@@ -66,7 +67,7 @@ unreachable route를 회수한다. 중단 시 `recover`는 이 해제를 끝낸�
 저장 오류는 uncertain 상태로 전환하며 같은 engine의 후속 mutation을 거부한다. 다시 열어
 실제 journal과 kernel을 확인해야 한다. 외부 table/rule 변경은 삭제하지 않고 conflict를
 노출한다. `guarded=false`는 현재 트래픽이 열린다는 증거도, 차단됐다는 증거도 아니다.
-`generation`은 예약을 처음 승인한 catalog 세대이며 최신 관측/적용 세대로 해석하지 않는다.
+`generation`은 예약만 있을 때 최초 승인 세대이고, 앱 활성화 후에는 마지막 검증된 적용 세대다.
 
 검사와 netlink 명령 사이에 외부 관리자의 변경을 원자적으로 잠글 수는 없다. namespace
 lock은 vpnctl의 새 relay 명령끼리만 직렬화한다. 기존 legacy up/down 전체, NetworkManager,

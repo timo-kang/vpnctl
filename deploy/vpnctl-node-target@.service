@@ -1,0 +1,27 @@
+[Unit]
+Description=vpnctl application target routing (%i)
+After=network-online.target vpnctl-node-relay-supervise.service
+Requires=vpnctl-node-relay-supervise.service
+
+[Service]
+Type=simple
+# Provision rp_filter, bpffs, --app-routes candidates and target reservation first.
+# Same identity, cache and network namespace as node relay supervise and the app.
+User=root
+UMask=0077
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/vpnctl node relay target reconcile --config /etc/vpnctl/node.yaml --target-id %i --watch
+Restart=always
+RestartSec=1
+TimeoutStopSec=15
+KillMode=control-group
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF
+LimitMEMLOCK=64M
+StandardOutput=journal
+StandardError=journal
+# Deliberately no target release on stop: quarantine must survive service failure.
+
+[Install]
+WantedBy=multi-user.target

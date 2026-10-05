@@ -11,8 +11,8 @@ import (
 	"slices"
 	"time"
 
-	"vpnctl/internal/relayapply"
 	"vpnctl/internal/relaycatalog"
+	"vpnctl/internal/relayobserve"
 )
 
 type Policy struct {
@@ -38,7 +38,7 @@ func (p Policy) Validate() error {
 }
 
 type Candidate struct {
-	relayapply.TargetObservation
+	relayobserve.TargetObservation
 	ConsecutiveSuccesses int    `json:"consecutive_successes"`
 	Eligible             bool   `json:"eligible"`
 	Exclusion            string `json:"exclusion,omitempty"`
@@ -95,7 +95,13 @@ func New(policy Policy) (*Selector, error) {
 	return &Selector{policy: policy, histories: map[string]*history{}, now: time.Now, boot: bootTime}, nil
 }
 
-func (s *Selector) Decide(report relayapply.TargetReport) Decision {
+// RecordApplied anchors dwell to the actual verified change, including rollback.
+// It grants no eligibility: the next Decide still needs fresh candidate evidence.
+func (s *Selector) RecordApplied(path string, changedAt time.Time) {
+	s.selected, s.changedAt = path, changedAt
+}
+
+func (s *Selector) Decide(report relayobserve.TargetReport) Decision {
 	now := s.now()
 	d := Decision{SchemaVersion: 1, ControllerID: report.ControllerID, NodeID: report.NodeID, Generation: report.Generation, TargetID: report.TargetID, ObservedAt: now, ValidUntil: now, Policy: s.policy, State: "blocked", Reason: "observation_unavailable", Candidates: []Candidate{}}
 	previous := s.selected

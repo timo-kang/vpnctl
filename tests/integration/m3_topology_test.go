@@ -149,6 +149,15 @@ func runM3UDPError() error {
 // Source routing is installed explicitly by the four-path test fixture.
 func m3Dial(timeout time.Duration) (net.Conn, error) {
 	d := net.Dialer{Timeout: timeout}
+	if iface := os.Getenv("VPNCTL_PROBE_INTERFACE"); iface != "" {
+		d.Control = func(_, _ string, raw syscall.RawConn) error {
+			var sockErr error
+			err := raw.Control(func(fd uintptr) {
+				sockErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, iface)
+			})
+			return errors.Join(err, sockErr)
+		}
+	}
 	if source := os.Getenv("VPNCTL_PROBE_SOURCE"); source != "" {
 		d.LocalAddr = &net.TCPAddr{IP: net.ParseIP(source)}
 	}

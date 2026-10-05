@@ -178,7 +178,7 @@ jobs:
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-network-results
           VPNCTL_RACE: '0'
           VPNCTL_TEST_PREVIOUS_BINARY: ${{ runner.temp }}/vpnctl-previous
-        run: ./scripts/test-netns.sh -test.skip='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale|ControlIsolation)$|^TestNetns_M3Node|^TestNetns_DirectDataplane$'
+        run: ./scripts/test-netns.sh -test.skip='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale|ControlIsolation)$|^TestNetns_M3Node|^TestNetns_M3TargetApplication|^TestNetns_DirectDataplane$'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -284,6 +284,39 @@ jobs:
         with:
           name: m3-node-lease-${{ matrix.profile }}
           path: ${{ runner.temp }}/vpnctl-node-lease
+          if-no-files-found: error
+          retention-days: 14
+
+  m3-target-application:
+    name: M3 application target route transactions (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: production
+            race: '0'
+            cpus: '2'
+          - profile: race
+            race: '1'
+            cpus: '4'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Unbound apps, failover, quarantine, interrupted commits and approval faults
+        env:
+          VPNCTL_RACE: ${{ matrix.race }}
+          VPNCTL_TEST_CPUS: ${{ matrix.cpus }}
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-target-application
+        run: ./scripts/test-m3-target-application.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: m3-target-application-${{ matrix.profile }}
+          path: ${{ runner.temp }}/vpnctl-target-application
           if-no-files-found: error
           retention-days: 14
 
