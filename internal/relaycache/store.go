@@ -57,6 +57,7 @@ type diskState struct {
 	Keys          []pathKey          `json:"keys"`
 	Refresh       refreshState       `json:"refresh"`
 	BlockedReason string             `json:"blocked_reason,omitempty"`
+	Approval      *ApprovalWitness   `json:"approval_witness,omitempty"`
 }
 
 // Store owns the cache's nonblocking process lock until Close. Public results
@@ -73,6 +74,8 @@ type Store struct {
 	closed     bool
 	writeState func([]byte) error
 	now        func() time.Time
+	stamp      func() approvalStamp
+	fresh      approvalStamp
 }
 
 func Open(dir string, opts Options) (*Store, error) {
@@ -84,6 +87,7 @@ func Open(dir string, opts Options) (*Store, error) {
 		return nil, e
 	}
 	s := &Store{files: &files{root: root}, nodeID: opts.NodeID, reserved: map[string]bool{}, now: time.Now, wait: backoff}
+	s.stamp = s.requestStamp
 	success := false
 	defer func() {
 		if !success {
@@ -182,6 +186,9 @@ func cloneState(v diskState) diskState {
 	return n
 }
 func (s *Store) validate(v diskState) error {
+	if err := validateWitness(v.Approval, v); err != nil {
+		return err
+	}
 	if v.ObservedAt.IsZero() || v.Version != 1 || v.NodeID != s.nodeID || len(v.Keys) > relaycatalog.MaxPathIDs {
 		return ErrCorrupt
 	}

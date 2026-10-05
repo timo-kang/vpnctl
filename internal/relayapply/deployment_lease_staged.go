@@ -139,6 +139,10 @@ const leasePrepareBudget = time.Second
 const leaseTimerMargin = 100 * time.Millisecond
 
 func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, expiry time.Time, authenticated FreshApproval, boot *relayguard.State) (DeploymentLease, error) {
+	return k.stagedLeaseBounded(ctx, e, expiry, authenticated, boot, 0)
+}
+
+func (k deploymentKernel) stagedLeaseBounded(ctx context.Context, e DeploymentEntry, expiry time.Time, authenticated FreshApproval, boot *relayguard.State, approvalBootNS uint64) (DeploymentLease, error) {
 	state, exists, err := k.leaseRead(ctx, e)
 	if err != nil {
 		return state, err
@@ -164,6 +168,12 @@ func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, ex
 		return state, err
 	}
 	remaining := deadline.Sub(started)
+	if approvalBootNS != 0 {
+		if uint64(bootStarted) >= approvalBootNS {
+			return state, ErrLeaseExpired
+		}
+		remaining = min(remaining, time.Duration(approvalBootNS-uint64(bootStarted)))
+	}
 	if !state.Active {
 		// Fresh responses carry a process-local monotonic timestamp. A small
 		// wall rollback must not turn an old response into a new rearm window.

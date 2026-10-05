@@ -43,20 +43,16 @@ func runNodeRelayTarget(args []string) error {
 	if dir == "" {
 		dir = filepath.Join(cfg.Node.PKIDir, "relay-cache")
 	}
-	cache, err := openNodeRelayCache(cfg.Node, dir, false)
-	if err != nil {
-		return err
-	}
-	defer cache.Close()
-	engine, err := relayapply.Open(cache, cfg.Node.RelayUnderlays)
-	if err != nil {
-		return err
-	}
-	defer engine.Close()
 	parent, stop := signalContext()
 	defer stop()
 	ctx, cancel := context.WithTimeout(parent, *timeout)
 	defer cancel()
+	cache, engine, err := openNodeRelayEngine(ctx, cfg.Node, dir)
+	if err != nil {
+		return err
+	}
+	defer cache.Close()
+	defer engine.Close()
 	var out relayapply.TargetGuardResult
 	switch args[0] {
 	case "reserve":

@@ -90,16 +90,11 @@ func collectTargetObservation(ctx context.Context, node *config.NodeConfig, dir,
 	// Release locks between cycles so refresh/prepare can proceed. Busy/corrupt
 	// cache is unknown and immediately withdraws a recommendation, never healthy.
 	unavailable := relayapply.TargetReport{SchemaVersion: 1, NodeID: node.Name, TargetID: target, Reason: "cache_unavailable", Paths: []relayapply.TargetObservation{}}
-	cache, err := openNodeRelayCache(node, dir, false)
+	cache, engine, err := openNodeRelayEngine(ctx, node, dir)
 	if err != nil {
 		return unavailable
 	}
 	defer cache.Close()
-	engine, err := relayapply.Open(cache, node.RelayUnderlays)
-	if err != nil {
-		unavailable.Reason = "candidate_journal_or_lock_unavailable"
-		return unavailable
-	}
 	defer engine.Close()
 	report, _ := engine.ObserveTarget(ctx, target, controller, timeout)
 	return report

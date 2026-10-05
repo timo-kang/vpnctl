@@ -18,6 +18,7 @@ func runNodeRelayApply(args []string) error {
 	configPath := fs.String("config", "", "enrolled node configuration")
 	cacheDir := fs.String("cache-dir", "", "private relay cache directory")
 	probeRoutes := fs.Bool("probe-routes", false, "prepare owned target routes for explicit candidate-source probes")
+	lease := fs.Bool("lease", false, "install initially closed BOOTTIME/nft expiry protection; requires node relay supervise")
 	path := fs.String("path-id", "", "approved path ID (prepare/release)")
 	controller := fs.String("controller-id", "", "expected controller identity (prepare)")
 	timeout := fs.Duration("timeout", relayapply.MaxDuration, "operation deadline, at most 1m; rollback has an independent 1m budget")
@@ -32,6 +33,9 @@ func runNodeRelayApply(args []string) error {
 	}
 	if *probeRoutes && args[0] != "prepare" {
 		return fmt.Errorf("probe-routes is only accepted by prepare")
+	}
+	if *lease && args[0] != "prepare" {
+		return fmt.Errorf("lease is only accepted by prepare")
 	}
 	if *controller != "" && args[0] != "prepare" {
 		return fmt.Errorf("controller-id is only accepted by prepare")
@@ -50,24 +54,22 @@ func runNodeRelayApply(args []string) error {
 	if dir == "" {
 		dir = filepath.Join(cfg.Node.PKIDir, "relay-cache")
 	}
-	cache, err := openNodeRelayCache(cfg.Node, dir, false)
-	if err != nil {
-		return err
-	}
-	defer cache.Close()
-	engine, err := relayapply.Open(cache, cfg.Node.RelayUnderlays)
-	if err != nil {
-		return err
-	}
-	defer engine.Close()
 	parent, stop := signalContext()
 	defer stop()
 	ctx, cancel := context.WithTimeout(parent, *timeout)
 	defer cancel()
+	cache, engine, err := openNodeRelayEngine(ctx, cfg.Node, dir)
+	if err != nil {
+		return err
+	}
+	defer cache.Close()
+	defer engine.Close()
 	var out relayapply.Result
 	switch args[0] {
 	case "prepare":
-		if *probeRoutes {
+		if *lease {
+			out, err = engine.PrepareProtected(ctx, *path, *controller, *probeRoutes)
+		} else if *probeRoutes {
 			out, err = engine.PrepareProbe(ctx, *path, *controller)
 		} else {
 			out, err = engine.Prepare(ctx, *path, *controller)

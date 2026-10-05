@@ -34,6 +34,7 @@ func (s *Store) Refresh(ctx context.Context, client Client) (Report, error) {
 		return busyReport(s.nodeID), ErrBusy
 	}
 	defer s.mu.Unlock()
+	s.fresh = approvalStamp{}
 	if s.closed {
 		return Report{}, osClosed()
 	}
@@ -63,11 +64,15 @@ func (s *Store) Refresh(ctx context.Context, client Client) (Report, error) {
 	if e := ctx.Err(); e != nil {
 		return s.remoteFailure(e)
 	}
+	start := s.stamp()
 	view, e := client.RelayCatalog(ctx, s.nodeID)
 	if e != nil {
 		return s.remoteFailure(e)
 	}
-	if e = s.accept(view); e != nil {
+	if e = ctx.Err(); e != nil {
+		return s.fail("rejected", "response_after_deadline", true, e)
+	}
+	if e = s.acceptWitness(view, start); e != nil {
 		return s.reject(e)
 	}
 	conflicts := 0
@@ -85,6 +90,7 @@ func (s *Store) Refresh(ctx context.Context, client Client) (Report, error) {
 			if e = s.save(next); e != nil {
 				return s.report(), e
 			}
+			s.fresh = start
 			return s.report(), nil
 		}
 		key, found := s.key(path.ID)
@@ -106,8 +112,12 @@ func (s *Store) Refresh(ctx context.Context, client Client) (Report, error) {
 		}
 		generation := s.state.Catalog.Generation
 		req := relaycatalog.BindRequest{SchemaVersion: 1, ControllerID: s.state.Catalog.ControllerID, ExpectedGeneration: generation, NodeID: s.nodeID, PathID: path.ID, PublicKey: key.PublicKey}
+		start = s.stamp()
 		response, e := client.BindRelayPath(ctx, req)
 		if e == nil {
+			if ctx.Err() != nil {
+				return s.fail("rejected", "response_after_deadline", true, ctx.Err())
+			}
 			// Validate even alternate Client implementations before changing local state.
 			matching := false
 			for _, b := range response.Bindings {
@@ -116,7 +126,7 @@ func (s *Store) Refresh(ctx context.Context, client Client) (Report, error) {
 			if !matching {
 				return s.reject(errors.New("binding response omitted requested key/path"))
 			}
-			if e = s.accept(response); e != nil {
+			if e = s.acceptWitness(response, start); e != nil {
 				return s.reject(e)
 			}
 			continue
@@ -132,11 +142,15 @@ func (s *Store) Refresh(ctx context.Context, client Client) (Report, error) {
 		if e = s.wait(ctx, conflicts); e != nil {
 			return s.remoteFailure(e)
 		}
+		start = s.stamp()
 		view, e = client.RelayCatalog(ctx, s.nodeID)
 		if e != nil {
 			return s.remoteFailure(e)
 		}
-		if e = s.accept(view); e != nil {
+		if e = ctx.Err(); e != nil {
+			return s.fail("rejected", "response_after_deadline", true, e)
+		}
+		if e = s.acceptWitness(view, start); e != nil {
 			return s.reject(e)
 		}
 		if view.Generation == generation {
@@ -177,6 +191,9 @@ func (s *Store) pendingPath() (relaycatalog.Path, bool) {
 	return relaycatalog.Path{}, false
 }
 func (s *Store) accept(v relaycatalog.View) error {
+	return s.acceptWitness(v, approvalStamp{})
+}
+func (s *Store) acceptWitness(v relaycatalog.View, start approvalStamp) error {
 	if e := v.Validate(s.nodeID, s.currentTime()); e != nil {
 		return fmt.Errorf("catalog validation: %w", e)
 	}
@@ -250,6 +267,7 @@ func (s *Store) accept(v relaycatalog.View) error {
 	// Copy the view rather than retaining a client's mutable slices.
 	raw := cloneView(v)
 	next.Catalog = &raw
+	next.Approval = s.witness(v, start)
 	next.BlockedReason = ""
 	return s.save(next)
 }

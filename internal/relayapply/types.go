@@ -28,16 +28,18 @@ var ErrConflict = errors.New("candidate resource ownership conflict")
 var ErrRecovery = errors.New("candidate recovery required")
 
 type Entry struct {
-	ProbeRouting  bool                `json:"probe_routing,omitempty"`
-	Controller    string              `json:"controller_id"`
-	Node          string              `json:"node_id"`
-	Generation    uint64              `json:"generation"`
-	ApprovalUntil time.Time           `json:"approval_until"`
-	Candidate     relayplan.Candidate `json:"candidate"`
-	Alias         string              `json:"alias"`
-	Metric        uint32              `json:"metric"`
-	LinkIndex     uint32              `json:"link_index"`
-	Phase         string              `json:"phase"`
+	LeaseVersion   int                 `json:"lease_version,omitempty"`
+	ApprovalBootNS uint64              `json:"approval_boot_ns,omitempty"`
+	ProbeRouting   bool                `json:"probe_routing,omitempty"`
+	Controller     string              `json:"controller_id"`
+	Node           string              `json:"node_id"`
+	Generation     uint64              `json:"generation"`
+	ApprovalUntil  time.Time           `json:"approval_until"`
+	Candidate      relayplan.Candidate `json:"candidate"`
+	Alias          string              `json:"alias"`
+	Metric         uint32              `json:"metric"`
+	LinkIndex      uint32              `json:"link_index"`
+	Phase          string              `json:"phase"`
 }
 type Journal struct {
 	Version int           `json:"version"`
@@ -56,10 +58,11 @@ type Result struct {
 	Paths         []PathResult `json:"paths"`
 }
 type PathResult struct {
-	PathID      string `json:"path_id"`
-	Phase       string `json:"phase"`
-	KernelReady bool   `json:"kernel_ready"`
-	Reason      string `json:"reason,omitempty"`
+	PathID      string           `json:"path_id"`
+	Phase       string           `json:"phase"`
+	KernelReady bool             `json:"kernel_ready"`
+	Reason      string           `json:"reason,omitempty"`
+	Lease       *DeploymentLease `json:"lease,omitempty"`
 }
 type backend interface {
 	Check(context.Context, Entry, bool) (bool, error)
@@ -89,6 +92,9 @@ func token() (string, uint32, uint32, error) {
 }
 
 func validateEntry(e Entry, node string) error {
+	if e.LeaseVersion != 0 && e.LeaseVersion != 3 || (e.LeaseVersion == 0) != (e.ApprovalBootNS == 0) {
+		return errors.New("invalid node lease version or approval bound")
+	}
 	p, c := e.Candidate.Pin, e.Candidate
 	if e.Node != node || e.Controller == "" || e.Generation == 0 || e.ApprovalUntil.IsZero() || p == nil || c.PathID == "" || len(c.PathID) > 64 || len(c.Targets) == 0 || len(c.Targets) > relaycatalog.MaxTargets {
 		return errors.New("invalid apply journal entry")

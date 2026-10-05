@@ -1,0 +1,27 @@
+[Unit]
+Description=vpnctl node relay approval supervision
+After=network-online.target run-vpnctl\x2dbpf.mount
+Requires=run-vpnctl\x2dbpf.mount
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Provision identity/cache, dedicated bpffs, and prepare --lease before starting.
+# All node relay commands must use this UID, cache and network namespace.
+User=root
+UMask=0077
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/vpnctl node relay supervise --config /etc/vpnctl/node.yaml --refresh-interval 5s
+Restart=always
+RestartSec=1
+TimeoutStopSec=5
+KillMode=control-group
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF
+LimitMEMLOCK=64M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

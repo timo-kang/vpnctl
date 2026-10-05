@@ -1,0 +1,279 @@
+//go:build integration
+
+// Copyright 2026 Jonghyeok Kang
+// SPDX-License-Identifier: Apache-2.0
+package integration
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"vpnctl/internal/relayapply"
+	"vpnctl/internal/relayguard"
+	"vpnctl/internal/relayselect"
+)
+
+func TestNetns_M3NodeLease(t *testing.T) {
+	requireNetwork(t)
+	for _, placement := range []string{"colocated", "separate"} {
+		for _, size := range []int{1, 4, 8} {
+			t.Run(fmt.Sprintf("%s/%d", placement, size), func(t *testing.T) {
+				underlays := 2
+				if size == 8 {
+					underlays = 4
+				}
+				f := newM3AuthorityFixtureWithOptions(t, m3AuthorityOptions{separateController: placement == "separate", independentRecipients: true, underlays: underlays, extraTarget: size == 8})
+				f.releaseNodeCandidates()
+				paths := f.plan.Paths[:size]
+				f.plan.Paths = paths
+				phases := []string{}
+				complete := false
+				defer func() {
+					writeM3Report(t, filepath.Join(f.results, "node-lease.json"), map[string]any{"completed": complete && !t.Failed(), "placement": placement, "candidates": size, "phases": phases, "scope": "real mTLS, protected node candidates, new and existing TCP; no host suspend or application route activation"})
+				}()
+				for _, p := range paths {
+					b := netOutput(t, f.robot, integrationBinary(t), "node", "relay", "prepare", "--config", f.node, "--path-id", p.PathID, "--probe-routes", "--lease")
+					var out relayapply.Result
+					if json.Unmarshal([]byte(b), &out) != nil || out.KernelReady || out.Reason != "lease_inactive" {
+						t.Fatal("prepare opened lease", b)
+					}
+				}
+				if f.probe(paths[0]).OK {
+					t.Fatal("closed preparation passed packets")
+				}
+				phases = append(phases, "prepare_closed")
+				start := func(label string) *networkProcess {
+					return startNetworkProcess(t, f.robot, filepath.Join(f.results, label+"-supervisor.jsonl"), nil, integrationBinary(t), "node", "relay", "supervise", "--config", f.node, "--refresh-interval", "1s")
+				}
+				watch := start("initial")
+				ready := func() {
+					eventually(t, 20*time.Second, "all node candidates live", func() error {
+						for _, p := range paths {
+							if v := f.probe(p); !v.OK {
+								return fmt.Errorf("%s: %+v", p.PathID, v)
+							}
+						}
+						return nil
+					})
+				}
+				ready()
+				phases = append(phases, "fresh_approval_all_paths")
+				stream := startNetworkProcess(t, f.robot, filepath.Join(f.results, "existing-tcp.jsonl"), []string{"VPNCTL_WORKER=lease-stream", "VPNCTL_PROBE_SOURCE=" + strings.TrimSuffix(paths[0].InnerAddress, "/32")}, f.worker, "-test.run=^TestNetworkWorker$")
+				eventually(t, 3*time.Second, "existing TCP baseline", func() error {
+					b, _ := os.ReadFile(stream.log)
+					if !strings.Contains(string(b), `"ok":true`) {
+						return fmt.Errorf("no echo")
+					}
+					return nil
+				})
+				paused := time.Now()
+				if err := watch.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(11 * time.Second)
+				for _, p := range paths {
+					if v := f.probe(p); v.OK {
+						t.Fatal("SIGSTOP new TCP escaped", p.PathID, v)
+					}
+				}
+				b, err := os.ReadFile(stream.log)
+				if err != nil {
+					t.Fatal(err)
+				}
+				failed := false
+				for _, line := range strings.Split(string(b), "\n") {
+					var event leaseStreamEvent
+					if json.Unmarshal([]byte(line), &event) == nil && event.At.After(paused.Add(11*time.Second)) {
+						if event.OK {
+							t.Fatal("SIGSTOP existing TCP escaped")
+						}
+						failed = true
+					}
+				}
+				if !failed {
+					t.Fatal("no post-expiry existing TCP evidence")
+				}
+				phases = append(phases, "sigstop_blocks_new_and_existing_tcp")
+				// Recovery/inspect cannot recreate a fresh approval from persisted time.
+				watch.stop() // prescribed SIGKILL fault, after the SIGSTOP evidence above
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_, err = netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "inspect", "--config", f.node).CombinedOutput()
+				cancel()
+				if err == nil || f.probe(paths[0]).OK {
+					t.Fatal("restart inspect revived lease")
+				}
+				watch = start("restarted")
+				ready()
+				phases = append(phases, "restart_fresh_approval_rearms")
+				// Let the selector own the lock for a batch; it must maintain leases
+				// cooperatively without changing the application target reservation.
+				netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", "app")
+				checkNodeLeaseSelection(t, f, "app")
+				if size == 8 {
+					netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", "app2")
+					checkNodeLeaseSelection(t, f, "app2")
+					phases = append(phases, "two_target_observation_and_quarantine")
+					if placement == "separate" {
+						checkNodeLeaseSlowProbes(t, f)
+						phases = append(phases, "slow_probes_do_not_starve_any_kernel_lease")
+					}
+				}
+				ready()
+				phases = append(phases, "selector_and_target_reservation_coexist")
+				killStream := startNodeLeaseStream(t, f, "kill")
+				killAt := time.Now()
+				watch.stop()
+				time.Sleep(11 * time.Second)
+				for _, p := range paths {
+					if f.probe(p).OK {
+						t.Fatal("SIGKILL did not expire", p.PathID)
+					}
+				}
+				requireNodeBlocked(t, f, killStream, killAt.Add(11*time.Second))
+				phases = append(phases, "sigkill_blocks_new_and_existing_tcp")
+				for _, p := range paths {
+					f.nodeCall("release", p.PathID)
+				}
+				netOutput(t, f.robot, integrationBinary(t), "node", "relay", "target", "inspect", "--config", f.node, "--target-id", "app")
+				phases = append(phases, "release_preserves_target_quarantine")
+				complete = true
+			})
+		}
+	}
+}
+
+func checkNodeLeaseSelection(t *testing.T, f *m3AuthorityFixture, target string) {
+	t.Helper()
+	// netOutput is for a single short command (10s). This CLI intentionally
+	// collects two independent batches, each with a 20s product deadline,
+	// plus bounded admission and a 100ms interval. Do not kill batch two merely
+	// because eight healthy candidates cost more under the race instrumenter.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*relayapply.MaxTargetProbeDuration+5*time.Second)
+	defer cancel()
+	started := time.Now()
+	b, err := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "select", "--config", f.node, "--target-id", target, "--samples", "2", "--interval", "100ms").CombinedOutput()
+	if err != nil {
+		t.Fatalf("two-batch selection: %v: %s", err, b)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	var decision relayselect.Decision
+	if len(lines) != 2 || json.Unmarshal([]byte(lines[1]), &decision) != nil || decision.Applied || decision.DesiredPathID == "" || decision.TargetID != target {
+		t.Fatal("invalid final selection", string(b))
+	}
+	for _, path := range f.plan.Paths {
+		found := false
+		for _, candidate := range decision.Candidates {
+			if candidate.PathID == path.PathID {
+				found = true
+				if candidate.State != "reachable" || !candidate.Eligible {
+					t.Fatal("prepared candidate not confirmed", candidate)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing prepared candidate", path.PathID)
+		}
+	}
+	writeM3Report(t, filepath.Join(f.results, "node-selection-"+target+".json"), map[string]any{"completed": !t.Failed(), "duration_seconds": time.Since(started).Seconds(), "samples": len(lines), "prepared_candidates": len(f.plan.Paths), "decision": decision})
+}
+
+func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
+	t.Helper()
+	(relayUplink{relay: f.target}).nft(t, `table inet slow_node_target {
+ chain input { type filter hook input priority -310; policy accept;
+ ip daddr 198.18.0.2 tcp dport 9192 counter drop
+ }
+}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
+	defer cancel()
+	cmd := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "select", "--config", f.node, "--target-id", "app", "--samples", "2", "--interval", "100ms", "--probe-timeout", "2s")
+	output, err := os.Create(filepath.Join(f.results, "slow-selection.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	stderr, err := os.Create(filepath.Join(f.results, "slow-selection.stderr.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	cmd.Stdout = output
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	samples := 0
+	started := time.Now()
+	for {
+		select {
+		case err := <-done:
+			var exit *exec.ExitError
+			if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatal("selector did not finish with a bounded negative decision", err, ctx.Err())
+			}
+			if samples < 5 || time.Since(started) < 8*time.Second {
+				t.Fatal("slow probe workload not exercised", samples, time.Since(started))
+			}
+			b, err := os.ReadFile(output.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			if len(lines) != 2 {
+				t.Fatal("missing slow observation decisions", string(b))
+			}
+			for _, line := range lines {
+				var decision relayselect.Decision
+				if json.Unmarshal([]byte(line), &decision) != nil || decision.SchemaVersion != 1 || decision.TargetID != "app" || decision.Applied || decision.DesiredPathID != "" || decision.Error() == nil {
+					t.Fatal("invalid slow observation decision", line)
+				}
+			}
+			counter := netOutput(t, f.target, "nft", "list", "table", "inet", "slow_node_target")
+			if !strings.Contains(counter, "counter packets ") || strings.Contains(counter, "counter packets 0 bytes 0") {
+				t.Fatal("target blackhole did not receive packets")
+			}
+			netOutput(t, f.target, "nft", "delete", "table", "inet", "slow_node_target")
+			writeM3Report(t, filepath.Join(f.results, "node-slow-probes.json"), map[string]any{"completed": !t.Failed(), "samples": samples, "duration_seconds": time.Since(started).Seconds(), "all_eight_kernel_leases_active": true, "negative_decisions": len(lines), "blackhole_packets_observed": true})
+			return
+		default:
+		}
+		probeCtx, stop := context.WithTimeout(ctx, 3*time.Second)
+		probe := netCommand(probeCtx, f.robot, f.worker, "-test.run=^TestNetworkWorker$")
+		probe.Env = append(os.Environ(), "VPNCTL_WORKER=boot-guard-snapshot")
+		b, err := probe.Output()
+		stop()
+		if err != nil {
+			t.Fatal("guard sampling failed", err)
+		}
+		states := map[string]struct {
+			State relayguard.State `json:"state"`
+			Error string           `json:"error"`
+		}{}
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(line, "BOOTTIME_GUARDS=") {
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "BOOTTIME_GUARDS=")), &states); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		for _, p := range f.plan.Paths {
+			state, ok := states[p.Pin.WGInterface]
+			if !ok || state.Error != "" || !state.State.Active {
+				t.Fatalf("probe starved lease %s: %+v", p.PathID, state)
+			}
+		}
+		samples++
+		time.Sleep(500 * time.Millisecond)
+	}
+}
