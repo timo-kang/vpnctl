@@ -7,8 +7,10 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -188,7 +190,7 @@ func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
 	t.Helper()
 	(relayUplink{relay: f.target}).nft(t, `table inet slow_node_target {
  chain input { type filter hook input priority -310; policy accept;
- ip daddr 198.18.0.2 tcp dport 9192 drop
+ ip daddr 198.18.0.2 tcp dport 9192 counter drop
  }
 }`)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
@@ -199,8 +201,13 @@ func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
 		t.Fatal(err)
 	}
 	defer output.Close()
+	stderr, err := os.Create(filepath.Join(f.results, "slow-selection.stderr.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
 	cmd.Stdout = output
-	cmd.Stderr = output
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -211,14 +218,33 @@ func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
 	for {
 		select {
 		case err := <-done:
-			if err == nil {
-				t.Fatal("blackholed target selected as healthy")
+			var exit *exec.ExitError
+			if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatal("selector did not finish with a bounded negative decision", err, ctx.Err())
 			}
 			if samples < 5 || time.Since(started) < 8*time.Second {
 				t.Fatal("slow probe workload not exercised", samples, time.Since(started))
 			}
+			b, err := os.ReadFile(output.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			if len(lines) != 2 {
+				t.Fatal("missing slow observation decisions", string(b))
+			}
+			for _, line := range lines {
+				var decision relayselect.Decision
+				if json.Unmarshal([]byte(line), &decision) != nil || decision.SchemaVersion != 1 || decision.TargetID != "app" || decision.Applied || decision.DesiredPathID != "" || decision.Error() == nil {
+					t.Fatal("invalid slow observation decision", line)
+				}
+			}
+			counter := netOutput(t, f.target, "nft", "list", "table", "inet", "slow_node_target")
+			if !strings.Contains(counter, "counter packets ") || strings.Contains(counter, "counter packets 0 bytes 0") {
+				t.Fatal("target blackhole did not receive packets")
+			}
 			netOutput(t, f.target, "nft", "delete", "table", "inet", "slow_node_target")
-			writeM3Report(t, filepath.Join(f.results, "node-slow-probes.json"), map[string]any{"completed": !t.Failed(), "samples": samples, "duration_seconds": time.Since(started).Seconds(), "all_eight_kernel_leases_active": true})
+			writeM3Report(t, filepath.Join(f.results, "node-slow-probes.json"), map[string]any{"completed": !t.Failed(), "samples": samples, "duration_seconds": time.Since(started).Seconds(), "all_eight_kernel_leases_active": true, "negative_decisions": len(lines), "blackhole_packets_observed": true})
 			return
 		default:
 		}

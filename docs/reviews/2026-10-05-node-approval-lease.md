@@ -31,6 +31,17 @@ supervisor가 종료되는 문제를 수정했다. 실패 실행은 끝까지 �
 40.63초의 느린 관측 동안 78회 표본에서 8개 커널 임대가 모두 활성 상태였다.
 증거는 `/tmp/vpnctl-node-lease-race-budget-fix`에 보존했다.
 
+두 번째 CI `37290751625`는 앞선 8후보 두 표본 선택(약 16초)을 통과했지만,
+전체 race suite의 12분 상한에 마지막 separate/8 느린 관측 도중 도달했다.
+완료된 장애·만료·철회·변조 시험과 5개 규모 사례는 통과했고, 마지막 사례도
+두 target의 선택 검증까지 통과했다. 전체 suite 상한은 15분, build/artifact를
+포함한 job 상한은 20분으로 조정했다. 개별 제품·시험 명령 제한은 유지한다.
+추가 자체 리뷰로 느린 관측 시험이 임의 비정상 종료를 성공으로 취급하지 않도록
+정상적인 exit 1과 두 개의 부정 선택 JSON, 실제 blackhole packet counter를
+요구한다. 원본 증거는 `/tmp/vpnctl-pr158-second-node-race*`에 보존했다.
+보강 후 1 CPU race separate/8 시험은 118.27초에 통과했다. 결과는
+`/tmp/vpnctl-node-lease-slow-verdict-fix`에 보존했다.
+
 ## 로컬 검증 근거
 
 Linux `7.0.0-30-generic`, Docker `--network none`, 실행마다 2 CPU / 2 GiB.
