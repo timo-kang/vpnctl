@@ -94,6 +94,9 @@ func runControllerRelay(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(response)
 }
 func runNodeRelay(args []string) error {
+	if len(args) > 0 && args[0] == "supervise" {
+		return runNodeRelaySupervise(args[1:])
+	}
 	if len(args) > 0 && args[0] == "target" {
 		return runNodeRelayTarget(args[1:])
 	}
@@ -104,7 +107,7 @@ func runNodeRelay(args []string) error {
 		return runNodeRelayApply(args)
 	}
 	if len(args) == 0 || args[0] != "catalog" && args[0] != "bind" && args[0] != "refresh" && args[0] != "status" && args[0] != "plan" {
-		return fmt.Errorf("node relay catalog|bind|refresh|status|plan|prepare|inspect|release|recover|select|target required")
+		return fmt.Errorf("node relay catalog|bind|refresh|status|plan|prepare|inspect|release|recover|select|target|supervise required")
 	}
 	fs := flag.NewFlagSet("node relay "+args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "enrolled node YAML configuration")

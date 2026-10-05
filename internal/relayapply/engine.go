@@ -11,10 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"reflect"
-	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -54,21 +51,7 @@ func namedKernelLock(name string) (func(), error) {
 	}
 	return func() { unix.Close(fd) }, nil
 }
-func domain() (string, error) {
-	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
-	if err != nil {
-		return "", err
-	}
-	st, err := os.Stat("/proc/self/ns/net")
-	if err != nil {
-		return "", err
-	}
-	s, ok := st.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", errors.New("network namespace identity unavailable")
-	}
-	return fmt.Sprintf("%s:%d:%d", strings.TrimSpace(string(b)), s.Dev, s.Ino), nil
-}
+func domain() (string, error) { return relaycache.KernelDomain() }
 func Open(cache *relaycache.Store, underlays []relayplan.Underlay) (*Engine, error) {
 	unlock, err := kernelLock()
 	if err != nil {
@@ -79,7 +62,7 @@ func Open(cache *relaycache.Store, underlays []relayplan.Underlay) (*Engine, err
 		unlock()
 		return nil, err
 	}
-	e, err := open(cache, underlays, d, kernel{run: command})
+	e, err := open(cache, underlays, d, nodeKernel{kernel{run: command}})
 	if err != nil {
 		unlock()
 		return nil, err
@@ -163,15 +146,21 @@ func (e *Engine) stillApproved(entry Entry) error {
 	return errors.New("binding unavailable")
 }
 func (e *Engine) Prepare(ctx context.Context, path, controller string) (Result, error) {
-	return e.prepare(ctx, path, controller, false)
+	return e.prepare(ctx, path, controller, false, false)
 }
 
 // PrepareProbe adds approved target routes and a source-/32 rule inside the
 // owned candidate table. It permits explicit-source probes, not unbound apps.
 func (e *Engine) PrepareProbe(ctx context.Context, path, controller string) (Result, error) {
-	return e.prepare(ctx, path, controller, true)
+	return e.prepare(ctx, path, controller, true, false)
 }
-func (e *Engine) prepare(ctx context.Context, path, controller string, probeRouting bool) (Result, error) {
+
+// PrepareProtected creates an initially closed, independently expiring
+// candidate. Supervision with a fresh authenticated response opens its lease.
+func (e *Engine) PrepareProtected(ctx context.Context, path, controller string, probeRouting bool) (Result, error) {
+	return e.prepare(ctx, path, controller, probeRouting, true)
+}
+func (e *Engine) prepare(ctx context.Context, path, controller string, probeRouting, protected bool) (Result, error) {
 	if e.uncertain {
 		return failure(path, "reopen_journal_required", relaycache.ErrUncertain)
 	}
@@ -182,12 +171,19 @@ func (e *Engine) prepare(ctx context.Context, path, controller string, probeRout
 		return failure(path, "approval_or_inventory_unavailable", err)
 	}
 	entry.ProbeRouting = probeRouting
+	if protected {
+		w, _, _, err := e.cache.LeaseApproval()
+		if err != nil || w.Domain != e.journal.Domain || w.Controller != entry.Controller || w.Generation != entry.Generation {
+			return failure(path, "lease_approval_unavailable", errors.Join(ErrRecovery, err))
+		}
+		entry.LeaseVersion, entry.ApprovalBootNS = 3, w.UntilBootNS
+	}
 	if i := e.index(path); i >= 0 {
 		old := e.journal.Entries[i]
 		if old.Phase != "prepared" {
 			return failure(path, "pending_journal", ErrRecovery)
 		}
-		if old.ProbeRouting != entry.ProbeRouting || old.Controller != entry.Controller || !reflect.DeepEqual(old.Candidate, entry.Candidate) {
+		if old.LeaseVersion != entry.LeaseVersion || old.ProbeRouting != entry.ProbeRouting || old.Controller != entry.Controller || !reflect.DeepEqual(old.Candidate, entry.Candidate) {
 			return failure(path, "release_previous_candidate_first", ErrConflict)
 		}
 		ready, err := e.backend.Check(ctx, old, false)
@@ -204,12 +200,20 @@ func (e *Engine) prepare(ctx context.Context, path, controller string, probeRout
 			return failure(path, "approval_changed", err)
 		}
 		old.Generation, old.ApprovalUntil = entry.Generation, entry.ApprovalUntil
+		old.ApprovalBootNS = entry.ApprovalBootNS
 		e.journal.Entries[i] = old
 		if err = e.persist(); err != nil {
 			return failure(path, "journal_save_failed", err)
 		}
 		r := result("prepared", path, "")
 		r.KernelReady = true
+		if protected {
+			_, leaseErr := e.checkLease(ctx, old)
+			r.KernelReady = leaseErr == nil
+			if leaseErr != nil {
+				r.Reason = "lease_inactive"
+			}
+		}
 		return r, nil
 	}
 	if len(e.journal.Entries) >= maxEntries {
@@ -309,6 +313,10 @@ func (e *Engine) prepare(ctx context.Context, path, controller string, probeRout
 	}
 	r := result("prepared", path, "")
 	r.KernelReady = true
+	if protected {
+		r.KernelReady = false
+		r.Reason = "lease_inactive"
+	}
 	return r, nil
 }
 func (e *Engine) Release(ctx context.Context, path string) (Result, error) {
@@ -386,6 +394,22 @@ func (e *Engine) Inspect(ctx context.Context) (Result, error) {
 				p.Reason = "inspection_deadline"
 			} else {
 				p.KernelReady = true
+			}
+		}
+		if entry.LeaseVersion != 0 {
+			var leaseErr error
+			p.Lease, leaseErr = e.checkLease(ctx, entry)
+			if err != nil {
+				if b, ok := e.backend.(nodeLeaseBackend); ok {
+					err = errors.Join(err, b.Block(ctx, entry))
+				}
+			}
+			if leaseErr != nil {
+				p.KernelReady = false
+				if p.Reason == "" {
+					p.Reason = "lease_inactive"
+				}
+				err = errors.Join(err, leaseErr)
 			}
 		}
 		all = errors.Join(all, err)

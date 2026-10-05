@@ -63,7 +63,8 @@ type targetProof struct {
 }
 
 // ObserveTarget holds the same cache and namespace locks as prepare. No route,
-// peer, interface or rule is changed. Each TCP socket pins both the approved
+// peer, interface or policy-routing rule is changed. Protected candidates cooperatively renew
+// their leases between bounded probes while holding the shared lock. Each TCP socket pins both the approved
 // candidate interface and its inner source; it cannot use a healthy neighbour.
 func (e *Engine) ObserveTarget(parent context.Context, targetID, controller string, timeout time.Duration) (TargetReport, error) {
 	return e.observeTarget(parent, targetID, controller, timeout, kernel{run: command}.probeTarget)
@@ -125,6 +126,11 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 		if !slices.Contains(path.TargetIDs, targetID) {
 			continue
 		}
+		if e.hasLeases() {
+			// Long batches must not exclude the supervisor for an entire 20s
+			// without lease maintenance. This cannot rearm from cached evidence.
+			_, _ = e.MaintainLeases(ctx)
+		}
 		observation := TargetObservation{PathID: path.ID, RelayID: path.RelayID, UnderlayID: path.UnderlayID, Priority: path.Priority, Cost: path.Cost, State: "unknown", ObservedAt: time.Now()}
 		switch {
 		case path.Disabled:
@@ -161,6 +167,11 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 }
 
 func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) TargetObservation {
+	if entry.LeaseVersion != 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+	}
 	out.ObservedAt = time.Time{}
 	finish := func(state, reason string) TargetObservation {
 		out.State, out.Reason = state, reason
@@ -177,6 +188,9 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 	}
 	if e.stillApproved(entry) != nil {
 		return finish("unknown", "approval_expired_or_changed")
+	}
+	if _, err := e.checkLease(ctx, entry); err != nil {
+		return finish("unknown", "lease_inactive")
 	}
 	// Bind evidence to the installed resource generation, not a reusable path ID.
 	b, _ := json.Marshal(entry)
@@ -207,6 +221,9 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 	}
 	if ctx.Err() != nil {
 		return finish("unknown", "observation_deadline")
+	}
+	if _, err := e.checkLease(ctx, entry); err != nil {
+		return finish("unknown", "lease_expired_during_probe")
 	}
 	if probeErr != nil {
 		var failure *targetConnectError

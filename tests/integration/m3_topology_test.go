@@ -195,6 +195,9 @@ type m3TopologyLayout struct {
 // A distinct controller has no uplink link, forwarding or WireGuard device.
 // Both placements expose the same remote mTLS API to robot and relay agents.
 func newM3TopologyLayout(t *testing.T, separateController bool) m3TopologyLayout {
+	return newM3TopologyLayoutWithUnderlays(t, separateController, 2)
+}
+func newM3TopologyLayoutWithUnderlays(t *testing.T, separateController bool, underlays int) m3TopologyLayout {
 	t.Helper()
 	suffix := fmt.Sprintf("%x", time.Now().UnixNano()&0xfffffff)
 	count := 4
@@ -210,7 +213,7 @@ func newM3TopologyLayout(t *testing.T, separateController bool) m3TopologyLayout
 		netOutput(t, name, "ip", "link", "set", "lo", "up")
 	}
 	robot, relays, target := ns[0], ns[1:3], ns[3]
-	bridges := make([]string, 3)
+	bridges := make([]string, underlays+1)
 	for i := range bridges {
 		bridges[i] = fmt.Sprintf("m3b%s%d", suffix, i)
 		br := bridges[i]
@@ -229,7 +232,7 @@ func newM3TopologyLayout(t *testing.T, separateController bool) m3TopologyLayout
 		netOutput(t, namespace, "ip", "addr", "add", addr, "dev", iface)
 		netOutput(t, namespace, "ip", "link", "set", iface, "up")
 	}
-	for u, prefix := range []string{"192.0.2", "198.51.100"} {
+	for u, prefix := range []string{"192.0.2", "198.51.100", "203.0.113", "198.19.0"}[:underlays] {
 		iface := fmt.Sprintf("wan%d", u)
 		link(robot, iface, prefix+".10/24", bridges[u])
 		for r, relay := range relays {
@@ -242,10 +245,10 @@ func newM3TopologyLayout(t *testing.T, separateController bool) m3TopologyLayout
 		link(layout.controller, "control0", layout.controllerAddress+"/24", bridges[0])
 		(relayUplink{relay: layout.controller}).forwarding(t, false)
 	}
-	link(target, "eth0", m3Target+"/24", bridges[2])
+	link(target, "eth0", m3Target+"/24", bridges[underlays])
 	for r, relay := range relays {
 		addr := fmt.Sprintf("198.18.0.%d", 11+r)
-		link(relay, "uplink0", addr+"/24", bridges[2])
+		link(relay, "uplink0", addr+"/24", bridges[underlays])
 		(relayUplink{relay: relay}).forwarding(t, true)
 		(relayUplink{relay: relay}).nft(t, fmt.Sprintf(`table ip m3 {
    chain forward { type filter hook forward priority filter; policy drop;

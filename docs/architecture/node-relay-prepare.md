@@ -117,3 +117,12 @@ fixture가 forwarding/NAT와 임시 앱 route를 설치한 뒤 WG 암호화 sour
 실제 CLI의 생성 직후/rule 설치/WG 설정/link up 뒤 SIGKILL을 확인하고 다음 프로세스로 복구한다.
 gateway는 설치/readback 범위를 검증한다. 자동 선택·relay forwarding 권한·상시 만료 차단과 전환 SLO는 후속 gate다.
 완료 여부와 통과한 단계는 별도 `m3-prepare-*/report.json` artifact에 남기며 cache·journal·개인키는 포함하지 않는다.
+
+## Optional node expiration protection
+
+Use `prepare --lease` (with `--probe-routes` when collecting candidate evidence)
+and `node relay supervise` for the node-side BOOTTIME/nft lifetime gate. Initial
+preparation is closed; only a fresh accepted request can rearm an expired gate.
+Legacy preparation remains available but is not suitable for subsequent
+application route activation. See [node approval leases](node-approval-lease.md)
+for permissions, lifetime bounds, recovery and the deployment service template.

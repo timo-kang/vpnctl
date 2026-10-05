@@ -123,3 +123,9 @@ recover를 검사한다. 선택 명령 전후 route/rule이 같고 일반 unboun
 
 앱 경로 활성화 전에 사용할 target 전용 차단·복구 기반은
 [앱 target 예약](node-target-reservation.md)을 참고한다. 이 예약도 실제 릴레이 활성화는 하지 않는다.
+
+Protected candidates prepared with `--lease` also require a verified live
+[node approval lease](node-approval-lease.md). Observation cooperatively maintains
+all protected candidates between bounded per-path probes. Failed or expired guard
+readback is unknown evidence and cannot support a recommendation. This does not
+activate application routes or upgrade legacy unprotected candidates in place.

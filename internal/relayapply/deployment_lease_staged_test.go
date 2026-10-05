@@ -15,6 +15,63 @@ import (
 	"vpnctl/internal/relayguard"
 )
 
+func TestStagedLeaseAbsoluteNodeApprovalClipsTimerBeforeMutation(t *testing.T) {
+	engine, _, _, _, options, _ := deploymentFixture(t, 1)
+	r, _ := engine.cache.Status()
+	entry, _ := desiredDeployment(r, options.EndpointID, options.ListenPort)
+	entry.Alias, entry.Group, entry.LinkIndex, _ = token()
+	entry.LeaseVersion = 3
+	for _, expired := range []bool{false, true} {
+		t.Run(strconv.FormatBool(expired), func(t *testing.T) {
+			start, err := relayguard.Now()
+			if err != nil {
+				t.Fatal(err)
+			}
+			until := start + uint64(3*time.Second)
+			if expired {
+				until = start - 1
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			mutations := 0
+			k := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
+				encode := func(rows []object) ([]byte, error) { return json.Marshal(object{"nftables": rows}) }
+				switch strings.Join(args, " ") {
+				case "-j -n -T list flowtables":
+					return encode([]object{})
+				case "-j -n -T list table inet " + leaseTable(entry):
+					rows := stagedLeaseTestRows(entry, time.Now().Add(9*time.Second).Truncate(time.Second), "lease_00000000000000000000000000000001", "")
+					rows[1]["set"].(object)["elem"] = []any{object{"elem": object{"val": entry.LinkIndex, "expires": 8}}}
+					return encode(rows)
+				case "-f /dev/stdin":
+					mutations++
+					match := regexp.MustCompile(`timeout ([0-9]+)ms`).FindStringSubmatch(input)
+					if len(match) != 2 {
+						t.Fatal("missing bounded timer", input)
+					}
+					n, _ := strconv.Atoi(match[1])
+					if n <= 0 || n > 2000 {
+						t.Fatal("wall expiry extended node BOOTTIME bound", n)
+					}
+					cancel()
+					return nil, nil
+				default:
+					t.Fatal(name, args)
+					return nil, ErrConflict
+				}
+			}}}
+			_, err = k.stagedLeaseBounded(ctx, entry, time.Now().Add(time.Hour), FreshApproval{}, nil, until)
+			if expired {
+				if !errors.Is(err, ErrLeaseExpired) || mutations != 0 {
+					t.Fatal("expired approval mutated kernel", err, mutations)
+				}
+			} else if !errors.Is(err, context.Canceled) || mutations != 1 {
+				t.Fatal(err, mutations)
+			}
+		})
+	}
+}
+
 func stagedLeaseTestRows(e DeploymentEntry, deadline time.Time, selected, pending string) []object {
 	rows := leaseExpected(e, deadline)
 	rows[1]["set"].(object)["name"] = selected

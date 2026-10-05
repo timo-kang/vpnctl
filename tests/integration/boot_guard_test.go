@@ -314,7 +314,7 @@ func snapshotBootGuards() error {
 	defer cancel()
 	for _, l := range links {
 		a := l.Attrs()
-		if l.Type() != "wireguard" || !strings.HasPrefix(a.Name, "vd") {
+		if l.Type() != "wireguard" || (!strings.HasPrefix(a.Name, "vd") && !strings.HasPrefix(a.Name, "vr")) {
 			continue
 		}
 		state, err := relayguard.Read(ctx, relayguard.Owner{Interface: a.Name, Alias: a.Alias, Index: a.Index, Group: a.Group})

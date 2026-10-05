@@ -79,6 +79,8 @@ func (f *m3AuthorityFixture) snapshot() map[string]any {
 type m3AuthorityOptions struct {
 	separateController    bool
 	independentRecipients bool
+	underlays             int
+	extraTarget           bool
 }
 
 func newM3AuthorityFixture(t *testing.T) *m3AuthorityFixture {
@@ -88,7 +90,10 @@ func newM3AuthorityFixture(t *testing.T) *m3AuthorityFixture {
 
 func newM3AuthorityFixtureWithOptions(t *testing.T, opts m3AuthorityOptions) *m3AuthorityFixture {
 	t.Helper()
-	layout := newM3TopologyLayout(t, opts.separateController)
+	if opts.underlays == 0 {
+		opts.underlays = 2
+	}
+	layout := newM3TopologyLayoutWithUnderlays(t, opts.separateController, opts.underlays)
 	robot, relays, target := layout.robot, layout.relays, layout.target
 	private := t.TempDir()
 	if err := os.Chmod(private, 0700); err != nil {
@@ -118,10 +123,18 @@ func newM3AuthorityFixtureWithOptions(t *testing.T, opts m3AuthorityOptions) *m3
 		t.Fatal(err)
 	}
 	cfg.Node.RelayUnderlays = []relayplan.Underlay{{ID: "lan0", Interface: "wan0", Kind: "ethernet"}, {ID: "lan1", Interface: "wan1", Kind: "wifi"}}
+	for u := 2; u < opts.underlays; u++ {
+		cfg.Node.RelayUnderlays = append(cfg.Node.RelayUnderlays, relayplan.Underlay{ID: fmt.Sprint("lan", u), Interface: fmt.Sprint("wan", u), Kind: "ethernet"})
+	}
 	if err = config.Save(f.node, cfg); err != nil {
 		t.Fatal(err)
 	}
 	f.spec = relaycatalog.Spec{SchemaVersion: 1, PoolCIDR: "10.78.0.0/16", Targets: []relaycatalog.Target{{ID: "app", Prefixes: []string{m3Target + "/32"}, ProbeAddress: m3Target, Port: 9192, Protocol: "tcp"}}}
+	if opts.extraTarget {
+		f.spec.Targets = append(f.spec.Targets, relaycatalog.Target{ID: "app2", Prefixes: []string{"198.18.0.3/32"}, ProbeAddress: "198.18.0.3", Port: 9192, Protocol: "tcp"})
+		netOutput(t, target, "ip", "addr", "add", "198.18.0.3/32", "dev", "eth0")
+		startNetworkProcess(t, target, filepath.Join(private, "echo2.log"), []string{"VPNCTL_WORKER=m3-echo", "VPNCTL_PROBE_TARGET=198.18.0.3"}, worker, "-test.run=^TestNetworkWorker$")
+	}
 	for r, ns := range relays {
 		key, pub := wgKeyPair(t)
 		id := fmt.Sprintf("r%d", r)
@@ -134,10 +147,15 @@ func newM3AuthorityFixtureWithOptions(t *testing.T, opts m3AuthorityOptions) *m3
 		keyfile := filepath.Join(private, id+".key")
 		mustWrite(t, keyfile, key)
 		relay := relaycatalog.Relay{ID: id, PublicKey: pub, KeyGeneration: 1}
-		for u, prefix := range []string{"192.0.2", "198.51.100"} {
+		for u, prefix := range []string{"192.0.2", "198.51.100", "203.0.113", "198.19.0"}[:opts.underlays] {
 			ep := fmt.Sprintf("ep%d", u)
 			relay.Endpoints = append(relay.Endpoints, relaycatalog.Endpoint{ID: ep, Address: fmt.Sprintf("%s.%d:%d", prefix, 11+r, 51820+u)})
 			f.spec.Paths = append(f.spec.Paths, relaycatalog.Path{ID: fmt.Sprintf("p%d%d", r, u), NodeID: "robot", RelayID: id, EndpointID: ep, UnderlayID: fmt.Sprintf("lan%d", u), TargetIDs: []string{"app"}})
+		}
+		if opts.extraTarget {
+			for i := range f.spec.Paths {
+				f.spec.Paths[i].TargetIDs = []string{"app", "app2"}
+			}
 		}
 		f.spec.Relays = append(f.spec.Relays, relay)
 		f.recipients = append(f.recipients, &m3Recipient{t: t, ns: ns, config: agent, relay: id, cache: filepath.Join(private, id+"-cache"), key: keyfile, results: results, generation: 1})
@@ -183,7 +201,7 @@ func (f *m3AuthorityFixture) install() {
 	}
 	for _, r := range f.recipients {
 		r.require("refresh", -1, 0)
-		for ep := 0; ep < 2; ep++ {
+		for ep := 0; ep < len(f.spec.Relays[0].Endpoints); ep++ {
 			r.require("apply", ep, 51820+ep)
 		}
 		r.start()
@@ -191,21 +209,29 @@ func (f *m3AuthorityFixture) install() {
 	}
 	for r, recipient := range f.recipients {
 		out := recipient.require("inspect", -1, 0)
-		if len(out.Endpoints) != 2 {
+		if len(out.Endpoints) != len(f.spec.Relays[0].Endpoints) {
 			f.t.Fatal("missing endpoint", out)
+		}
+		ifaces := []string{}
+		for _, ep := range out.Endpoints {
+			ifaces = append(ifaces, fmt.Sprintf("%q", ep.Interface))
 		}
 		// Deployment fixture forwarding/NAT remains separate from the product
 		// source/target ACL and lease guards, which run before this chain.
 		netOutput(f.t, recipient.ns, "nft", "delete", "table", "ip", "m3")
+		targets := []string{}
+		for _, target := range f.spec.Targets {
+			targets = append(targets, target.ProbeAddress)
+		}
 		(relayUplink{relay: recipient.ns}).nft(f.t, fmt.Sprintf(`table ip m3 {
  chain forward { type filter hook forward priority filter; policy drop;
- iifname { "%s", "%s" } oifname "uplink0" ip daddr 198.18.0.2 tcp dport 9192 accept
- iifname "uplink0" oifname { "%s", "%s" } ct state established,related accept
+ iifname { %s } oifname "uplink0" ip daddr { %s } tcp dport 9192 accept
+ iifname "uplink0" oifname { %s } ct state established,related accept
  }
  chain postrouting { type nat hook postrouting priority srcnat; policy accept;
- oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr 198.18.0.2 tcp dport 9192 snat to 198.18.0.%d
+ oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr { %s } tcp dport 9192 snat to 198.18.0.%d
  }
-}`, out.Endpoints[0].Interface, out.Endpoints[1].Interface, out.Endpoints[0].Interface, out.Endpoints[1].Interface, 11+r))
+}`, strings.Join(ifaces, ", "), strings.Join(targets, ", "), strings.Join(ifaces, ", "), strings.Join(targets, ", "), 11+r))
 	}
 	for i, p := range f.plan.Paths {
 		source := strings.TrimSuffix(p.InnerAddress, "/32")
