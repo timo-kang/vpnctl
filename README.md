@@ -86,7 +86,9 @@ CLI/API로 관리합니다. [로컬 장치 매핑과 경로 준비 계획](docs/
 [릴레이 승인 cache](docs/architecture/relay-deployment-cache.md)는 `relay refresh|status`로
 갱신·재시작 후 검증합니다. [릴레이 peer 적용·복구](docs/architecture/relay-peer-apply.md)는
 `relay apply|inspect|release|recover`로 수행합니다. [상시 승인 감독과 커널 lease](docs/architecture/relay-lease.md)는
-`relay supervise`로 유지합니다. 목적지별 forwarding 권한과 자동 전환은 후속 구현 단계입니다.
+`relay supervise`로 유지합니다. [목적지별 앱 경로 적용](docs/architecture/node-target-application.md)은
+`prepare --app-routes`와 `target reconcile --watch`를 사용합니다. 실제 네트워크 관리자 공존과
+운영 전환 SLO는 별도 검증 단계입니다.
 
 ## Architecture
 

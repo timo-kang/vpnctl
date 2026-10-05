@@ -17,12 +17,19 @@ import (
 )
 
 func runNodeRelaySelect(args []string) error {
-	fs := flag.NewFlagSet("node relay select", flag.ContinueOnError)
+	return runNodeRelaySelection(args, false)
+}
+func runNodeRelaySelection(args []string, apply bool) error {
+	name := "node relay select"
+	if apply {
+		name = "node relay target reconcile"
+	}
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	configPath := fs.String("config", "", "enrolled node configuration")
 	cacheDir := fs.String("cache-dir", "", "private relay cache directory")
 	target := fs.String("target-id", "", "approved application target ID")
 	controller := fs.String("controller-id", "", "expected controller identity")
-	watch := fs.Bool("watch", false, "continuously report desired paths; never change application routes")
+	watch := fs.Bool("watch", false, "continuously observe and decide (target reconcile also applies routes)")
 	samples := fs.Int("samples", 2, "observation cycles (2..1000), ignored with --watch")
 	interval := fs.Duration("interval", 2*time.Second, "delay between completed cycles (100ms..1m)")
 	timeout := fs.Duration("probe-timeout", time.Second, "per-path TCP evidence timeout (10ms..2s)")
@@ -64,26 +71,49 @@ func runNodeRelaySelect(args []string) error {
 	defer stop()
 	encoder := json.NewEncoder(os.Stdout)
 	for i := 0; *watch || i < *samples; i++ {
-		report := collectTargetObservation(ctx, cfg.Node, dir, *target, *controller, *timeout)
-		decision := selector.Decide(report)
-		if err := encoder.Encode(decision); err != nil {
-			return err
+		var cycleErr error
+		if apply {
+			out, err := reconcileApplicationTarget(ctx, cfg.Node, dir, *target, *controller, *timeout, selector)
+			cycleErr = err
+			if err := encoder.Encode(out); err != nil {
+				return err
+			}
+		} else {
+			report := collectTargetObservation(ctx, cfg.Node, dir, *target, *controller, *timeout)
+			decision := selector.Decide(report)
+			if err := encoder.Encode(decision); err != nil {
+				return err
+			}
+			cycleErr = decision.Error()
 		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil
 		}
 		if !*watch && i+1 == *samples {
-			return decision.Error()
+			return cycleErr
 		}
 		timer := time.NewTimer(*interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return nil
 		case <-timer.C:
 		}
 	}
 	return nil
+}
+
+func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration, selector *relayselect.Selector) (relayapply.TargetReconcileResult, error) {
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(parent, relayapply.MaxDuration)
+	defer cancel()
+	cache, engine, err := openNodeRelayEngine(ctx, node, dir)
+	if err != nil {
+		return relayapply.TargetReconcileResult{SchemaVersion: 1, StartedAt: started, FinishedAt: time.Now(), Selection: relayselect.Decision{SchemaVersion: 1, NodeID: node.Name, TargetID: target, State: "unknown", Reason: "ownership_unavailable", Candidates: []relayselect.Candidate{}}, Application: relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: target, State: "blocked", Reason: "ownership_unavailable"}}, err
+	}
+	defer cache.Close()
+	defer engine.Close()
+	return engine.ReconcileTarget(ctx, target, controller, selector, timeout)
 }
 
 func collectTargetObservation(ctx context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration) relayapply.TargetReport {

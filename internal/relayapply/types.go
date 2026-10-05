@@ -30,6 +30,7 @@ var ErrRecovery = errors.New("candidate recovery required")
 type Entry struct {
 	LeaseVersion   int                 `json:"lease_version,omitempty"`
 	ApprovalBootNS uint64              `json:"approval_boot_ns,omitempty"`
+	ProbeScope     int                 `json:"probe_scope,omitempty"` // 1: device-bound application candidates
 	ProbeRouting   bool                `json:"probe_routing,omitempty"`
 	Controller     string              `json:"controller_id"`
 	Node           string              `json:"node_id"`
@@ -79,6 +80,8 @@ type Engine struct {
 	unlock    func()
 	save      func([]byte) error
 	uncertain bool
+	probe     func(context.Context, Entry, relaycatalog.Target) (targetProof, error)
+	appProbe  func(context.Context, TargetGuard, Entry, relaycatalog.Target) (ApplicationProof, error)
 }
 
 func token() (string, uint32, uint32, error) {
@@ -92,6 +95,9 @@ func token() (string, uint32, uint32, error) {
 }
 
 func validateEntry(e Entry, node string) error {
+	if e.ProbeScope < 0 || e.ProbeScope > 1 || e.ProbeScope == 1 && (!e.ProbeRouting || e.LeaseVersion != 3) {
+		return errors.New("invalid probe scope")
+	}
 	if e.LeaseVersion != 0 && e.LeaseVersion != 3 || (e.LeaseVersion == 0) != (e.ApprovalBootNS == 0) {
 		return errors.New("invalid node lease version or approval bound")
 	}

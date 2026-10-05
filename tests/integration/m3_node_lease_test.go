@@ -187,6 +187,9 @@ func checkNodeLeaseSelection(t *testing.T, f *m3AuthorityFixture, target string)
 }
 
 func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
+	checkProtectedSlowProbes(t, f, false)
+}
+func checkProtectedSlowProbes(t *testing.T, f *m3AuthorityFixture, apply bool) {
 	t.Helper()
 	(relayUplink{relay: f.target}).nft(t, `table inet slow_node_target {
  chain input { type filter hook input priority -310; policy accept;
@@ -195,7 +198,12 @@ func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
 }`)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 	defer cancel()
-	cmd := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "select", "--config", f.node, "--target-id", "app", "--samples", "2", "--interval", "100ms", "--probe-timeout", "2s")
+	args := []string{integrationBinary(t), "node", "relay", "select"}
+	if apply {
+		args = []string{integrationBinary(t), "node", "relay", "target", "reconcile"}
+	}
+	args = append(args, "--config", f.node, "--target-id", "app", "--samples", "2", "--interval", "100ms", "--probe-timeout", "2s")
+	cmd := netCommand(ctx, f.robot, args...)
 	output, err := os.Create(filepath.Join(f.results, "slow-selection.jsonl"))
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +243,16 @@ func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
 			}
 			for _, line := range lines {
 				var decision relayselect.Decision
-				if json.Unmarshal([]byte(line), &decision) != nil || decision.SchemaVersion != 1 || decision.TargetID != "app" || decision.Applied || decision.DesiredPathID != "" || decision.Error() == nil {
+				if apply {
+					var result relayapply.TargetReconcileResult
+					if json.Unmarshal([]byte(line), &result) != nil || result.Applied || !result.Application.Guarded {
+						t.Fatal("slow apply escaped quarantine", line)
+					}
+					decision = result.Selection
+				} else if err := json.Unmarshal([]byte(line), &decision); err != nil {
+					t.Fatal(err)
+				}
+				if decision.SchemaVersion != 1 || decision.TargetID != "app" || decision.Applied || decision.DesiredPathID != "" || decision.Error() == nil {
 					t.Fatal("invalid slow observation decision", line)
 				}
 			}
@@ -244,7 +261,7 @@ func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
 				t.Fatal("target blackhole did not receive packets")
 			}
 			netOutput(t, f.target, "nft", "delete", "table", "inet", "slow_node_target")
-			writeM3Report(t, filepath.Join(f.results, "node-slow-probes.json"), map[string]any{"completed": !t.Failed(), "samples": samples, "duration_seconds": time.Since(started).Seconds(), "all_eight_kernel_leases_active": true, "negative_decisions": len(lines), "blackhole_packets_observed": true})
+			writeM3Report(t, filepath.Join(f.results, "node-slow-probes.json"), map[string]any{"completed": !t.Failed(), "samples": samples, "duration_seconds": time.Since(started).Seconds(), "all_eight_kernel_leases_active": true, "negative_decisions": len(lines), "blackhole_packets_observed": true, "application_reconcile": apply, "second_app_payload_verified": apply})
 			return
 		default:
 		}
@@ -271,6 +288,11 @@ func checkNodeLeaseSlowProbes(t *testing.T, f *m3AuthorityFixture) {
 			state, ok := states[p.Pin.WGInterface]
 			if !ok || state.Error != "" || !state.State.Active {
 				t.Fatalf("probe starved lease %s: %+v", p.PathID, state)
+			}
+		}
+		if apply {
+			if p := applicationPayload(t, f, "198.18.0.3"); !p.OK {
+				t.Fatal("slow target starved second app", p)
 			}
 		}
 		samples++

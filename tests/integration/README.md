@@ -118,3 +118,13 @@ VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-m3-kernel-delay \
 controller 단절 중 유효 승인 유지, supervisor 사망·offline 재시작, 실제 승인 만료와
 새 승인 복구를 별도 uplink TCP로 검사한다. [구성과 판정](../../docs/validation/m3-control-isolation.md)에
 fixture 경로 선택과 제품 자동전환의 경계, 재사용 입력·결과를 명시한다.
+
+## Application target routing
+
+`scripts/test-m3-target-application.sh` runs the #159 application contract in
+disposable network-none containers: colocated/separate controllers, 1/4/8
+prepared candidates, unbound payload/NAT evidence, quarantine of existing TCP,
+automatic failover, process death and node-only approval expiry/revocation.
+The fixture provisions rp_filter only inside its owned robot namespace using
+a temporary private proc mount. No host sysctl, network, clock or power changes.
+See [deployment prerequisites](../../docs/deployment/node-application-routing.md).

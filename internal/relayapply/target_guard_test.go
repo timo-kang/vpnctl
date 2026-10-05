@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -51,6 +52,9 @@ func (m *targetMachine) run(_ context.Context, _ string, name string, args ...st
 	switch args[1] {
 	case "route":
 		o = object{"type": "unreachable", "dst": "default", "table": number("table"), "protocol": number("proto"), "metric": number("metric")}
+		if args[3] != "unreachable" {
+			o = object{"dst": args[3], "table": number("table"), "protocol": number("proto"), "metric": number("metric"), "dev": values["dev"], "prefsrc": values["src"], "scope": values["scope"]}
+		}
 		rows = &m.routes
 	case "rule":
 		o = object{"priority": number("priority"), "src": "all", "dst": values["to"], "iif": values["iif"], "fwmark": uint32(0), "table": number("lookup"), "protocol": number("protocol")}
@@ -60,6 +64,13 @@ func (m *targetMachine) run(_ context.Context, _ string, name string, args ...st
 	}
 	index := slices.IndexFunc(*rows, func(r object) bool { return reflect.DeepEqual(r, o) })
 	if args[2] == "add" {
+		if args[1] == "route" {
+			for _, row := range *rows {
+				if fmt.Sprint(row["table"]) == fmt.Sprint(o["table"]) && str(row, "dst") == str(o, "dst") && fmt.Sprint(row["metric"]) == fmt.Sprint(o["metric"]) {
+					return nil, errors.New("route key exists")
+				}
+			}
+		}
 		if index >= 0 {
 			return nil, errors.New("exists")
 		}

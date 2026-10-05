@@ -2,7 +2,7 @@
 
 `node relay select`는 준비된 `(relay, underlay, target)` 후보의 실제 TCP 도달성을 검사하고
 목적지별 **목표 경로**를 출력한다. `desired_path_id`는 적용 권한이나 적용 완료 증거가 아니다.
-`applied=false`이며 앱 route를 바꾸지 않는다. 앱 경로 stage/commit/rollback은 #23의 다음 단계다.
+`applied=false`이며 앱 route를 바꾸지 않는다. 앱 경로 적용은 별도 [target reconcile](node-target-application.md)로 수행한다.
 
 ## 준비와 호출
 
@@ -23,12 +23,14 @@ vpnctl node relay select --config node.yaml --target-id app --mode manual --path
 
 `--probe-routes`는 기존 후보 전송 table 안에 승인 target prefix들의 WG route와
 **후보 내부 주소 /32를 source로 지정한 rule**을 설치한다. 그러므로 명시적으로 그 내부 주소를
-bind한 socket만 이 경로를 사용한다. 일반 unbound 앱의 경로는 생기지 않는다. 동일한 table의
+bind한 socket과 이미 그 source를 가진 연결이 이 경로를 사용할 수 있다. 새 unbound 앱의 경로를
+만들지는 않지만 기존 앱 차단용으로는 부족하다. 실제 앱 적용은 `--app-routes`의 장치 지정
+probe rule만 허용한다. 동일한 table의
 endpoint 경로와 종결 `unreachable default`는 유지한다. 일반 앱의 고정 source 제공·세션 보존은
 이 기능의 계약이 아니다.
 
 초기 시험에서는 앱 경로를 제거하자 `rp_filter=2`가 TCP 반환 패킷을 버렸다. source rule은
-후보별 reverse lookup도 가능하게 한다. 필터를 끄는 우회는 하지 않는다. source rule priority는
+후보별 reverse lookup도 가능하게 한다. 이 관측 전용 모드는 필터를 바꾸지 않는다. 앱 적용 모드의 별도 배포 전제는 위 계약을 따른다. source rule priority는
 28000..31999, 기존 transport mark rule 뒤/main rule 앞이다. 충돌·앞선 source 가로채기 rule은
 거절하며 숫자 범위의 독점 예약을 가정하지 않는다. source가 같지만 다른 target인 트래픽도 이
 rule을 조회하므로, 후보 내부 주소는 승인 target 통신 전용으로 사용해야 한다.

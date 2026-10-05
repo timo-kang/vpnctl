@@ -3,6 +3,8 @@
 package relayapply
 
 import (
+	"context"
+	"fmt"
 	"net/netip"
 	"strings"
 )
@@ -15,7 +17,20 @@ func probeRuleMatches(o object, e Entry) bool {
 		return false
 	}
 	source := strings.TrimSuffix(e.Candidate.InnerAddress, "/32")
-	return n(o, "priority") == probePriority(e) && (str(o, "src") == source || str(o, "src") == e.Candidate.InnerAddress) && n(o, "table") == e.Candidate.Pin.Table && n(o, "protocol") == 186 && only(o, "priority", "src", "table", "protocol")
+	keys := []string{"priority", "src", "table", "protocol"}
+	if e.ProbeScope == 1 {
+		if str(o, "oif") != e.Candidate.Pin.WGInterface {
+			return false
+		}
+		keys = append(keys, "oif")
+		if detached, ok := o["oif_detached"]; ok {
+			if e.Phase != "releasing" || detached != nil {
+				return false
+			}
+			keys = append(keys, "oif_detached")
+		}
+	}
+	return n(o, "priority") == probePriority(e) && (str(o, "src") == source || str(o, "src") == e.Candidate.InnerAddress) && n(o, "table") == e.Candidate.Pin.Table && n(o, "protocol") == 186 && only(o, keys...)
 }
 func probeRouteMatches(o object, e Entry) bool {
 	if !e.ProbeRouting {
@@ -35,7 +50,11 @@ func probeRouteArgs(e Entry, verb, prefix string) []string {
 	return []string{"-4", "route", verb, prefix, "dev", e.Candidate.Pin.WGInterface, "src", strings.TrimSuffix(e.Candidate.InnerAddress, "/32"), "table", decimal(e.Candidate.Pin.Table), "proto", protocol, "metric", decimal(e.Metric)}
 }
 func probeRuleArgs(e Entry, verb string) []string {
-	return []string{"-4", "rule", verb, "priority", decimal(probePriority(e)), "from", e.Candidate.InnerAddress, "lookup", decimal(e.Candidate.Pin.Table), "protocol", protocol}
+	args := []string{"-4", "rule", verb, "priority", decimal(probePriority(e)), "from", e.Candidate.InnerAddress, "lookup", decimal(e.Candidate.Pin.Table), "protocol", protocol}
+	if e.ProbeScope == 1 {
+		args = append(args, "oif", e.Candidate.Pin.WGInterface)
+	}
+	return args
 }
 
 func probeSourceMayMatch(o object, e Entry) bool {
@@ -55,4 +74,25 @@ func probeSourceMayMatch(o object, e Entry) bool {
 	}
 	inner, err := netip.ParsePrefix(e.Candidate.InnerAddress)
 	return err != nil || p.Contains(inner.Addr())
+}
+
+// Device-bound probe rules are intentionally invisible to unbound flows and
+// Linux's initial reverse-path lookup. Require a deployment-provisioned setting;
+// never change namespace-wide settings or another manager's interfaces here.
+func (k kernel) checkProbeEnvironment(ctx context.Context, e Entry, fresh bool) error {
+	if e.ProbeScope != 1 {
+		return nil
+	}
+	iface := e.Candidate.Pin.WGInterface
+	if fresh {
+		iface = "default"
+	}
+	for _, name := range []string{"all", iface} {
+		path := "/proc/sys/net/ipv4/conf/" + name + "/rp_filter"
+		value, err := k.run(ctx, "", "cat", path)
+		if err != nil || strings.TrimSpace(string(value)) != "0" {
+			return fmt.Errorf("application candidates require deployment rp_filter=0 at %s: %w", path, ErrConflict)
+		}
+	}
+	return nil
 }
