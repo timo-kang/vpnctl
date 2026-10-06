@@ -252,6 +252,23 @@ regressions, vet, YAML/Bash and diff checks also passed. Artifacts and logs are
 separately at `...-stable-scope-race`; its final result and the revised full CI
 verdict must be confirmed in #171 / its PR before merge.
 
+## Waiting-scope migration review
+
+Final self-review found that returning a conflict for an old waiting intent's
+scope overlapping a newly assigned catalog table could block the replan that
+resolves that overlap. Ambiguous tables now receive no scoped-event exception;
+their events remain global and normal ownership-checked rebuilding can continue.
+A deterministic regression constructs the missing-entry/current-entry overlap,
+checks conservative omission without an error, and checks restoration after
+retiring the stale intent. It does not change approval, ownership or packet gates.
+
+Focused race regressions passed (`/tmp/vpnctl-preparation-ambiguous-scope-race.log`),
+then the complete relayapply/underlayevent race packages passed (207.427s / 1.163s)
+in `...-migration-full-race.log`. The complete real-kernel race suite passed in
+`/tmp/vpnctl-preparation-migration-race`: capacity 135.79s, crash 32.78s,
+ENOSPC 11.33s, recovery 102.02s, foreign-state preservation 113.07s. All fourteen
+detailed completion reports were valid. Final revised-head CI remains required.
+
 ## Qualification boundary
 
 The recovery watchdog (60s after foreign-fault removal / 120s for underlay

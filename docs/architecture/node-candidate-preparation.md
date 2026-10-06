@@ -99,6 +99,10 @@ journal without invalidating independent underlays. A newly installed entry must
 still pass the available-resource check; the stable tuple never adopts existing
 kernel objects. Release retires the intent's event scope. Catalog changes that
 move the table or underlay establish a new tuple and can invalidate globally.
+If old waiting intents and current entries claim different tuples for the same
+table during catalog slot migration, that table receives no scoped exception:
+its events remain global while owned cleanup/replanning continues. The mapping
+cannot resolve conflicting ownership or block the replan that resolves it.
 At most eight installed-entry scopes plus eight waiting-intent scopes are
 tracked; the installed candidate limit remains eight.
 Packet/approval/ownership verification is still required after any event.

@@ -477,36 +477,36 @@ func terminalScope(entry Entry) relayobserve.TerminalScope {
 }
 
 func (e *Engine) syncTerminalScopes(ctx context.Context) error {
-	var scopes []relayobserve.TerminalScope
 	seen := map[uint32]relayobserve.TerminalScope{}
-	add := func(scope relayobserve.TerminalScope) error {
+	ambiguous := map[uint32]bool{}
+	add := func(scope relayobserve.TerminalScope) {
 		configured := false
 		for _, u := range e.underlays {
 			configured = configured || u.ID == scope.UnderlayID
 		}
 		if !configured {
-			return nil
+			return
 		}
-		if old, ok := seen[scope.Table]; ok {
-			if old != scope {
-				return ErrConflict
-			}
-			return nil
+		if old, ok := seen[scope.Table]; ok && old != scope {
+			ambiguous[scope.Table] = true
 		}
 		seen[scope.Table] = scope
-		scopes = append(scopes, scope)
-		return nil
 	}
 	for _, entry := range e.journal.Entries {
-		if err := add(terminalScope(entry)); err != nil {
-			return err
-		}
+		add(terminalScope(entry))
 	}
 	// Waiting intents retain scope through the durable removal/install gap.
 	// Explicit release removes the intent and therefore retires this scope.
 	for _, p := range e.journal.Preparations {
-		if err := add(p.TerminalScope); err != nil {
-			return err
+		add(p.TerminalScope)
+	}
+	var scopes []relayobserve.TerminalScope
+	for table, scope := range seen {
+		// Catalog slot migration can overlap an old waiting intent with a new
+		// binding. No tuple proves one underlay then: retain global invalidation,
+		// but do not prevent the normal owned cleanup/replan from resolving it.
+		if !ambiguous[table] {
+			scopes = append(scopes, scope)
 		}
 	}
 	return relayobserve.SetTerminalScopes(ctx, scopes)

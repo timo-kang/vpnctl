@@ -641,3 +641,45 @@ func TestPreparationTerminalIdentitySurvivesMissingEntryAndRestart(t *testing.T)
 		t.Fatal("released scope survived", err, capture.scopes)
 	}
 }
+
+func TestPreparationAmbiguousWaitingScopeDoesNotDeadlockReplan(t *testing.T) {
+	e, _, _, now := preparationFixture(t)
+	ctx := context.Background()
+	if _, err := e.RequestPreparation(ctx, "p0", ""); err != nil {
+		t.Fatal(err)
+	}
+	readyPreparation(t, e, now, "p0")
+	if _, err := e.PrepareApplication(ctx, "p1", ""); err != nil {
+		t.Fatal(err)
+	}
+	// During catalog slot migration, p0 has been removed while its old table
+	// has become p1's current table. Its retained tuple cannot classify events
+	// affecting the new binding, nor may it stop cleanup/replanning forever.
+	i := e.index("p0")
+	e.journal.Entries = append(e.journal.Entries[:i], e.journal.Entries[i+1:]...)
+	p := &e.journal.Preparations[0]
+	p.Phase = "waiting"
+	live := terminalScope(e.journal.Entries[e.index("p1")])
+	p.TerminalScope.Table = live.Table
+	p.TerminalScope.Metric = live.Metric ^ 1
+	if err := validatePreparations(e.journal); err != nil {
+		t.Fatal(err)
+	}
+	capture := &preparationScopeCapture{}
+	observed := relayobserve.WithUnderlayEvents(ctx, capture)
+	if err := e.syncTerminalScopes(observed); err != nil {
+		t.Fatal("replanning blocked by stale event scope", err)
+	}
+	if len(capture.scopes) != 0 {
+		t.Fatal("ambiguous table scoped as one underlay", capture.scopes)
+	}
+	// Once the waiting intention is explicitly released, current ownership is
+	// unambiguous again. No new approval or route is granted by this operation.
+	e.journal.Preparations = nil
+	if err := e.syncTerminalScopes(observed); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(capture.scopes, []relayobserve.TerminalScope{live}) {
+		t.Fatal("current scope not restored", capture.scopes)
+	}
+}
