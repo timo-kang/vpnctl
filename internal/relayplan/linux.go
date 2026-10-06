@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"vpnctl/internal/relayobserve"
 )
 
 var errNoRoute = errors.New("endpoint unreachable")
@@ -41,6 +42,8 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	return b.buffer.Write(p)
 }
 func readIP(ctx context.Context, args ...string) ([]byte, error) {
+	done := relayobserve.Command(ctx, true)
+	defer done()
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	out, stderr := &cappedBuffer{limit: MaxOutputBytes}, &cappedBuffer{limit: 4096}

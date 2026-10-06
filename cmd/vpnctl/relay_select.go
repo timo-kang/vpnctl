@@ -13,6 +13,7 @@ import (
 
 	"vpnctl/internal/config"
 	"vpnctl/internal/relayapply"
+	"vpnctl/internal/relayobserve"
 	"vpnctl/internal/relayselect"
 )
 
@@ -105,11 +106,14 @@ func runNodeRelaySelection(args []string, apply bool) error {
 
 func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration, selector *relayselect.Selector) (relayapply.TargetReconcileResult, error) {
 	started := time.Now()
+	parent, recorder := relayobserve.Start(parent)
 	ctx, cancel := context.WithTimeout(parent, relayapply.MaxDuration)
 	defer cancel()
-	cache, engine, err := openNodeRelayEngine(ctx, node, dir)
+	admission, done := relayobserve.Phase(ctx, "admission")
+	cache, engine, err := openNodeRelayEngine(admission, node, dir)
+	done()
 	if err != nil {
-		return relayapply.TargetReconcileResult{SchemaVersion: 1, StartedAt: started, FinishedAt: time.Now(), Selection: relayselect.Decision{SchemaVersion: 1, NodeID: node.Name, TargetID: target, State: "unknown", Reason: "ownership_unavailable", Candidates: []relayselect.Candidate{}}, Application: relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: target, State: "blocked", Reason: "ownership_unavailable"}}, err
+		return relayapply.TargetReconcileResult{SchemaVersion: 1, StartedAt: started, FinishedAt: time.Now(), Diagnostics: recorder.Snapshot(), Selection: relayselect.Decision{SchemaVersion: 1, NodeID: node.Name, TargetID: target, State: "unknown", Reason: "ownership_unavailable", Candidates: []relayselect.Candidate{}}, Application: relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: target, State: "blocked", Reason: "ownership_unavailable"}}, err
 	}
 	defer cache.Close()
 	defer engine.Close()
@@ -117,11 +121,15 @@ func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig,
 }
 
 func collectTargetObservation(ctx context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration) relayapply.TargetReport {
+	ctx, recorder := relayobserve.Start(ctx)
 	// Release locks between cycles so refresh/prepare can proceed. Busy/corrupt
 	// cache is unknown and immediately withdraws a recommendation, never healthy.
 	unavailable := relayapply.TargetReport{SchemaVersion: 1, NodeID: node.Name, TargetID: target, Reason: "cache_unavailable", Paths: []relayapply.TargetObservation{}}
-	cache, engine, err := openNodeRelayEngine(ctx, node, dir)
+	admission, done := relayobserve.Phase(ctx, "admission")
+	cache, engine, err := openNodeRelayEngine(admission, node, dir)
+	done()
 	if err != nil {
+		unavailable.Diagnostics = recorder.Snapshot()
 		return unavailable
 	}
 	defer cache.Close()

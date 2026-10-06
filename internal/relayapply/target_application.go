@@ -13,6 +13,7 @@ import (
 
 	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relaycatalog"
+	"vpnctl/internal/relayobserve"
 	"vpnctl/internal/relayselect"
 )
 
@@ -34,12 +35,13 @@ type ApplicationProof struct {
 	ConnectTime time.Duration `json:"connect_time_ns"`
 }
 type TargetReconcileResult struct {
-	SchemaVersion int                  `json:"schema_version"`
-	StartedAt     time.Time            `json:"started_at"`
-	FinishedAt    time.Time            `json:"finished_at"`
-	Applied       bool                 `json:"applied"`
-	Selection     relayselect.Decision `json:"selection"`
-	Application   TargetGuardResult    `json:"application"`
+	SchemaVersion int                       `json:"schema_version"`
+	StartedAt     time.Time                 `json:"started_at"`
+	FinishedAt    time.Time                 `json:"finished_at"`
+	Applied       bool                      `json:"applied"`
+	Selection     relayselect.Decision      `json:"selection"`
+	Application   TargetGuardResult         `json:"application"`
+	Diagnostics   *relayobserve.Diagnostics `json:"diagnostics,omitempty"`
 }
 
 func routeForEntry(e Entry) *TargetRoute {
@@ -204,6 +206,8 @@ func (e *Engine) inspectActiveTarget(parent context.Context, g TargetGuard) (Tar
 // quarantineTarget never removes the reservation or repairs foreign state.
 // An interrupted switch is recovered closed, without replaying old observations.
 func (e *Engine) quarantineTarget(parent context.Context, id string) (TargetGuardResult, error) {
+	parent, done := relayobserve.Phase(parent, "quarantine")
+	defer done()
 	i := e.targetIndex(id)
 	if i < 0 {
 		return e.targetFailure(id, "target_not_owned", ErrConflict)
@@ -240,6 +244,8 @@ func (e *Engine) quarantineTarget(parent context.Context, id string) (TargetGuar
 // ReconcileTarget obtains and consumes observations under this engine's shared
 // cache/namespace ownership. No API accepts serialized decisions as authority.
 func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, selector *relayselect.Selector, timeout time.Duration) (out TargetReconcileResult, err error) {
+	parent, recorder := relayobserve.Start(parent)
+	defer func() { out.Diagnostics = recorder.Snapshot() }()
 	out = TargetReconcileResult{SchemaVersion: 1, StartedAt: time.Now(), Application: e.targetResult(id, "blocked", "not_applied")}
 	defer func() {
 		out.FinishedAt = time.Now()
@@ -331,6 +337,8 @@ func (e *Engine) verifyTargetChoice(ctx context.Context, g TargetGuard, route *T
 	return entry, errors.New("candidate decision changed before application")
 }
 func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *TargetRoute, d relayselect.Decision, timeout time.Duration) (TargetGuardResult, error) {
+	ctx, done := relayobserve.Phase(ctx, "apply")
+	defer done()
 	id := old.TargetID
 	b, ok := e.targets.(targetApplicationBackend)
 	if !ok {
@@ -379,6 +387,8 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 	return out, nil
 }
 func (e *Engine) rollbackTarget(ctx context.Context, old TargetGuard, d relayselect.Decision, timeout time.Duration, cause error) (TargetGuardResult, error) {
+	ctx, done := relayobserve.Phase(ctx, "rollback")
+	defer done()
 	id := old.TargetID
 	b := e.targets.(targetApplicationBackend)
 	g := e.journal.Targets[e.targetIndex(id)]

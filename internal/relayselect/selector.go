@@ -48,22 +48,23 @@ type Candidate struct {
 	FailureFraction float64 `json:"connect_failure_fraction"`
 }
 type Decision struct {
-	SchemaVersion  int         `json:"schema_version"`
-	ControllerID   string      `json:"controller_id"`
-	NodeID         string      `json:"node_id"`
-	Generation     uint64      `json:"generation"`
-	TargetID       string      `json:"target_id"`
-	ObservedAt     time.Time   `json:"observed_at"`
-	ValidUntil     time.Time   `json:"valid_until"`
-	Policy         Policy      `json:"policy"`
-	Applied        bool        `json:"applied"`
-	State          string      `json:"state"`
-	Reason         string      `json:"reason"`
-	DesiredPathID  string      `json:"desired_path_id"`
-	PreviousPathID string      `json:"previous_path_id,omitempty"`
-	Changed        bool        `json:"changed"`
-	ChangedAt      time.Time   `json:"changed_at,omitempty"`
-	Candidates     []Candidate `json:"candidates"`
+	SchemaVersion          int                       `json:"schema_version"`
+	ControllerID           string                    `json:"controller_id"`
+	NodeID                 string                    `json:"node_id"`
+	Generation             uint64                    `json:"generation"`
+	TargetID               string                    `json:"target_id"`
+	ObservedAt             time.Time                 `json:"observed_at"`
+	ValidUntil             time.Time                 `json:"valid_until"`
+	Policy                 Policy                    `json:"policy"`
+	Applied                bool                      `json:"applied"`
+	State                  string                    `json:"state"`
+	Reason                 string                    `json:"reason"`
+	DesiredPathID          string                    `json:"desired_path_id"`
+	PreviousPathID         string                    `json:"previous_path_id,omitempty"`
+	Changed                bool                      `json:"changed"`
+	ChangedAt              time.Time                 `json:"changed_at,omitempty"`
+	Candidates             []Candidate               `json:"candidates"`
+	ObservationDiagnostics *relayobserve.Diagnostics `json:"observation_diagnostics,omitempty"`
 }
 type history struct {
 	fingerprint  string
@@ -104,6 +105,7 @@ func (s *Selector) RecordApplied(path string, changedAt time.Time) {
 func (s *Selector) Decide(report relayobserve.TargetReport) Decision {
 	now := s.now()
 	d := Decision{SchemaVersion: 1, ControllerID: report.ControllerID, NodeID: report.NodeID, Generation: report.Generation, TargetID: report.TargetID, ObservedAt: now, ValidUntil: now, Policy: s.policy, State: "blocked", Reason: "observation_unavailable", Candidates: []Candidate{}}
+	d.ObservationDiagnostics = report.Diagnostics
 	previous := s.selected
 	finish := func(path, state, reason string) Decision {
 		if path != s.selected {

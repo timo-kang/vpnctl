@@ -49,6 +49,8 @@ func (e *Engine) candidateProbe() func(context.Context, Entry, relaycatalog.Targ
 }
 
 func (e *Engine) observeTarget(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) (out TargetReport, err error) {
+	parent, recorder := relayobserve.Start(parent)
+	defer func() { out.Diagnostics = recorder.Snapshot() }()
 	out = TargetReport{SchemaVersion: 1, TargetID: targetID, StartedAt: time.Now(), Paths: []TargetObservation{}}
 	defer func() {
 		out.ObservedAt = time.Now()
@@ -145,6 +147,12 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 }
 
 func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) TargetObservation {
+	return e.observePreparedGated(ctx, entry, target, timeout, out, probe, nil)
+}
+
+// Only the socket proof may overlap. Approval/cache, inventory, kernel checks
+// and any fail-closed lease mutation use the shared, context-bounded gate.
+func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), gate chan struct{}) TargetObservation {
 	if entry.LeaseVersion != 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 3*time.Second)
@@ -157,6 +165,11 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 			out.ObservedAt = time.Now()
 		}
 		return out
+	}
+	ctx, finishStage, stageErr := observationStage(ctx, "precheck", gate)
+	defer func() { finishStage() }()
+	if stageErr != nil {
+		return finish("unknown", "observation_deadline")
 	}
 	if !entry.ProbeRouting {
 		return finish("unknown", "probe_routing_not_prepared")
@@ -181,10 +194,18 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 	if err = inventoryMatches(ctx, entry, e.underlays, e.collector); err != nil {
 		return finish("unknown", "inventory_changed")
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	finishStage()
+	finishStage = func() {}
+	probeCtx, endProbe := relayobserve.Phase(ctx, "probe")
+	probeCtx, cancel := context.WithTimeout(probeCtx, timeout)
 	proof, probeErr := probe(probeCtx, entry, target)
 	out.ObservedAt = time.Now()
 	cancel()
+	endProbe()
+	ctx, finishStage, stageErr = observationStage(ctx, "postcheck", gate)
+	if stageErr != nil {
+		return finish("unknown", "observation_deadline")
+	}
 	// A successful TCP connect cannot override a concurrent ownership or
 	// inventory change. Even a network failure is attributable only after checks.
 	ready, err = e.backend.Check(ctx, entry, false)
@@ -345,4 +366,17 @@ func (k kernel) targetRoute(ctx context.Context, entry Entry, target relaycatalo
 		return errors.New("target route does not use approved candidate")
 	}
 	return nil
+}
+
+func observationStage(ctx context.Context, phase string, gate chan struct{}) (context.Context, func(), error) {
+	ctx, done := relayobserve.Phase(ctx, phase)
+	if gate == nil {
+		return ctx, done, ctx.Err()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx, done, ctx.Err()
+	case gate <- struct{}{}:
+		return ctx, func() { <-gate; done() }, ctx.Err()
+	}
 }
