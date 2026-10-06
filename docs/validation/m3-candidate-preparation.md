@@ -148,6 +148,35 @@ Full apply/CLI race also passed (203.044s / 44.855s), and the additional shared
 BOOTTIME / parent-deadline headroom regressions passed independently. These are
 local results; the revised full CI verdict is recorded in #171 / its PR.
 
+## Approval-time fixture correction
+
+The dedicated lifecycle job in
+[CI 37436872347](https://github.com/timo-kang/vpnctl/actions/runs/37436872347)
+finished in 244.161s but found a flaky new expiry/rearm fixture. The fake response
+used `time.Now()` values retaining process-local monotonic components, unlike the
+controller's UTC timestamps and actual JSON response. Duration arithmetic before
+and after the UTC/JSON boundary could differ by nanoseconds and correctly fail
+cache witness consistency validation. A standalone clock-read diagnostic
+reproduced a 10ns discrepancy without changing any host clock; repeated original
+expiry tests reproduced the cache error locally.
+
+The fixture now uses controller-style UTC timestamps, and its shared fake API
+performs a JSON round trip. Production approval validation and expiry thresholds
+are unchanged. Twenty repetitions of all three expiry/rearm stages passed
+(60 scenarios, 98.174s), and the existing observation-expiry case passed ten
+repetitions (22.448s). Original failing logs are retained at
+`/tmp/vpnctl-preparation-ci-37436872347-lifecycle.log` and
+`/tmp/vpnctl-preparation-expiry-before-utc.log`; corrected runs are
+`...-expiry-after-utc.log` and `...-observation-wire-time.log`.
+That CI also passed the common Go race/vet/build job and both complete rebuilding
+profiles. All detailed fault reports were complete. The race capacity repair
+intervals were 63.71–68.49s at healthy positions 0/3/7, with maximum fresh
+observation gap 6.868s, peak 28 FDs and 85,384KiB RSS. Production intervals were
+35.66–39.33s, maximum gap 4.685s, peak 29 FDs and 29,372KiB RSS. Raw artifacts are
+`/tmp/vpnctl-preparation-ci-37436872347-{production,race}`. Those passing jobs do
+not turn the overall run with the fixture failure into a pass.
+The final revised-head CI result remains the merge gate.
+
 ## Qualification boundary
 
 The recovery watchdog (60s after foreign-fault removal / 120s for underlay

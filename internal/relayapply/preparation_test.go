@@ -465,7 +465,9 @@ func TestPreparationExpiryAndOfflineCannotRearm(t *testing.T) {
 			}
 			grant := *r.Catalog
 			grant.Generation++
-			grant.ExpiresAt = time.Now().Add(time.Second)
+			// Match the controller's UTC / JSON wire timestamps. In-process
+			// monotonic components are not part of an authenticated response.
+			grant.ExpiresAt = time.Now().UTC().Add(time.Second)
 			grant.IssuedAt = grant.ExpiresAt.Add(-time.Minute)
 			if _, err := e.cache.Refresh(context.Background(), observationIssuer{grant}); err != nil {
 				t.Fatal(err)
@@ -486,7 +488,7 @@ func TestPreparationExpiryAndOfflineCannotRearm(t *testing.T) {
 				t.Fatal("expired approval advanced creation or lease")
 			}
 			grant.Generation++
-			grant.IssuedAt = time.Now()
+			grant.IssuedAt = time.Now().UTC()
 			grant.ExpiresAt = grant.IssuedAt.Add(time.Hour)
 			if _, err := e.cache.Refresh(context.Background(), observationIssuer{grant}); err != nil {
 				t.Fatal(err)
