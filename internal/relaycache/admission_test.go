@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func newAdmission(t *testing.T, dir string) *admission {
@@ -254,6 +256,9 @@ func TestAdmissionRejectsDirectoryReplacement(t *testing.T) {
 	parent := privateTempDir(t)
 	dir := filepath.Join(parent, "cache")
 	holder := openCache(t, dir)
+	replacementDir := filepath.Join(parent, "replacement")
+	replacement := openCache(t, replacementDir)
+	replacement.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	result := make(chan error, 1)
@@ -278,11 +283,12 @@ func TestAdmissionRejectsDirectoryReplacement(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Rename(dir, filepath.Join(parent, "old")); err != nil {
+	// Both directories are initialized before the atomic exchange. A two-step
+	// rename legitimately returns ErrMissing between removal and creation and
+	// would never exercise the identity comparison this test is checking.
+	if err := unix.Renameat2(unix.AT_FDCWD, dir, unix.AT_FDCWD, replacementDir, unix.RENAME_EXCHANGE); err != nil {
 		t.Fatal(err)
 	}
-	replacement := openCache(t, dir)
-	replacement.Close()
 	if err := <-result; !errors.Is(err, ErrUnsafe) {
 		t.Fatal("queue admitted a different cache", err)
 	}
