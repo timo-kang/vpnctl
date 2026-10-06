@@ -457,6 +457,14 @@ func decisionUnderlay(ctx context.Context, entry Entry, d relayselect.Decision, 
 	if err != nil || current != proofGeneration {
 		return errors.New("underlay generation changed")
 	}
+	// A live event read may consume the last remaining decision lifetime.
+	// Include that work in the validity/cancellation gate for commit/rollback.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !time.Now().Before(d.ValidUntil) {
+		return ErrLeaseExpired
+	}
 	for _, c := range d.Candidates {
 		if c.PathID == entry.Candidate.PathID && c.Eligible && c.UnderlayGeneration == current {
 			return nil

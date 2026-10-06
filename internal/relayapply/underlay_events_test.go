@@ -144,3 +144,63 @@ func (b *changingApplicationRoutes) SetRoutes(ctx context.Context, g TargetGuard
 	}
 	return err
 }
+
+type underlayEventsFunc func(context.Context, string) (string, error)
+
+func (f underlayEventsFunc) Generation(ctx context.Context, id string) (string, error) {
+	return f(ctx, id)
+}
+
+func TestUnderlayFinalReadCannotCommitExpiredOrCancelledDecision(t *testing.T) {
+	for _, mode := range []string{"deadline", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			e, _, _, _ := appFixture(t)
+			events := &testUnderlayEvents{}
+			ctx, cancel := context.WithCancel(relayobserve.WithUnderlayEvents(context.Background(), events))
+			defer cancel()
+			s := appSelector(t)
+			_, _ = e.ReconcileTarget(ctx, "app", "", s, time.Second)
+			report, err := e.ObserveTarget(ctx, "app", "", time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := s.Decide(report)
+			if d.DesiredPathID != "p0" {
+				t.Fatal(d)
+			}
+			d.ValidUntil = time.Now().Add(time.Second)
+			g := e.journal.Targets[e.targetIndex("app")]
+			entry := e.journal.Entries[e.index("p0")]
+			afterProof, finalRead := false, false
+			reads := 0
+			original := e.appProbe
+			e.appProbe = func(ctx context.Context, g TargetGuard, entry Entry, target relaycatalog.Target) (ApplicationProof, error) {
+				proof, err := original(ctx, g, entry, target)
+				afterProof = true
+				return proof, err
+			}
+			ctx = relayobserve.WithUnderlayEvents(ctx, underlayEventsFunc(func(ctx context.Context, id string) (string, error) {
+				generation, err := events.Generation(ctx, id)
+				if afterProof {
+					reads++
+				}
+				if reads == 2 {
+					finalRead = true
+					if mode == "deadline" {
+						time.Sleep(time.Until(d.ValidUntil) + time.Millisecond)
+					} else {
+						cancel()
+					}
+				}
+				return generation, err
+			}))
+			out, err := e.applyTarget(ctx, g, routeForEntry(entry), d, time.Second)
+			if !finalRead {
+				t.Fatal("final read boundary not exercised", out, err)
+			}
+			if err == nil || out.Activated {
+				t.Fatal("decision committed after last read consumed validity", out, err)
+			}
+		})
+	}
+}
