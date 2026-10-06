@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -325,6 +326,29 @@ func TestTargetApplicationProbeRuleScope(t *testing.T) {
 	}
 	if err := k.checkProbeEnvironment(context.Background(), entry, false); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPendingDeviceBoundProbeDoesNotQuarantineIndependentApp(t *testing.T) {
+	e, m, _, _ := appFixture(t)
+	entry := e.journal.Entries[0]
+	guard := e.journal.Targets[0]
+	guard.ApplicationVersion = 1
+	for _, phase := range []string{"preparing", "releasing"} {
+		entry.Phase = phase
+		s, err := (kernel{run: m.run}).snapshot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.routes = append(s.routes, object{"dst": prefixes(entry)[0], "dev": entry.Candidate.Pin.WGInterface, "prefsrc": strings.TrimSuffix(entry.Candidate.InnerAddress, "/32"), "table": decimal(entry.Candidate.Pin.Table), "protocol": "186", "metric": decimal(entry.Metric)})
+		s.rules = append(s.rules, object{"priority": decimal(probePriority(entry)), "src": entry.Candidate.InnerAddress, "table": decimal(entry.Candidate.Pin.Table), "protocol": "186", "oif": entry.Candidate.Pin.WGInterface})
+		if ready, err := targetGuardConflicts(s, guard, []Entry{entry}, false); err != nil || !ready {
+			t.Fatal(phase, ready, err)
+		}
+		delete(s.rules[len(s.rules)-1], "oif")
+		if _, err := targetGuardConflicts(s, guard, []Entry{entry}, false); err == nil {
+			t.Fatal("pending source-only bypass accepted")
+		}
 	}
 }
 

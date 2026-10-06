@@ -121,7 +121,7 @@ func targetGuardConflicts(s snapshot, e TargetGuard, entries []Entry, fresh bool
 		}
 		owned := false
 		for _, entry := range entries {
-			owned = owned || entry.Phase == "prepared" && probeRouteMatches(o, entry)
+			owned = owned || candidateProbeOwned(entry, e) && probeRouteMatches(o, entry)
 		}
 		if !owned {
 			return false, ErrConflict
@@ -142,13 +142,20 @@ func targetGuardConflicts(s snapshot, e TargetGuard, entries []Entry, fresh bool
 		// No arbitrary source-, UID-, interface- or port-specific rule is adopted.
 		probe := false
 		for _, entry := range entries {
-			probe = probe || entry.Phase == "prepared" && (e.ApplicationVersion == 0 || entry.ProbeScope == 1) && probeRuleMatches(o, entry)
+			probe = probe || candidateProbeOwned(entry, e) && (e.ApplicationVersion == 0 || entry.ProbeScope == 1) && probeRuleMatches(o, entry)
 		}
 		if !probe {
 			return false, ErrConflict
 		}
 	}
 	return route && len(rules) == len(e.Prefixes), nil
+}
+
+// Device-bound probe rules remain isolated from ordinary applications while an
+// owned candidate is being prepared/removed. Their presence must not quarantine
+// an independent target. This exemption grants no candidate readiness or lease.
+func candidateProbeOwned(entry Entry, guard TargetGuard) bool {
+	return entry.Phase == "prepared" || guard.ApplicationVersion == 1 && entry.ProbeScope == 1 && entry.ProbeRouting && entry.LeaseVersion == 3
 }
 func (k targetKernel) Check(ctx context.Context, e TargetGuard, entries []Entry, fresh bool) (bool, error) {
 	s, err := k.snapshot(ctx)

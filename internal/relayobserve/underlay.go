@@ -12,6 +12,23 @@ type UnderlayEvents interface {
 }
 type underlayEventsKey struct{}
 
+// TerminalScope comes only from the locked local apply journal. It scopes
+// notifications for one exact owned unreachable-default tuple; it is never
+// approval, route readiness, or permission to ignore a foreign policy route.
+type TerminalScope struct {
+	UnderlayID    string
+	Table, Metric uint32
+}
+
+func SetTerminalScopes(ctx context.Context, scopes []TerminalScope) error {
+	if events, ok := ctx.Value(underlayEventsKey{}).(interface {
+		SetTerminalScopes(context.Context, []TerminalScope) error
+	}); ok {
+		return events.SetTerminalScopes(ctx, scopes)
+	}
+	return ctx.Err()
+}
+
 func WithUnderlayEvents(ctx context.Context, events UnderlayEvents) context.Context {
 	return context.WithValue(ctx, underlayEventsKey{}, events)
 }

@@ -151,7 +151,7 @@ func ownerLink(l object, e Entry) bool {
 	// WireGuard ignores IFLA_IFALIAS during creation on supported kernels.
 	// The requested ifindex and random group are installed atomically, so a
 	// crash before the alias step still leaves an identifiable creation.
-	return kind(l) == "wireguard" && n(l, "ifindex") == e.LinkIndex && n(l, "group") == e.Metric && (str(l, "ifalias") == e.Alias || e.Phase != "prepared" && str(l, "ifalias") == "")
+	return kind(l) == "wireguard" && n(l, "ifindex") == e.LinkIndex && n(l, "group") == e.Metric && (str(l, "ifalias") == e.Alias || e.Phase != "prepared" && !e.StrictOwner && str(l, "ifalias") == "")
 }
 func only(o object, keys ...string) bool {
 	for key := range o {
@@ -481,55 +481,69 @@ func (k kernel) Remove(ctx context.Context, e Entry) error {
 		}
 	}
 	for _, step := range steps {
+		if err := k.RemoveStep(ctx, e, step); err != nil {
+			return err
+		}
+	}
+	return k.RemoveStep(ctx, e, "verify")
+}
+
+// RemoveStep repeats live ownership validation and at most one deletion. Each
+// removal is idempotent; a crash before recording its completion is safe to retry.
+func (k kernel) RemoveStep(ctx context.Context, e Entry, step string) error {
+	if step == "verify" {
 		s, err := k.snapshot(ctx)
 		if err != nil {
 			return err
 		}
-		if err = conflicts(s, e, false); err != nil {
-			return err
-		}
-		var args []string
-		switch step {
-		case "link":
-			if _, ok := getLink(s, e.Candidate.Pin.WGInterface); ok {
-				if mark := s.marks[e.Candidate.Pin.WGInterface]; mark != 0 && mark != e.Candidate.Pin.FWMark {
-					return ErrConflict
-				}
-				if _, err = k.wireState(ctx, e, true); err != nil {
-					return err
-				}
-				args = []string{"link", "del", "dev", e.Candidate.Pin.WGInterface}
-			}
-		case "probe-source":
-			for _, r := range s.rules {
-				if probeRuleMatches(r, e) {
-					args = probeRuleArgs(e, "del")
-				}
-			}
-		case "rule":
-			for _, r := range s.rules {
-				if ruleMatches(r, e) {
-					args = ruleArgs(e, "del")
-				}
-			}
-		case "endpoint", "guard":
-			for _, r := range s.routes {
-				if routeMatches(r, e, step == "guard") {
-					args = routeArgs(e, "del", step == "guard")
-				}
-			}
-		}
-		if args != nil {
-			if _, err = k.run(ctx, "", "ip", args...); err != nil {
-				return err
-			}
-		}
+		return conflicts(s, e, true)
 	}
 	s, err := k.snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	return conflicts(s, e, true)
+	if err = conflicts(s, e, false); err != nil {
+		return err
+	}
+	var args []string
+	switch step {
+	case "link":
+		if _, ok := getLink(s, e.Candidate.Pin.WGInterface); ok {
+			if mark := s.marks[e.Candidate.Pin.WGInterface]; mark != 0 && mark != e.Candidate.Pin.FWMark {
+				return ErrConflict
+			}
+			if _, err = k.wireState(ctx, e, !e.StrictOwner); err != nil {
+				return err
+			}
+			args = []string{"link", "del", "dev", e.Candidate.Pin.WGInterface}
+		}
+	case "probe-source":
+		for _, r := range s.rules {
+			if probeRuleMatches(r, e) {
+				args = probeRuleArgs(e, "del")
+			}
+		}
+	case "rule":
+		for _, r := range s.rules {
+			if ruleMatches(r, e) {
+				args = ruleArgs(e, "del")
+			}
+		}
+	case "endpoint", "guard":
+		for _, r := range s.routes {
+			if routeMatches(r, e, step == "guard") {
+				args = routeArgs(e, "del", step == "guard")
+			}
+		}
+	default:
+		return errors.New("invalid remove step")
+	}
+	if args != nil {
+		if _, err = k.run(ctx, "", "ip", args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func inventoryMatches(ctx context.Context, e Entry, underlays []relayplan.Underlay, c relayplan.Collector) error {

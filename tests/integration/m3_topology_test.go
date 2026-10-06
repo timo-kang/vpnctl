@@ -111,6 +111,8 @@ func runM3Probe() error {
 			r.Failure = "timeout"
 		case errors.Is(e, syscall.ENETUNREACH) || errors.Is(e, syscall.EHOSTUNREACH):
 			r.Failure = "unreachable"
+		case errors.Is(e, syscall.ENODEV) || errors.Is(e, syscall.EADDRNOTAVAIL):
+			r.Failure = "interface_unavailable"
 		case errors.Is(e, syscall.ECONNREFUSED):
 			r.Failure = "refused"
 		default:

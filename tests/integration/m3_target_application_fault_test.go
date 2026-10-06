@@ -372,15 +372,64 @@ func TestNetns_M3TargetApplicationSlowProbes(t *testing.T) {
 
 func TestNetns_M3TargetApplicationForeignState(t *testing.T) {
 	requireNetwork(t)
+	applicationForeignState(t, false)
+}
+
+func TestNetns_M3PreparationForeignState(t *testing.T) {
+	requireNetwork(t)
+	applicationForeignState(t, true)
+}
+
+func applicationForeignState(t *testing.T, managed bool) {
 	f := applicationFixture(t, true, 4)
+	if managed {
+		enablePreparation(t, f, "p00")
+	}
 	applicationReconcile(t, f, "app2", true, "--mode", "manual", "--path-id", "p11")
 	phases := []string{}
-	for _, kind := range []string{"target-route", "target-rule", "tc", "nft", "rp-filter", "underlay-address"} {
+	kinds := []string{"target-route", "target-rule", "tc", "nft", "rp-filter", "underlay-address"}
+	if managed {
+		kinds = append([]string{"alias", "mark", "peer", "psk"}, kinds...)
+	}
+	for _, kind := range kinds {
+		t.Logf("foreign-state phase: %s", kind)
 		initial := applicationReconcile(t, f, "app", true)
 		iface := f.plan.Paths[0].Pin.WGInterface
 		var snapshot func() string
 		var undo func()
 		switch kind {
+		case "alias":
+			var links []struct {
+				Alias string `json:"ifalias"`
+			}
+			if err := json.Unmarshal([]byte(netOutput(t, f.robot, "ip", "-j", "link", "show", iface)), &links); err != nil || len(links) != 1 {
+				t.Fatal(err)
+			}
+			old := links[0].Alias
+			netOutput(t, f.robot, "ip", "link", "set", iface, "alias", "foreign-preparation-owner")
+			snapshot = func() string { return netOutput(t, f.robot, "ip", "-j", "link", "show", iface) }
+			undo = func() { netOutput(t, f.robot, "ip", "link", "set", iface, "alias", old) }
+		case "mark":
+			old := netOutput(t, f.robot, "wg", "show", iface, "fwmark")
+			netOutput(t, f.robot, "wg", "set", iface, "fwmark", "1")
+			snapshot = func() string { return netOutput(t, f.robot, "wg", "show", iface, "fwmark") }
+			undo = func() { netOutput(t, f.robot, "wg", "set", iface, "fwmark", old) }
+		case "peer":
+			_, pub := wgKeyPair(t)
+			netOutput(t, f.robot, "wg", "set", iface, "peer", pub, "allowed-ips", "198.18.0.254/32")
+			snapshot = func() string { return netOutput(t, f.robot, "wg", "show", iface, "allowed-ips") }
+			undo = func() { netOutput(t, f.robot, "wg", "set", iface, "peer", pub, "remove") }
+		case "psk":
+			key, _ := wgKeyPair(t)
+			file := filepath.Join(f.private, "foreign-psk.key")
+			mustWrite(t, file, key)
+			peer := f.plan.Paths[0].RelayPublicKey
+			netOutput(t, f.robot, "wg", "set", iface, "peer", peer, "preshared-key", file)
+			// Compare a digest inside the namespace; never record the PSK output.
+			snapshot = func() string {
+				return netOutput(t, f.robot, "sh", "-c", `wg show "$1" preshared-keys | sha256sum`, "sh", iface)
+			}
+			undo = func() { netOutput(t, f.robot, "wg", "set", iface, "peer", peer, "preshared-key", "/dev/null") }
 		case "target-route":
 			table := fmt.Sprint(initial.Application.Reservation.Table)
 			netOutput(t, f.robot, "ip", "route", "add", "unreachable", "203.0.114.1/32", "table", table, "proto", "99")
@@ -424,6 +473,9 @@ func TestNetns_M3TargetApplicationForeignState(t *testing.T) {
 				// Removing the source also removes its endpoint routes. Recreate
 				// those candidates explicitly; never expect automatic drift repair.
 				for _, index := range []int{0, 2} {
+					if managed && index == 0 {
+						continue
+					}
 					path := f.plan.Paths[index].PathID
 					f.nodeCall("release", path)
 					netOutput(t, f.robot, integrationBinary(t), "node", "relay", "prepare", "--config", f.node, "--path-id", path, "--app-routes")
@@ -432,6 +484,9 @@ func TestNetns_M3TargetApplicationForeignState(t *testing.T) {
 		}
 		before := snapshot()
 		applicationReconcile(t, f, "app", false, "--mode", "manual", "--path-id", "p00")
+		if managed {
+			time.Sleep(3 * time.Second)
+		} // At least two supervisor retry opportunities.
 		if snapshot() != before {
 			t.Fatal("foreign state modified", kind)
 		}
@@ -440,7 +495,18 @@ func TestNetns_M3TargetApplicationForeignState(t *testing.T) {
 		}
 		undo()
 		nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "recover", "--config", f.node, "--target-id", "app")
-		awaitApplicationCandidates(t, f)
+		if managed {
+			eventually(t, 60*time.Second, "managed candidate after foreign state removal", func() error {
+				for _, p := range f.plan.Paths {
+					if !applicationCandidate(t, f, p).OK {
+						return fmt.Errorf("%s still unavailable", p.PathID)
+					}
+				}
+				return nil
+			})
+		} else {
+			awaitApplicationCandidates(t, f)
+		}
 		phases = append(phases, kind)
 	}
 	applicationReconcile(t, f, "app", true)

@@ -50,7 +50,7 @@ func applicationFixture(t *testing.T, separate bool, size int) *m3AuthorityFixtu
 	for _, p := range f.plan.Paths {
 		netOutput(t, f.robot, integrationBinary(t), "node", "relay", "prepare", "--config", f.node, "--path-id", p.PathID, "--app-routes")
 	}
-	startNodeLeaseWatch(t, f, "application-node-supervisor")
+	f.nodeSupervisor = startNodeLeaseWatch(t, f, "application-node-supervisor")
 	awaitApplicationCandidates(t, f)
 	for _, target := range []string{"app", "app2"} {
 		nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", target)
@@ -77,11 +77,14 @@ func applicationPayload(t *testing.T, f *m3AuthorityFixture, target string) m3Pr
 	return m3Probe{}
 }
 func applicationCandidate(t *testing.T, f *m3AuthorityFixture, p relayplan.Candidate) m3Probe {
+	return applicationCandidateTarget(t, f, p, m3Target)
+}
+func applicationCandidateTarget(t *testing.T, f *m3AuthorityFixture, p relayplan.Candidate, target string) m3Probe {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	cmd := netCommand(ctx, f.robot, f.worker, "-test.run=^TestNetworkWorker$")
-	cmd.Env = append(os.Environ(), "VPNCTL_WORKER=m3-probe", "VPNCTL_PROBE_SOURCE="+strings.TrimSuffix(p.InnerAddress, "/32"), "VPNCTL_PROBE_INTERFACE="+p.Pin.WGInterface)
+	cmd.Env = append(os.Environ(), "VPNCTL_WORKER=m3-probe", "VPNCTL_PROBE_SOURCE="+strings.TrimSuffix(p.InnerAddress, "/32"), "VPNCTL_PROBE_INTERFACE="+p.Pin.WGInterface, "VPNCTL_PROBE_TARGET="+target)
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatal(err, string(b))

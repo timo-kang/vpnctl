@@ -111,6 +111,9 @@ func open(cache *relaycache.Store, underlays []relayplan.Underlay, domain string
 		}
 		seen[entry.Candidate.PathID] = true
 	}
+	if err = validatePreparations(j); err != nil {
+		return nil, err
+	}
 	e.journal = j
 	return e, nil
 }
@@ -174,6 +177,9 @@ func (e *Engine) PrepareApplication(ctx context.Context, path, controller string
 func (e *Engine) prepare(ctx context.Context, path, controller string, probeRouting, protected bool, scope int) (Result, error) {
 	if e.uncertain {
 		return failure(path, "reopen_journal_required", relaycache.ErrUncertain)
+	}
+	if e.preparationIndex(path) >= 0 {
+		return failure(path, "automatic_preparation_owned", ErrConflict)
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
@@ -338,13 +344,39 @@ func (e *Engine) prepare(ctx context.Context, path, controller string, probeRout
 	return r, nil
 }
 func (e *Engine) Release(ctx context.Context, path string) (Result, error) {
+	return e.release(ctx, path, true)
+}
+func (e *Engine) release(ctx context.Context, path string, explicit bool) (Result, error) {
 	if e.uncertain {
 		return failure(path, "reopen_journal_required", relaycache.ErrUncertain)
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
+	disabled := false
+	if explicit {
+		if p := e.preparationIndex(path); p >= 0 {
+			if err := e.cache.RevokePreparation(path); err != nil {
+				return failure(path, "preparation_revocation_failed", err)
+			}
+			e.journal.Preparations = append(e.journal.Preparations[:p], e.journal.Preparations[p+1:]...)
+			if e.journal.RebuildCursor == path {
+				e.journal.RebuildCursor = ""
+			}
+			if i := e.index(path); i >= 0 {
+				e.journal.Entries[i].StrictOwner = e.journal.Entries[i].Phase == "prepared" || e.journal.Entries[i].StrictOwner
+				e.journal.Entries[i].Phase = "releasing"
+			}
+			if err := e.persist(); err != nil {
+				return failure(path, "preparation_disabled_cleanup_pending", err)
+			}
+			disabled = true
+		}
+	}
 	i := e.index(path)
 	if i < 0 {
+		if disabled {
+			return result("released", path, "preparation_disabled"), nil
+		}
 		return failure(path, "path_not_owned", ErrConflict)
 	}
 	entry := e.journal.Entries[i]
@@ -381,7 +413,13 @@ func (e *Engine) Recover(ctx context.Context) (Result, error) {
 			i++
 			continue
 		}
-		if _, err := e.Release(ctx, entry.Candidate.PathID); err != nil {
+		// Automatic preparation has its own incremental crash recovery. Manual
+		// recover must neither race that cursor nor revoke the operator's intent.
+		if e.preparationIndex(entry.Candidate.PathID) >= 0 {
+			i++
+			continue
+		}
+		if _, err := e.release(ctx, entry.Candidate.PathID, false); err != nil {
 			return failure(entry.Candidate.PathID, "recovery_required", err)
 		}
 	}
@@ -394,6 +432,7 @@ func (e *Engine) Inspect(ctx context.Context) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
 	r := result("empty", "", "")
+	r.Preparations = e.preparationStatus()
 	var all error
 	for _, entry := range e.journal.Entries {
 		p := PathResult{PathID: entry.Candidate.PathID, Phase: entry.Phase}
