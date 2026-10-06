@@ -15,9 +15,12 @@
   설정 이름의 재등장만 다시 연결한다. 같은 이름·ifindex·주소로 복원돼도 변경
   세대는 되돌리지 않는다. 미설정 RF·짐벌 LAN·EtherCAT 장치를 자동으로 채택하지 않는다.
 - 링크/주소/출구가 식별되는 route는 관련 underlay를 무효화한다. 출구가 불명확한
-  공용 route 및 공유 nexthop 객체 변경은 모든 설정 underlay를 보수적으로 무효화한다.
-  다른 장치의 route, vpnctl 앱 table의 출구 없는 종결 unreachable route는 물리 uplink
-  변화가 아니다. 소유권은 이 필터로 부여하지 않으며 기존 journal/커널 대조를 유지한다.
+  route(모든 table의 blackhole/throw/unreachable 포함) 및 공유 nexthop 객체 변경은
+  모든 설정 underlay를 보수적으로 무효화한다. table 번호·protocol만으로 앱 소유권을
+  추정하지 않는다. 다른 장치로 출구가 명확한 route는 해당 uplink의 변화가 아니다.
+  앱 guard의 최초 생성·회수도 출구 없는 변경이므로 전체 재확인을 유발할 수 있다.
+  정상 앱 전환은 기존 guard를 유지하고 WG 출구가 명확한 route를 쓰므로 이 경우와
+  구분된다. 기존 journal/커널 소유권 대조는 계속 유지한다.
 - 결과의 `underlay_generation`은 프로세스별 임의 epoch와 underlay별 증가 세대를
   묶은 불투명 식별자다. 승인 generation/설치 fingerprint와 별개다. 재시작·이벤트
   유실 후 다시 조회하면 이전 연속 성공을 재사용하지 않는다. 영속적인 건강 증거가 아니다.

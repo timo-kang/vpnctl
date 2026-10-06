@@ -138,12 +138,10 @@ func decode(m message) (event, error) {
 		if m.data[0] != unix.AF_INET {
 			return event{}, nil
 		}
-		table := uint32(m.data[4])
 		if b, ok := attrs[unix.RTA_TABLE]; ok {
 			if len(b) != 4 {
 				return e, ErrUnavailable
 			}
-			table = binary.NativeEndian.Uint32(b)
 		}
 		if b, ok := attrs[unix.RTA_OIF]; ok {
 			i, err := indexAttribute(b)
@@ -182,9 +180,10 @@ func decode(m message) (event, error) {
 			e.global = true
 		}
 		// OIF identifies a pinned underlay even in a non-main transport table.
-		// Global main/local/default or unresolved unicast changes invalidate all.
-		// OIF-less terminal guards in private app tables are not uplink changes.
-		if len(e.indexes) == 0 && (table == unix.RT_TABLE_MAIN || table == unix.RT_TABLE_LOCAL || table == unix.RT_TABLE_DEFAULT || m.data[7] == unix.RTN_UNICAST) {
+		// An OIF-less route may be an external blackhole/throw/unreachable policy
+		// route. Table number or protocol alone never proves application ownership.
+		// Conservatively invalidate all, including app terminal guard creation.
+		if len(e.indexes) == 0 {
 			e.global = true
 		}
 	}

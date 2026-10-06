@@ -165,6 +165,19 @@ func TestNetns_UnderlayEvents(t *testing.T) {
 	if len(after.Errors) != 0 || after.Generations["wifi"] != before.Generations["wifi"] || after.Generations["lan"] != before.Generations["lan"] {
 		t.Fatal("adopted foreign interface", after)
 	}
+	// A foreign terminal route in a custom table has no OIF. Never infer that
+	// it is an owned app guard from its table range or routing protocol.
+	netOutput(t, ns, "ip", "route", "add", "unreachable", "default", "table", "700001", "proto", "186", "metric", "100001")
+	after = eventReply(t, stdin, log, "custom-terminal")
+	if len(after.Errors) != 0 || after.Generations["wifi"] == before.Generations["wifi"] || after.Generations["lan"] == before.Generations["lan"] {
+		t.Fatal("foreign custom terminal route ignored", after)
+	}
+	evidence["custom-terminal"] = after
+	netOutput(t, ns, "ip", "route", "del", "unreachable", "default", "table", "700001", "proto", "186", "metric", "100001")
+	before = eventReply(t, stdin, log, "custom-terminal-removed")
+	if len(before.Errors) != 0 {
+		t.Fatal(before)
+	}
 	// A shared nexthop update can bypass the normal route notification group.
 	netOutput(t, ns, "ip", "nexthop", "add", "id", "17", "via", "198.19.0.2", "dev", "wan0")
 	after = eventReply(t, stdin, log, "nexthop-object")
