@@ -113,7 +113,10 @@ func (e *Engine) approvedTarget(g TargetGuard) (relaycatalog.Target, error) {
 	}
 	return relaycatalog.Target{}, ErrConflict
 }
-func (e *Engine) approvedTargetEntry(ctx context.Context, g TargetGuard, route *TargetRoute) (Entry, relaycatalog.Target, error) {
+
+// targetEntry checks the journal/approval relationship only. Every caller must
+// additionally verify the live inventory, kernel and lease before using it.
+func (e *Engine) targetEntry(g TargetGuard, route *TargetRoute) (Entry, relaycatalog.Target, error) {
 	target, err := e.approvedTarget(g)
 	if err != nil || route == nil {
 		return Entry{}, target, errors.Join(ErrRecovery, err)
@@ -132,6 +135,13 @@ func (e *Engine) approvedTargetEntry(ctx context.Context, g TargetGuard, route *
 	}
 	if !allowed {
 		return entry, target, ErrConflict
+	}
+	return entry, target, nil
+}
+func (e *Engine) approvedTargetEntry(ctx context.Context, g TargetGuard, route *TargetRoute) (Entry, relaycatalog.Target, error) {
+	entry, target, err := e.targetEntry(g, route)
+	if err != nil {
+		return entry, target, err
 	}
 	if err := e.stillApproved(entry); err != nil {
 		return entry, target, err
@@ -320,7 +330,9 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 	return out, err
 }
 func (e *Engine) verifyTargetChoice(ctx context.Context, g TargetGuard, route *TargetRoute, d relayselect.Decision, timeout time.Duration) (Entry, error) {
-	entry, target, err := e.approvedTargetEntry(ctx, g, route)
+	// observePrepared below checks live approval/lease/kernel/inventory both
+	// before and after its fresh TCP proof. Do not repeat a third full precheck.
+	entry, target, err := e.targetEntry(g, route)
 	if err != nil {
 		return entry, err
 	}

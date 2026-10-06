@@ -5,10 +5,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"time"
@@ -75,11 +73,9 @@ func runNodeRelaySelection(args []string, apply bool) error {
 	encoder := json.NewEncoder(os.Stdout)
 	for i := 0; *watch || i < *samples; i++ {
 		var cycleErr error
-		admissionBusy := false
 		if apply {
 			out, err := reconcileApplicationTarget(ctx, cfg.Node, dir, *target, *controller, *timeout, selector)
 			cycleErr = err
-			admissionBusy = out.Selection.Reason == "ownership_unavailable" && errors.Is(err, context.DeadlineExceeded)
 			if err := encoder.Encode(out); err != nil {
 				return err
 			}
@@ -97,14 +93,7 @@ func runNodeRelaySelection(args []string, apply bool) error {
 		if !*watch && i+1 == *samples {
 			return cycleErr
 		}
-		wait := *interval
-		if *watch && admissionBusy {
-			// A failed admission observed nothing. Do not sleep another full
-			// healthy-cycle interval and repeatedly miss the supervisor's yield.
-			// Keep the existing 1s admission bound and a non-spinning, jittered retry.
-			wait = min(wait, 2*relayKernelRetryInterval+time.Duration(rand.Int64N(int64(2*relayKernelRetryInterval))))
-		}
-		timer := time.NewTimer(wait)
+		timer := time.NewTimer(*interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -124,7 +113,7 @@ func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig,
 	cache, engine, err := openNodeRelayEngine(admission, node, dir)
 	done()
 	if err != nil {
-		return relayapply.TargetReconcileResult{SchemaVersion: 1, StartedAt: started, FinishedAt: time.Now(), Diagnostics: recorder.Snapshot(), Selection: relayselect.Decision{SchemaVersion: 1, NodeID: node.Name, TargetID: target, State: "unknown", Reason: "ownership_unavailable", Candidates: []relayselect.Candidate{}}, Application: relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: target, State: "blocked", Reason: "ownership_unavailable"}}, err
+		return relayapply.TargetReconcileResult{SchemaVersion: 1, StartedAt: started, FinishedAt: time.Now(), Diagnostics: recorder.Snapshot(), Selection: relayselect.Decision{SchemaVersion: 1, NodeID: node.Name, TargetID: target, State: "unknown", Reason: nodeAdmissionReason(err), Candidates: []relayselect.Candidate{}}, Application: relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: target, State: "blocked", Reason: nodeAdmissionReason(err)}}, err
 	}
 	defer cache.Close()
 	defer engine.Close()

@@ -86,7 +86,9 @@ Each profile covers colocated/separate controller with 1/4/8 prepared candidates
 and independent targets, plus seven 2s blackholes and one healthy path at
 positions 0/3/7. Mixed cases keep both target actuators running, sample all eight
 kernel guards, verify real app payloads and all seven fault counters, then keep
-the load running for another 5s after activation. The 45s fixture watchdog is a
+the load running for at least 15s and three additional applied cycles per target.
+Every completed steady cycle must preserve eligibility, and eligible candidate
+observation gaps must stay within the unchanged 10s window. The 45s fixture watchdog is a
 failure bound, not a claimed production failover SLO.
 
 Resource measurements and final CI evidence are recorded in [#162](https://github.com/timo-kang/vpnctl/issues/162).
@@ -103,10 +105,39 @@ then found residual starvation: one app could miss lock admission for 45s, and
 competing full observations still broke continuous freshness. Neither failed
 run is accepted as qualification.
 
-The follow-up retries failed watch admission after 50–100ms of jitter instead of
-sleeping a full successful-cycle interval. The admission deadline remains 1s;
-failed operations are never replayed. Successful cycles retain their configured
-interval. Serialized checks within one wave share only public namespace-wide
+The next revision tried a 1s admission window with 50–100ms jitter. It still
+failed [CI 37401696768](https://github.com/timo-kang/vpnctl/actions/runs/37401696768):
+one app lost eleven consecutive admission attempts, and in another case even
+admitted cycles separated a healthy candidate's observations by more than 10s.
+That run is retained as failed; jitter does not provide scheduling fairness.
+
+The current revision uses a bounded FIFO admission queue for node engine calls
+and node supervision in the **same cache directory**. A ticket survives the
+entire wait (up to 10s including namespace admission) and lasts until ownership
+is released. The old 1s retry window is replaced only for these node operations;
+relay deployment admission is unchanged. Waiting obtains no approval snapshot,
+renews no lease and does not extend observation freshness. Supervision reserves
+its existing 5s work budget after admission, within a 15s total cycle bound.
+Watch cycles keep their configured interval after completion. Existing cache
+and namespace exclusion are still required; FIFO is not a global network-manager
+lock and cannot schedule nonparticipating old binaries or other cache directories.
+
+There are at most 32 live slots. Private, owned 0600 files in the existing 0700
+cache directory contain only bounded ticket numbers. A short metadata flock
+serializes queue enrollment, and each live descriptor holds its own slot flock.
+Cancellation/normal exit/SIGKILL release descriptors; dead ticket contents carry
+no authority. No PID probing, wall-clock ordering, durable replay, unbounded
+waiter files or helper daemon is used. Corrupt live metadata, unsafe files, cache
+directory replacement, a full queue or deadline expiry fail admission closed.
+Do not manually unlink queue files while processes are running. A frozen owner
+still cannot renew the independent 10s kernel lease.
+
+Apply revalidation also removes an identical extra precheck before its existing
+TCP pre/post checks. Current approval, route identity, inventory, kernel state,
+lease and fingerprint checks remain, as do unbound app proof and postchecks.
+Tests reject lease expiry, revocation and kernel drift before probing.
+
+Serialized checks within one wave share only public namespace-wide
 link/route/rule/mark inventories. A postcheck may reuse a snapshot only when its
 command started **after that candidate's TCP finished**, with BOOTTIME age below
 3s. A failed fresh read discards old data; cancellation/clock failure denies
@@ -116,7 +147,8 @@ checks replace only the duplicate middle LeaseStatus inside the node backend.
 Tests verify freshness floors, failed reads, copied data, clock rollback and
 that lease/private/interface queries are never shared. The original sampling
 pressure, 45s fixture watchdog, 10s freshness and 10s lease remain unchanged.
-Final corrected resource and CI results are recorded separately in #162.
+Final corrected resource and CI results are recorded separately in #162; this
+revision remains unqualified until those runs complete successfully.
 Application CI returns to 2 CPU / 2 GiB for both production and race builds.
 The full suites additionally test expiry, revocation, SIGKILL, drift and rollback.
 Four slow-probe cycles preserve the existing minimum 8s continuous pressure
@@ -125,7 +157,9 @@ not widened to accommodate the optimization.
 
 ## Review and remaining operational gates
 
-Unit race tests enforce overlapping socket proofs, serialized kernel checks,
+Unit race tests enforce FIFO under repeated rejoining, bounded cancellation and
+queue capacity, real process death, unsafe/corrupt files and directory replacement.
+They also enforce overlapping socket proofs, serialized kernel checks,
 one maintenance sweep, cancellation that joins every worker, and exhaustion
 that cannot produce health. Selector tests require new confirmations after a
 budget failure and reject attempts to treat cost metadata as authority.

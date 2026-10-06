@@ -400,3 +400,38 @@ func TestTargetApplicationOneSweepAndApplyTimeLeaseExpiry(t *testing.T) {
 		})
 	}
 }
+
+func TestTargetChoiceFreshPrecheckBeforeProbe(t *testing.T) {
+	for _, fault := range []string{"expired_lease", "kernel_changed", "revoked"} {
+		t.Run(fault, func(t *testing.T) {
+			e, _, k, _ := appFixture(t)
+			s := activateApp(t, e)
+			report, err := e.ObserveTarget(context.Background(), "app", "", time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := s.Decide(report)
+			if d.DesiredPathID == "" {
+				t.Fatal("missing baseline choice")
+			}
+			g := e.journal.Targets[0]
+			entry := e.journal.Entries[e.index(d.DesiredPathID)]
+			switch fault {
+			case "expired_lease":
+				k.active[d.DesiredPathID] = false
+			case "kernel_changed":
+				k.foreign = true
+			case "revoked":
+				e.cache.Refresh(context.Background(), &rejectTargetApproval{})
+			}
+			probed := false
+			e.probe = func(context.Context, Entry, relaycatalog.Target) (targetProof, error) {
+				probed = true
+				return targetProof{handshake: 1, rx: 1, tx: 1}, nil
+			}
+			if _, err := e.verifyTargetChoice(context.Background(), g, routeForEntry(entry), d, time.Second); err == nil || probed {
+				t.Fatal("fresh precheck omitted before TCP", err, probed)
+			}
+		})
+	}
+}

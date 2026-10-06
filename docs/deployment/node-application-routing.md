@@ -72,8 +72,14 @@ cannot force seven other TCP timeouts to run in series. All workers are joined
 before releasing ownership. Public namespace inventories can be shared within
 that wave only; postchecks require an inventory read that started after their
 own TCP proof. Lease timers, per-interface state and approvals are never shared.
-Busy watch admission uses a short jittered retry; admitted cycles retain the
-configured interval and the 1s admission bound remains. The 10s freshness and
+Node engine calls and node supervision share a FIFO turn in the same private
+cache, bounded to 10s admission. Waiting performs no observation or renewal.
+The supervisor reserves its existing 5s work budget after admission (15s total);
+completed watch cycles retain the configured interval. All participating node
+processes must use this version and the same cache. The 32 descriptor-owned queue
+slots are released on exit/cancellation; never unlink queue files while running.
+Existing cache/netns exclusion still applies. Other caches, old binaries and
+external network managers do not participate in this scheduling guarantee. The 10s freshness and
 kernel lease bounds remain.
 
 These are test profiles, not minimum hardware or failover-SLO guarantees.

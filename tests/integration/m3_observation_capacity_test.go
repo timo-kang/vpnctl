@@ -18,13 +18,52 @@ import (
 	"vpnctl/internal/relayguard"
 )
 
-func latestApplicationResult(path string) (out relayapply.TargetReconcileResult) {
+func applicationResults(path string) (out []relayapply.TargetReconcileResult) {
 	b, _ := os.ReadFile(path)
 	lines := strings.Split(string(b), "\n")
 	for _, line := range lines[:len(lines)-1] {
 		var r relayapply.TargetReconcileResult
 		if json.Unmarshal([]byte(line), &r) == nil && r.SchemaVersion == 1 {
-			out = r
+			out = append(out, r)
+		}
+	}
+	return
+}
+func latestApplicationResult(path string) (out relayapply.TargetReconcileResult) {
+	if results := applicationResults(path); len(results) > 0 {
+		out = results[len(results)-1]
+	}
+	return
+}
+
+// Count real applied cycles after the baseline, rejecting a gap before any
+// later recovery can hide it. Payload alone can pass while an observer stalls.
+func applicationContinuity(t *testing.T, path string, baseline int) (cycles int, maxGap time.Duration) {
+	t.Helper()
+	results := applicationResults(path)
+	for i := max(0, baseline-1); i < len(results); i++ {
+		r := results[i]
+		if !r.Applied || r.Selection.Policy.MaxAge != 10*time.Second || r.Selection.Policy.Successes != 2 {
+			t.Fatalf("application lost fresh continuous eligibility: target=%s reason=%s state=%s", r.Selection.TargetID, r.Selection.Reason, r.Application.State)
+		}
+		if i < baseline {
+			continue
+		}
+		cycles++
+		previous := results[i-1]
+		for _, c := range r.Selection.Candidates {
+			if !c.Eligible {
+				continue
+			}
+			for _, old := range previous.Selection.Candidates {
+				if old.PathID == c.PathID && old.State == "reachable" {
+					gap := c.ObservedAt.Sub(old.ObservedAt)
+					maxGap = max(maxGap, gap)
+					if gap <= 0 || gap > 10*time.Second {
+						t.Fatalf("freshness gap %s in %s", gap, c.PathID)
+					}
+				}
+			}
 		}
 	}
 	return
@@ -126,9 +165,18 @@ func TestNetns_M3TargetApplicationMixedCandidates(t *testing.T) {
 				return nil
 			})
 			report["first_payload_seconds"] = time.Since(started).Seconds()
-			// Keep both operational loops and all leases under pressure after first success.
-			until := time.Now().Add(5 * time.Second)
-			for time.Now().Before(until) {
+			// Exercise several complete rounds, not just residual leases after
+			// activation. Preserve continuous payload/lease sampling throughout.
+			steadyStart := time.Now()
+			baseline1, baseline2 := len(applicationResults(logfile)), len(applicationResults(secondLog))
+			cycles1, cycles2 := 0, 0
+			var gap1, gap2 time.Duration
+			for time.Since(steadyStart) < 15*time.Second || cycles1 < 3 || cycles2 < 3 {
+				if time.Since(steadyStart) > 45*time.Second {
+					t.Fatal("actuators failed to complete three steady rounds")
+				}
+				cycles1, gap1 = applicationContinuity(t, logfile, baseline1)
+				cycles2, gap2 = applicationContinuity(t, secondLog, baseline2)
 				requireLiveApplicationLeases(t, f)
 				for _, target := range []string{m3Target, "198.18.0.3"} {
 					if p := applicationPayload(t, f, target); !p.OK {
@@ -138,6 +186,9 @@ func TestNetns_M3TargetApplicationMixedCandidates(t *testing.T) {
 				samples++
 				time.Sleep(200 * time.Millisecond)
 			}
+			report["steady_seconds"] = time.Since(steadyStart).Seconds()
+			report["steady_applied_cycles"] = map[string]int{"app": cycles1, "app2": cycles2}
+			report["maximum_fresh_observation_gap_seconds"] = map[string]float64{"app": gap1.Seconds(), "app2": gap2.Seconds()}
 			report["samples"] = samples
 			report["result"] = applied
 			report["all_eight_leases_active"] = true
