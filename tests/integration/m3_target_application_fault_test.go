@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,11 +69,59 @@ func applicationFallback(t *testing.T, f *m3AuthorityFixture) {
 	netOutput(t, f.robot, "ip", "link", "set", "fallback0", "up")
 	netOutput(t, f.target, "ip", "link", "set", "fallback1", "up")
 	netOutput(t, f.robot, "ip", "route", "add", "default", "via", "203.0.113.2", "dev", "fallback0")
+	// This fixed fixture tests target reservation, not ARP convergence/GC. Keep
+	// its two owned neighbours permanent, as in the direct dataplane fixture.
+	mac := func(ns, dev string) string {
+		var links []struct {
+			Address string `json:"address"`
+		}
+		if err := json.Unmarshal([]byte(netOutput(t, ns, "ip", "-j", "link", "show", "dev", dev)), &links); err != nil || len(links) != 1 {
+			t.Fatal("fallback link inventory", err)
+		}
+		if _, err := net.ParseMAC(links[0].Address); err != nil {
+			t.Fatal(err)
+		}
+		return links[0].Address
+	}
+	netOutput(t, f.robot, "ip", "neigh", "replace", "203.0.113.2", "lladdr", mac(f.target, "fallback1"), "nud", "permanent", "dev", "fallback0")
+	netOutput(t, f.target, "ip", "neigh", "replace", "203.0.113.1", "lladdr", mac(f.robot, "fallback0"), "nud", "permanent", "dev", "fallback1")
 }
 func TestNetns_M3TargetApplicationQuarantine(t *testing.T) {
 	requireNetwork(t)
 	f := applicationFixture(t, true, 4)
+	report := map[string]any{}
+	t.Cleanup(func() {
+		report["completed"] = !t.Failed()
+		writeM3Report(t, filepath.Join(f.results, "application-quarantine.json"), report)
+	})
 	applicationFallback(t, f)
+	lookup := func(stage string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		b, err := netCommand(ctx, f.robot, "ip", "-j", "-4", "route", "get", m3Target).CombinedOutput()
+		report[stage+"_route"] = string(b)
+		var routes []struct {
+			Dev     string `json:"dev"`
+			Source  string `json:"prefsrc"`
+			Gateway string `json:"gateway"`
+		}
+		if err != nil || json.Unmarshal(b, &routes) != nil || len(routes) != 1 || routes[0].Dev != "fallback0" || routes[0].Source != "203.0.113.1" || routes[0].Gateway != "203.0.113.2" {
+			t.Fatal("fallback route", err, string(b))
+		}
+	}
+	// Prove the exact same target/default route works before challenging the
+	// reservation; otherwise a dead fixture could falsely pass quarantine.
+	nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "release", "--config", f.node, "--target-id", "app")
+	lookup("baseline")
+	eventually(t, 5*time.Second, "fallback fixture readiness before quarantine", func() error {
+		p := applicationPayload(t, f, m3Target)
+		report["fallback_baseline"] = p
+		if !p.OK || p.Source != "203.0.113.1" {
+			return fmt.Errorf("fallback not ready: %+v", p)
+		}
+		return nil
+	})
+	nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", "app")
 	applicationReconcile(t, f, "app", true)
 	stream := applicationStream(t, f, "quarantine")
 	// All candidates stay alive. A nonexistent manual pin must still close the
@@ -84,12 +133,16 @@ func TestNetns_M3TargetApplicationQuarantine(t *testing.T) {
 	cutoff := time.Now().Add(500 * time.Millisecond)
 	awaitApplicationCandidates(t, f)
 	requireApplicationBlocked(t, f, stream, cutoff)
+	report["old_and_new_unbound_tcp_blocked"], report["all_bound_probes_live"], report["result"] = true, true, out
 	// Explicit release is the only operation allowed to expose the default.
 	nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "release", "--config", f.node, "--target-id", "app")
-	if p := applicationPayload(t, f, m3Target); !p.OK || p.Source != "203.0.113.1" {
-		t.Fatal("fallback baseline absent", p)
+	lookup("released")
+	p := applicationPayload(t, f, m3Target) // Retain the single 1s post-release probe.
+	report["fallback_after_release"] = p
+	if !p.OK || p.Source != "203.0.113.1" {
+		t.Fatal("released fallback unavailable", p)
 	}
-	writeM3Report(t, filepath.Join(f.results, "application-quarantine.json"), map[string]any{"completed": !t.Failed(), "old_and_new_unbound_tcp_blocked": true, "all_bound_probes_live": true, "default_fallback_verified": true, "result": out})
+	report["default_fallback_verified"] = true
 }
 func TestNetns_M3TargetApplicationFailover(t *testing.T) {
 	requireNetwork(t)

@@ -250,47 +250,86 @@ func testDirectDataplane(t *testing.T, size int) {
 		netOutput(t, ns[i+1], "nft", "-f", faultPath)
 	}
 	failedAt := time.Now()
+	report["wg_fault_installed_at"] = failedAt.UTC()
 	eventually(t, 5*time.Second, "local direct removal with controller offline", func() error {
 		for _, i := range []int{0, 1} {
 			other := 1 - i
 			if strings.Contains(netOutput(t, ns[i+1], "wg", "show", "wg0", "peers"), nodes[other].Node.WGPublicKey) {
 				return fmt.Errorf("direct peer remains")
 			}
+			// Peer removal precedes publication of the completed Step result.
+			// Wait for both observations inside the same fallback deadline;
+			// a pre-fault active log is not evidence of reactivation.
+			if observed := state(i, other); observed != "relay_unverified" && observed != "cooldown" {
+				return fmt.Errorf("direct withdrawal not yet published: %d -> %d: %s", i, other, observed)
+			}
 		}
 		return probe()
 	})
+	report["withdrawal_observed_at"] = time.Now().UTC()
 	report["fallback_seconds"] = time.Since(failedAt).Seconds()
 	report["fallback_overlay_ok"] = true
-	// Stay beyond cooldown: successful UDP readiness cannot make broken WG active.
-	ends := time.Now().Add(12 * time.Second)
-	lastGood := time.Now()
-	var maxGap time.Duration
-	var retryLosses int
-	probeHealthy := true
-	// Close the final loss interval while the fault is still present; removing
-	// the fault midway through an unfinished retry would hide its full impact.
-	for time.Now().Before(ends) || !probeHealthy {
+	// Stay beyond cooldown. One persistent worker measures actual nonce replies
+	// independently of coordinator subprocess/log overhead. Keep the same 12s
+	// fault exposure and 5s loss gate; finish the last outage before removing it.
+	worker, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch := startNetworkProcess(t, ns[1], filepath.Join(results, "retry-packets.jsonl"), []string{"VPNCTL_WORKER=direct-loss-watch", "VPNCTL_PROBE_ENDPOINT=" + endpoint}, worker, "-test.run=^TestNetworkWorker$")
+	beganWatch := time.Now()
+	var samples []directLossSample
+	for {
 		if state(0, 1) == "active" || state(1, 0) == "active" {
 			t.Fatal("broken WG advertised active despite successful UDP")
 		}
-		probeErr := probe()
-		probeHealthy = probeErr == nil
-		// Include the first successful packet after a gap. Checking failures
-		// alone undercounts the outage by the duration of the recovery probe.
-		gap := time.Since(lastGood)
-		maxGap = max(maxGap, gap)
+		data, err := os.ReadFile(watch.log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		samples = nil
+		for _, line := range strings.Split(string(data), "\n") {
+			var sample directLossSample
+			if json.Unmarshal([]byte(line), &sample) == nil && sample.Sequence > 0 {
+				samples = append(samples, sample)
+			}
+		}
+		var maxGap time.Duration
+		losses := 0
+		for i, sample := range samples {
+			if sample.Sequence != i+1 || i > 0 && sample.Elapsed < samples[i-1].Elapsed {
+				t.Fatal("invalid loss sample sequence")
+			}
+			maxGap = max(maxGap, sample.Gap)
+			if !sample.OK {
+				losses++
+			}
+		}
+		report["retry_max_observed_loss_seconds"], report["retry_failed_probes"], report["retry_samples"] = maxGap.Seconds(), losses, len(samples)
 		if maxGap > 5*time.Second {
 			t.Fatal("retry trial caused prolonged overlay loss", maxGap)
 		}
-		if probeErr == nil {
-			lastGood = time.Now()
-		} else {
-			retryLosses++
+		if len(samples) > 0 {
+			if !samples[0].OK {
+				t.Fatal("loss worker baseline unavailable")
+			}
+			last := samples[len(samples)-1]
+			if last.Completed {
+				if !last.OK || last.Elapsed < 12*time.Second {
+					t.Fatal("loss worker ended before fault interval closed")
+				}
+				report["retry_watch_seconds"] = last.Elapsed.Seconds()
+				watch.finish(t)
+				break
+			}
+			if time.Since(last.At) > 2*time.Second {
+				t.Fatal("loss worker stopped reporting")
+			}
+		} else if time.Since(beganWatch) > 2*time.Second {
+			t.Fatal("loss worker did not start")
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
-	report["retry_max_observed_loss_seconds"] = maxGap.Seconds()
-	report["retry_failed_probes"] = retryLosses
 	report["udp_success_not_dataplane_success"] = true
 	for _, i := range []int{0, 1} {
 		netOutput(t, ns[i+1], "nft", "delete", "table", "inet", "direct_fault")
