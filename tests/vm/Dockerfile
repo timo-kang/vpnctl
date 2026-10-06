@@ -6,7 +6,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/* && \
     systemctl mask systemd-timesyncd.service systemd-networkd-wait-online.service && \
     mkdir -p /opt/vpnctl-vm /var/lib/vpnctl-vm/results /var/lib/vpnctl-vm/work
+# Managers are opt-in so the established lease/power image remains unchanged.
+ARG VPNCTL_VM_MANAGERS=0
+RUN if [ "$VPNCTL_VM_MANAGERS" = 1 ]; then \
+      apt-get update && apt-get install -y --no-install-recommends network-manager netplan.io dnsmasq-base iptables && \
+      rm -rf /var/lib/apt/lists/* && \
+      systemctl mask NetworkManager.service systemd-networkd.service; \
+    elif [ "$VPNCTL_VM_MANAGERS" != 0 ]; then exit 2; fi
 COPY guest_agent.py /opt/vpnctl-vm/guest_agent.py
+COPY manager_dhcp.py /opt/vpnctl-vm/manager_dhcp.py
 COPY nft_delay.py /opt/vpnctl-vm/nft_delay.py
 COPY fsync_fault.py /opt/vpnctl-vm/fsync_fault.py
 COPY vpnctl-vm-agent.service /etc/systemd/system/vpnctl-vm-agent.service

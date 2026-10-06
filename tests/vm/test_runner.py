@@ -147,5 +147,37 @@ class StorageEvidenceTests(unittest.TestCase):
         guest_agent.validate_fsync_evidence('fsync', self.evidence('/cache/.pending-abc'), 'I/O error')
         guest_agent.validate_fsync_evidence('fsync-dir', self.evidence('/cache', True), 'file replaced but directory sync failed: I/O error')
 
+class ManagerEvidenceTests(unittest.TestCase):
+    def valid(self):
+        names = ['baseline', 'nm-reload', 'nm-restart', 'nm-disconnect-reconnect',
+                 'netplan-apply', 'networkd-reload', 'networkd-restart',
+                 'nm-shared-up', 'nm-shared-down', 'udev-recreate']
+        return {'exit': 0, 'report': {'schema_version': 1, 'completed': True,
+                'steps': [{'name': n, 'passed': True} for n in names]}}
+
+    def test_skipped_empty_nonzero_and_incomplete_cannot_pass(self):
+        for status in ({'exit': 0}, {'exit': 1, 'report': self.valid()['report']},
+                       {'exit': None}, {'exit': 0, 'report': {'completed': True}}):
+            with self.subTest(status=status), self.assertRaises(RuntimeError):
+                observer.validate_manager_result(status)
+
+    def test_duplicate_missing_or_failed_stage_cannot_pass(self):
+        for mutation in ('duplicate', 'missing', 'failed', 'incomplete'):
+            status = self.valid()
+            steps = status['report']['steps']
+            if mutation == 'duplicate':
+                steps[-1] = steps[0]
+            elif mutation == 'missing':
+                steps.pop()
+            elif mutation == 'failed':
+                steps[-1]['passed'] = False
+            else:
+                status['report']['completed'] = False
+            with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                observer.validate_manager_result(status)
+
+    def test_complete_exact_matrix_passes(self):
+        observer.validate_manager_result(self.valid())
+
 if __name__ == '__main__':
     unittest.main()
