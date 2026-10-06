@@ -285,8 +285,10 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 		out.Application, err = e.quarantineTarget(ctx, id)
 		return out, errors.Join(out.Selection.Error(), err)
 	}
-	// Admission and renewal are distinct from the 5s mutation/verification budget.
-	_, _ = e.MaintainLeases(ctx)
+	// The bounded observation wave already maintained every lease. Repeating
+	// the full sweep here can starve another target's freshness window. Apply
+	// still rechecks current approval, live lease, inventory and kernel state;
+	// an expired lease cannot be rearmed by a successful observation.
 	if e.uncertain {
 		return out, relaycache.ErrUncertain
 	}

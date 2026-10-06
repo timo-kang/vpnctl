@@ -66,7 +66,7 @@ production/race 결과를 구분한다. 결과에는 배치, 후보 수, phase�
 
 Application CI uses 2 CPU / 2 GiB for both production and race builds, with up
 to eight prepared candidates and two targets. The observer renews all leases
-once, then overlaps only TCP proofs in a common 3s window. Cache/approval,
+once per reconcile (without a second full sweep before apply), then overlaps only TCP proofs in a common 3s window. Cache/approval,
 inventory, kernel checks and fail-closed changes stay serialized. A slow path
 cannot force seven other TCP timeouts to run in series. All workers are joined
 before releasing ownership. The 10s freshness and kernel lease bounds remain.
@@ -80,7 +80,7 @@ only a candidate with new valid confirmations and the usual apply-time checks.
 Use `diagnostics` on reconcile results and `observation_diagnostics` on selections
 for monotonic/BOOTTIME elapsed time, phase calls and external kernel/inventory
 command counts. Phase and command durations are sums; concurrent phases can
-exceed the operation elapsed time. They contain no command arguments, output or
+exceed the operation elapsed time; nested phases overlap too. They contain no command arguments, output or
 credentials, and provide no authorization. BPF syscalls are not external commands.
 
 The original 2 CPU race capacity failure and 4 CPU interim validation remain in

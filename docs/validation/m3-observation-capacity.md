@@ -12,7 +12,9 @@ unprotected target observation; it does not grant leases to unprotected paths.
 The outer observation budget remains 20s, maintenance 5s, individual TCP timeout
 at most 2s, default evidence freshness 10s, and kernel lease 10s. Apply-time
 validation, rollback/quarantine, approval expiry/revocation and BOOTTIME checks
-remain required. This is a bounded cooperative operation, not a hard real-time
+remain required. Application consumes that same sweep without repeating full
+maintenance after observation; apply-time live authority/lease/inventory/kernel
+and actual payload verification still run. This is a bounded cooperative operation, not a hard real-time
 promise against a blocked kernel or filesystem. Under CPU starvation, fail-closed
 kernel expiry still takes precedence over availability.
 
@@ -49,7 +51,7 @@ checks and its own pinned TCP/route/WireGuard evidence.
 
 `diagnostics` and selection `observation_diagnostics` export monotonic/BOOTTIME
 elapsed time, phase calls, summed duration and external command counts/durations.
-Phase time includes gate wait; concurrent sums can exceed total elapsed and are
+Phase time includes gate wait; concurrent/nested sums can exceed total elapsed and are
 not CPU time. BPF syscalls are not counted as external commands. No command
 arguments, input/output or credentials are recorded by this accounting.
 The fixture also records cgroup `cpu.max`, `cpu.stat` and `memory.events`.
@@ -85,7 +87,16 @@ kernel guards, verify real app payloads and all seven fault counters, then keep
 the load running for another 5s after activation. The 45s fixture watchdog is a
 failure bound, not a claimed production failover SLO.
 
-Resource profile results and final CI evidence are recorded after execution.
+Resource measurements and final CI evidence are recorded in [#162](https://github.com/timo-kang/vpnctl/issues/162).
+The first wave implementation (`7ec47cc`) passed all 54 local profile scenarios,
+but [CI 37395706391](https://github.com/timo-kang/vpnctl/actions/runs/37395706391)
+found two mixed-candidate race failures. A second full maintenance sweep before
+apply stretched two competing app loops beyond 10s freshness, so a healthy
+independent app returned to quarantine. This failed CI is retained; local
+success is not substituted for it. The correction consumes the single sweep
+from bounded observation and retains independent apply-time validity checks.
+A regression test also expires the lease during apply revalidation and requires
+quarantine. Final corrected profile and CI results are recorded separately.
 Application CI returns to 2 CPU / 2 GiB for both production and race builds.
 The full suites additionally test expiry, revocation, SIGKILL, drift and rollback.
 Four slow-probe cycles preserve the existing minimum 8s continuous pressure

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -365,6 +366,36 @@ func TestTargetApplicationStaleChoiceAndPolicyRollback(t *testing.T) {
 			}
 			if _, err := e.applyTarget(context.Background(), g, g.Active, d, time.Second); err == nil || m.mutations != before {
 				t.Fatal("stale choice mutated kernel", err)
+			}
+		})
+	}
+}
+
+// A steady target must not repeat the full sweep after its bounded wave, and
+// must still reject a lease expiring between observation and route application.
+func TestTargetApplicationOneSweepAndApplyTimeLeaseExpiry(t *testing.T) {
+	for _, expire := range []bool{false, true} {
+		t.Run(fmt.Sprint(expire), func(t *testing.T) {
+			e, _, k, _ := appFixture(t)
+			s := activateApp(t, e)
+			before := k.renewals
+			var proofs atomic.Int32
+			e.probe = func(_ context.Context, entry Entry, _ relaycatalog.Target) (targetProof, error) {
+				if proofs.Add(1) == 4 && expire {
+					k.active[entry.Candidate.PathID] = false
+				}
+				return targetProof{handshake: 1, rx: 1, tx: 1}, nil
+			}
+			out, err := e.ReconcileTarget(context.Background(), "app", "", s, time.Second)
+			if k.renewals-before != 3 || out.Diagnostics.Phases["maintenance"].Calls != 1 {
+				t.Fatal("repeated full sweep", k.renewals-before, out.Diagnostics)
+			}
+			if expire {
+				if err == nil || out.Applied || out.Application.Activated || !out.Application.Guarded {
+					t.Fatal("expired apply-time lease authorized route", out, err)
+				}
+			} else if err != nil || !out.Applied {
+				t.Fatal(out, err)
 			}
 		})
 	}
