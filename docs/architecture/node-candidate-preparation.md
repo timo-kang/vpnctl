@@ -34,9 +34,10 @@ domain requires explicit reconciliation, not automatic adoption.
 ## Incremental execution
 
 Every supervisor admission refreshes when due and services all candidate leases
-first. It then advances at most one desired path within the **remaining five
-second maintenance budget**, with a separate **750 ms** operation limit and
-BOOTTIME checks. No 60 second Prepare/Release transaction runs inside this loop.
+first. It then advances at most **two durable work units** within the **remaining
+five second maintenance budget**. Both share a single **750 ms** wall/BOOTTIME
+budget; a second unit starts only with at least **500 ms** remaining. Each unit
+still repeats approval/inventory/ownership checks and persists its own boundary. No 60 second Prepare/Release transaction runs inside this loop.
 The round-robin path cursor and exponential retry delays (1, 2, 4, 8, 16, 30
 seconds of BOOTTIME) are durable. Healthy paths already checked by that admission
 do not consume rebuild work. Slow or conflicting paths cannot take all turns.

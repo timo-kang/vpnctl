@@ -105,6 +105,49 @@ Earlier artifacts remain retained, including failures:
   ENODEV during legitimate reconstruction; its probe now reports the unavailable
   interface as a failed observation and continues within the original bound.
 
+## CI scheduling correction
+
+[CI 37433716347](https://github.com/timo-kang/vpnctl/actions/runs/37433716347)
+failed the shared Go job: `internal/history` reached its cumulative 600s package
+limit while `TestWireGuardLargeHistoryResponseIsExplicitlyTruncated` had been
+running for only 6s. The new full apply race suite passed in that same job but
+consumed 578.858s alongside history/controller work. There was no reported data
+race or assertion failure in that log. The failed run and log are preserved.
+
+The complete relayapply race package now runs on a dedicated runner, with its
+original 10m package deadline. Every other package remains in the Go race job;
+no preparation, history, or controller test is removed, and no product/lease/
+observation timeout is widened. The final CI verdict must come from the revised
+commit, not the preceding locally passing subsets.
+
+## Rebuild admission correction
+
+That same CI passed all production rebuilding cases and all race crash, ENOSPC,
+physical-recovery and foreign-state cases. Race capacity positions 0 and 3 failed
+its unchanged 120s watchdog; position 7 passed. Their logs show forward progress
+without ownership/budget failures, but each of 21 transitions rejoined the FIFO
+behind two app waves, costing roughly 5–6s per transition. Both apps remained
+live. The failed race artifact remains at
+`/tmp/vpnctl-preparation-ci-37433716347-race`.
+
+Supervision now permits at most two durable work units in the same original
+750ms wall/BOOTTIME budget, after all lease maintenance. It attempts the second
+only with at least 500ms remaining. Round-robin selection still advances for
+each unit, and every mutation retains its own durable boundary and fresh checks.
+A slow first unit yields its next turn; it cannot reset the shared clock or
+extend the five-second maintenance budget. Regression tests cover both-unit
+fairness, insufficient headroom and BOOTTIME exhaustion. The 120s convergence,
+10s lease and 10s observation checks are unchanged.
+
+Both complete local suites passed after that correction:
+`/tmp/vpnctl-preparation-two-unit-production` and `...-two-unit-race`.
+Capacity at positions 0/3/7 took 111.07s / 138.00s total; the sixteen crash
+boundaries 18.04s / 33.47s; real ENOSPC 8.50s / 11.38s; all seven physical recovery
+cases 100.42s / 102.76s; and all ten foreign-state cases 106.74s / 115.08s.
+Full apply/CLI race also passed (203.044s / 44.855s), and the additional shared
+BOOTTIME / parent-deadline headroom regressions passed independently. These are
+local results; the revised full CI verdict is recorded in #171 / its PR.
+
 ## Qualification boundary
 
 The recovery watchdog (60s after foreign-fault removal / 120s for underlay

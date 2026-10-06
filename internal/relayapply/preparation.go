@@ -15,8 +15,8 @@ import (
 	"vpnctl/internal/relayplan"
 )
 
-// Rebuilding gets at most one work unit AFTER all candidate leases have been
-// serviced. It shares the existing maintenance deadline, never extends it.
+// Rebuilding gets at most two work units AFTER all candidate leases have been
+// serviced. Both share one budget and the existing maintenance deadline.
 const NodeRebuildDuration = 750 * time.Millisecond
 
 var preparationID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
@@ -223,10 +223,17 @@ func (e *Engine) startPreparationRemoval(i, entryIndex int, reason string) error
 	return e.persist()
 }
 
-// RebuildCandidates advances at most one intent. The durable round-robin cursor
-// and per-path BOOTTIME backoff survive one-shot supervisors/process crashes.
+// RebuildCandidates advances at most two durable work units. Both share one
+// 750ms BOOTTIME/wall budget; the second needs at least 500ms remaining. The
+// durable round-robin cursor and backoff survive one-shot supervisors/crashes.
 // This method never opens leases or application routes.
-func (e *Engine) RebuildCandidates(parent context.Context) (out Result, err error) {
+func (e *Engine) RebuildCandidates(parent context.Context) (Result, error) {
+	return e.rebuildCandidates(parent, 2)
+}
+
+// A one-unit call lets fault tests stop at every persisted boundary; production
+// always uses the bounded two-unit entry point above.
+func (e *Engine) rebuildCandidates(parent context.Context, units int) (out Result, err error) {
 	out = result("idle", "", "")
 	defer func() {
 		e.maintained = nil
@@ -260,8 +267,47 @@ func (e *Engine) RebuildCandidates(parent context.Context) (out Result, err erro
 	if err = budget(); err != nil {
 		return failure("", "rebuild_budget_exhausted", err)
 	}
-	if err = e.syncTerminalScopes(ctx); err != nil {
-		return failure("", "underlay_events_unavailable", err)
+	for n := 0; n < units; n++ {
+		if n > 0 {
+			now, clockErr := e.rebuildNow()
+			if clockErr != nil {
+				return out, clockErr
+			}
+			if err = budget(); err != nil {
+				return out, err
+			}
+			// Do not begin another kernel operation with only a small remainder.
+			// Reserve real time too: injected BOOTTIME clocks are not deadlines.
+			deadline, _ := ctx.Deadline()
+			if now-start > NodeRebuildDuration-500*time.Millisecond || time.Until(deadline) < 500*time.Millisecond {
+				break
+			}
+		}
+		if err = e.syncTerminalScopes(ctx); err != nil {
+			return failure("", "underlay_events_unavailable", err)
+		}
+		unit, unitErr := e.rebuildCandidateUnit(ctx, budget)
+		if unit.PathID != "" || n == 0 {
+			out = unit
+		}
+		if unitErr != nil {
+			return out, unitErr
+		}
+		if unit.State == "idle" || unit.State == "prepared" {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) (out Result, err error) {
+	out = result("idle", "", "")
+	start, err := e.rebuildNow()
+	if err != nil {
+		return out, err
+	}
+	if err = budget(); err != nil {
+		return out, err
 	}
 	begin := e.preparationIndex(e.journal.RebuildCursor) + 1
 	for n := 0; n < len(e.journal.Preparations); n++ {

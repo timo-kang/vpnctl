@@ -106,7 +106,26 @@ jobs:
       # cumulative 10m test timer can terminate it despite forward progress.
       # Concurrent SQLite race packages on two CPUs can starve live producers
       # past their unchanged 45s convergence budget. Every test still runs.
-      - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
+      # The apply fault matrix has hundreds of real durable write/reopen
+      # boundaries. Run that package on its own runner so history's cumulative
+      # 10m package deadline is not spent competing with reconstruction tests.
+      # Keep every other package here; the exact excluded package runs below.
+      - name: Race packages except the separately scheduled relayapply suite
+        shell: bash
+        run: |
+          package_list=$(go list ./...)
+          packages=()
+          excluded=0
+          while IFS= read -r package; do
+            if [[ "$package" == vpnctl/internal/relayapply ]]; then
+              excluded=$((excluded + 1))
+            else
+              packages+=("$package")
+            fi
+          done <<< "$package_list"
+          test "$excluded" -eq 1
+          test "${#packages[@]}" -gt 0
+          go test -race "${packages[@]}" -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
       - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic|DirectDiagnostics)|^TestCATransition' -count=1
       - name: VM runner isolation and evidence regressions (no guest power actions)
         run: python3 -m unittest discover -s tests/vm -p 'test_*.py' -v
@@ -319,6 +338,18 @@ jobs:
           path: ${{ runner.temp }}/vpnctl-target-application
           if-no-files-found: error
           retention-days: 14
+
+  m3-candidate-lifecycle:
+    name: M3 candidate lifecycle race regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Complete relayapply race suite including durable fault matrix
+        run: go test -race ./internal/relayapply -count=1 -timeout=10m
 
   m3-preparation:
     name: M3 owned candidate rebuilding (${{ matrix.profile }})

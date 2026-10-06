@@ -84,7 +84,7 @@ func tickPreparation(t *testing.T, e *Engine, now *time.Duration) Result {
 	t.Helper()
 	*now += 31 * time.Second
 	e.MaintainLeases(context.Background())
-	r, _ := e.RebuildCandidates(context.Background())
+	r, _ := e.rebuildCandidates(context.Background(), 1)
 	if err := validatePreparations(e.journal); err != nil {
 		t.Fatal("invalid durable phase", err, e.journal.Preparations)
 	}
@@ -508,5 +508,70 @@ func TestPreparationExpiryAndOfflineCannotRearm(t *testing.T) {
 				t.Fatal("fresh authenticated rearm failed", err)
 			}
 		})
+	}
+}
+
+func TestPreparationTwoUnitsShareOneBudgetAndKeepFairness(t *testing.T) {
+	for _, elapsed := range []time.Duration{0, 300 * time.Millisecond, time.Second} {
+		t.Run(elapsed.String(), func(t *testing.T) {
+			e, k, _, now := preparationFixture(t)
+			for _, path := range []string{"p0", "p1"} {
+				if _, err := e.RequestPreparation(context.Background(), path, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// First admission journals both candidates without kernel mutation.
+			if _, err := e.RebuildCandidates(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range e.journal.Preparations {
+				if p.Phase != "preparing" {
+					t.Fatal("second path starved", p)
+				}
+			}
+			start := *now
+			e.rebuildClock = func() (time.Duration, error) {
+				if k.steps > 0 {
+					return start + elapsed, nil
+				}
+				return start, nil
+			}
+			_, err := e.RebuildCandidates(context.Background())
+			want := 2
+			if elapsed > 250*time.Millisecond {
+				want = 1
+			}
+			if k.steps != want {
+				t.Fatal("wrong bounded units", k.steps, want)
+			}
+			if (err != nil) != (elapsed >= NodeRebuildDuration) {
+				t.Fatal("shared BOOTTIME budget", elapsed, err)
+			}
+			if k.active["p0"] || k.active["p1"] {
+				t.Fatal("work quantum granted lease")
+			}
+			if err := validatePreparations(e.journal); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPreparationSecondUnitRequiresWallDeadlineHeadroom(t *testing.T) {
+	e, k, _, _ := preparationFixture(t)
+	for _, path := range []string{"p0", "p1"} {
+		if _, err := e.RequestPreparation(context.Background(), path, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	if _, err := e.RebuildCandidates(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The test BOOTTIME clock did not advance, but the parent's remaining wall
+	// deadline is below the second-unit reserve. Only the first intent advances.
+	if e.journal.Preparations[0].Phase != "preparing" || e.journal.Preparations[1].Phase != "waiting" || k.steps != 0 {
+		t.Fatal("parent deadline was reset or second unit started", e.preparationStatus(), k.steps)
 	}
 }
