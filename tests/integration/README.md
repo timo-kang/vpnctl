@@ -151,3 +151,10 @@ are permanent, and route/packet/neighbour evidence is retained on failure.
 The post-release check is still one TCP probe with a 1s deadline. This fixture
 checks target protection; physical ARP/roaming convergence remains a separate
 test. Neither fixture changes the shared host's network or Wi-Fi settings.
+
+Image preparation limits each APT phase to 180s (plus a 5s kill grace), with
+30s HTTP/HTTPS inactivity timeouts and two retries. APT update errors fail setup
+instead of proceeding with partial package lists. The wrapper preserves
+`setup-*.log` and source identity even if preparation fails before the normal
+run manifest exists; `pipefail` propagates the Docker failure. These are setup
+bounds only and never relax the network tests' deadlines or success criteria.
