@@ -12,7 +12,7 @@ NetworkManager, systemd-networkd, netplan이 생성한 설정, DHCP client, wg-q
 | `vd…` WG, peer `/32` 반환 route, `vl…` lease와 BPF guard | vpnctl relay | 승인과 커널 소유권이 일치할 때만 유지 |
 | `vf…` source/target 제한 | vpnctl relay | 승인된 source와 target prefix의 조합만 허용; 외부 firewall의 차단은 계속 적용 |
 | forwarding sysctl, uplink route, 외부 endpoint NAT, 앱 포트 firewall, SNAT/서버 반환 route | 배포 저장소 | 제품 설치 상태와 별도로 실제 서버 통신으로 검증 |
-| 앱 target route 선택·전환 | vpnctl node | 승인된 target reservation의 table/rule/route만 적용하고 실제 lookup·통신 검증; 물리 경로 변경 후 재구성은 후속 작업 |
+| 앱 target route 선택·전환 | vpnctl node | 승인된 target reservation의 table/rule/route만 적용하고 실제 lookup·통신 검증; 명시적 동의가 있는 후보만 물리 경로 변경 후 재구성 |
 
 `protocol=186`, interface 접두사, table 번호만으로 기존 자원을 채택하지 않는다.
 소유 journal, interface index/group/alias와 실제 peer/route/rule 내용이 함께 일치해야 한다.
@@ -23,7 +23,8 @@ NetworkManager, systemd-networkd, netplan이 생성한 설정, DHCP client, wg-q
 [자동 direct 감독](../architecture/direct-readiness.md)은 소유한 `/32` peer만 변경하며
 route/rule/table을 flush하지 않는다. 기존 수동 `up`/`down`, 최초 baseline 생성은
 지정 WG/table의 전용 소유를 전제로 하므로 공유 외부 WG를 인수하는 용도로 쓰지 않는다.
-앱 target route 선택·적용은 구현되어 있으며, 실제 네트워크 관리자 공존과 변경된 물리 경로의 자동 재구성은 #22/#23의 잔여 조건이다.
+앱 target route 선택·적용은 구현되어 있으며, 소유 후보의 자동 재구성은 `prepare --app-routes --auto-rebuild`로 명시적으로 동의한 경로에만 적용한다.
+실제 네트워크 관리자 공존의 배포별 판정은 #22/#23의 잔여 조건이다.
 [underlay 이벤트 세대](../architecture/underlay-events.md)는 변경 전 성공 증거의 재사용을 막지만 관리자 설정을 변경하거나 복구하지 않는다.
 
 ## 배포 설정 예제
@@ -54,6 +55,12 @@ Name=vr0123456789ab vd0123456789ab
 [Link]
 Unmanaged=yes
 ```
+
+이 `.network`와 `networkd.conf.d/*.conf`는 networkd 서비스 계정이 읽을 수 있는
+권한(예: root 소유 0644)으로 배포한다. root 전용 0600이면 root가 `cat-config`로
+읽어도 서비스가 읽지 못하고 기본 정리 정책이 적용될 수 있다. Netplan YAML의 0600
+권장 권한과 생성 `.network`/networkd drop-in의 권한을 구별한다. 배포에서 실제 서비스
+User 및 최종 적용 로그를 확인한다.
 
 다른 이름의 더 이른 파일이나 netplan 생성 파일이 먼저 매칭되면 이 예제는 적용되지
 않는다. [systemd 255의 매칭·Unmanaged 계약](https://github.com/systemd/systemd/blob/v255/man/systemd.network.xml).
@@ -87,3 +94,11 @@ flush, 기존 VPN interface 재생성은 vpnctl과 공존하는 절차가 아니
 
 현재 #114의 검증은 외부 peer/route/mark 보존과 외부 방화벽의 차단 우선권을 다룬다.
 위 자동 선택·전환 및 실제 관리자 조합 검증은 #20~#24의 완료 조건으로 이어진다.
+
+
+## 재사용하는 공존 시험
+
+[격리 manager VM](../testing/network-manager-coexistence.md)은 실제 NM, Netplan의
+networkd renderer, udev를 동시에 실행한다. 전용 VM의 승인 uplink/LAN/EtherCAT 역할과
+실행 결과를 배포 manifest로 남긴다. 해당 가상 Ethernet 조합의 결과는 Wi-Fi 하드웨어,
+EtherCAT 실시간 성능 또는 다른 renderer의 운영 승인으로 대신할 수 없다.

@@ -265,11 +265,34 @@ def host_clock():
             'wall_ns': time.time_ns(), 'monotonic_ns': time.monotonic_ns(),
             'boottime_ns': time.clock_gettime_ns(time.CLOCK_BOOTTIME)}
 
+def validate_manager_result(status):
+    report = status.get('report', {})
+    if status.get('exit') != 0 or report.get('completed') is not True or report.get('schema_version') != 1:
+        raise RuntimeError('manager test failed, skipped or omitted its completed report')
+    expected = {'baseline', 'nm-reload', 'nm-restart', 'nm-disconnect-reconnect',
+                'netplan-apply', 'networkd-reload', 'networkd-restart',
+                'nm-shared-up', 'nm-shared-down', 'udev-recreate'}
+    steps = report.get('steps', [])
+    if len(steps) != len(expected) or {s.get('name') for s in steps} != expected or any(s.get('passed') is not True for s in steps):
+        raise RuntimeError('missing or failed manager scenarios')
+
 def exercise(vm, case, mode, delta, result):
     vm.launch()
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
         return result
+    if case == 'managers':
+        vm.call('managers-start')
+        until = time.monotonic() + 13 * 60
+        while time.monotonic() < until:
+            status = vm.call('managers-result')
+            if status['exit'] is not None:
+                result['managers'] = status
+                vm.record('managers-result', status)
+                validate_manager_result(status)
+                return result
+            time.sleep(2)
+        raise RuntimeError('manager fixture timed out')
     vm.start_fixture()
     if case in ('lease', 'clock'):
         if mode == 'stopped':
@@ -475,7 +498,7 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])

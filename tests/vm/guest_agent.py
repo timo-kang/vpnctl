@@ -181,6 +181,26 @@ class Handler(BaseHTTPRequestHandler):
                         return json.load(r)
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     result = list(pool.map(probe, jobs))
+            elif action == 'managers-start':
+                with LOCK:
+                    if WORKER is not None:
+                        raise RuntimeError('only one fixture per manager VM')
+                    env = dict(os.environ, VPNCTL_VM_MANAGERS='1', VPNCTL_INTEGRATION='1',
+                               VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
+                               TMPDIR=str(ROOT / 'work'))
+                    with (ROOT / 'worker.log').open('wb') as log:
+                        WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test', '-test.run=^TestVMNetworkManagers$', '-test.v', '-test.timeout=12m'],
+                                                  env=env, stdout=log, stderr=log, start_new_session=True)
+                result = {'started': True}
+            elif action == 'managers-result':
+                if WORKER is None:
+                    raise RuntimeError('manager fixture not started')
+                result = {'exit': WORKER.poll()}
+                report = ROOT / 'managers.json'
+                if result['exit'] is not None and report.exists():
+                    if report.stat().st_size > 1024 * 1024:
+                        raise RuntimeError('manager report too large')
+                    result['report'] = json.loads(report.read_text())
             elif action == 'start':
                 with LOCK:
                     if WORKER is not None and WORKER.poll() is None:

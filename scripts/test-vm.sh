@@ -75,6 +75,7 @@ if [[ -n "${VPNCTL_VM_IMAGE:-}" ]]; then
     image=$(docker image inspect "$VPNCTL_VM_IMAGE" --format '{{.Id}}')
 else
     DOCKER_BUILDKIT=0 docker build --cpu-period=100000 --cpu-quota=100000 --memory=2g \
+        --build-arg "VPNCTL_VM_MANAGERS=${VPNCTL_VM_MANAGERS:-0}" \
         --iidfile "$work/image-id" -f tests/vm/Dockerfile tests/vm
     image=$(cat "$work/image-id")
 fi

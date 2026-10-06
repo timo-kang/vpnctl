@@ -82,6 +82,7 @@ type m3AuthorityOptions struct {
 	independentRecipients bool
 	underlays             int
 	extraTarget           bool
+	robotInGuestRoot      bool
 }
 
 func newM3AuthorityFixture(t *testing.T) *m3AuthorityFixture {
@@ -94,7 +95,7 @@ func newM3AuthorityFixtureWithOptions(t *testing.T, opts m3AuthorityOptions) *m3
 	if opts.underlays == 0 {
 		opts.underlays = 2
 	}
-	layout := newM3TopologyLayoutWithUnderlays(t, opts.separateController, opts.underlays)
+	layout := newM3TopologyLayoutWithGuestRobot(t, opts.separateController, opts.underlays, opts.robotInGuestRoot)
 	robot, relays, target := layout.robot, layout.relays, layout.target
 	private := t.TempDir()
 	if err := os.Chmod(private, 0700); err != nil {

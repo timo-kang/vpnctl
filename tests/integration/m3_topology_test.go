@@ -209,6 +209,9 @@ func newM3TopologyLayout(t *testing.T, separateController bool) m3TopologyLayout
 	return newM3TopologyLayoutWithUnderlays(t, separateController, 2)
 }
 func newM3TopologyLayoutWithUnderlays(t *testing.T, separateController bool, underlays int) m3TopologyLayout {
+	return newM3TopologyLayoutWithGuestRobot(t, separateController, underlays, false)
+}
+func newM3TopologyLayoutWithGuestRobot(t *testing.T, separateController bool, underlays int, guestRoot bool) m3TopologyLayout {
 	t.Helper()
 	suffix := fmt.Sprintf("%x", time.Now().UnixNano()&0xfffffff)
 	count := 4
@@ -218,7 +221,12 @@ func newM3TopologyLayoutWithUnderlays(t *testing.T, separateController bool, und
 	ns := make([]string, count)
 	for i := range ns {
 		ns[i] = fmt.Sprintf("m3%s-%d", suffix, i)
-		run(t, ".", "ip", "netns", "add", ns[i])
+		if i == 0 && guestRoot {
+			requireManagerGuest(t)
+			run(t, ".", "ip", "netns", "attach", ns[i], "1")
+		} else {
+			run(t, ".", "ip", "netns", "add", ns[i])
+		}
 		name := ns[i]
 		t.Cleanup(func() { _ = exec.Command("ip", "netns", "del", name).Run() })
 		netOutput(t, name, "ip", "link", "set", "lo", "up")
