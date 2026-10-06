@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relayplan"
 )
 
@@ -458,15 +459,33 @@ func TestVMNetworkManagers(t *testing.T) {
 	}
 	report["final"] = snapshot()
 	var finalPlan relayplan.Plan
-	if e := json.Unmarshal(f.nodeCall("plan", ""), &finalPlan); e != nil {
-		t.Fatal(e)
-	}
+	planReads := 0
+	eventually(t, 10*time.Second, "read final plan while supervisors retain ownership", func() error {
+		planReads++
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		b, e := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "plan", "--config", f.node).CombinedOutput()
+		// This is a read-only CLI. Its initial cache Open is intentionally
+		// nonblocking; unlike mutations, retrying this precise busy rejection
+		// neither adopts ownership nor replays a partially completed change.
+		if e != nil && strings.Contains(string(b), relaycache.ErrBusy.Error()) {
+			return fmt.Errorf("read admission busy")
+		}
+		if e != nil {
+			t.Fatal("final plan read", e, string(b))
+		}
+		if e := json.Unmarshal(b, &finalPlan); e != nil {
+			t.Fatal(e, string(b))
+		}
+		return nil
+	})
+	report["final_plan_read_attempts"] = planReads
 	if len(finalPlan.Paths) != 4 {
 		t.Fatal("unexpected candidate inventory", len(finalPlan.Paths))
 	}
 	report["final_plan"] = finalPlan
 	for _, p := range finalPlan.Paths {
-		if p.Pin.Interface != "wan0" && p.Pin.Interface != "wan1" {
+		if p.Pin == nil || p.Pin.Interface != "wan0" && p.Pin.Interface != "wan1" {
 			t.Fatal("unapproved underlay adopted", p)
 		}
 	}
