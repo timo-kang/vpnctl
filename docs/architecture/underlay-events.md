@@ -23,7 +23,9 @@
   구분된다. 기존 journal/커널 소유권 대조는 계속 유지한다.
 - 후보 자동 복구에서는 잠금 안에서 읽은 소유 journal의 table·임의 metric·underlay
   tuple과 정확히 일치하는 protocol 186 unreachable default만 해당 underlay로 범위를
-  한정한다. 다른 속성/metric/외부 table은 여전히 전체 무효화한다. 소유 매핑을 갱신하기
+  한정한다. 같은 자동관리 의도·table·underlay에서는 metric을 유지하며, 설치 객체가 없는
+  중간 구간에도 의도에 저장한 매핑을 유지한다. alias/ifindex는 새로 만들며 자원 부재를
+  확인한다. 명시적 해제는 이 이벤트 매핑도 회수한다. 다른 속성/metric/외부 table은 여전히 전체 무효화한다. 소유 매핑을 갱신하기
   전에 대기 중인 이벤트를 이전 매핑으로 처리한다. 이는 readiness나 승인 근거가 아니다.
 - 결과의 `underlay_generation`은 프로세스별 임의 epoch와 underlay별 증가 세대를
   묶은 불투명 식별자다. 승인 generation/설치 fingerprint와 별개다. 재시작·이벤트

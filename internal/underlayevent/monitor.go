@@ -200,7 +200,9 @@ func (m *Monitor) SetTerminalScopes(ctx context.Context, scopes []relayobserve.T
 	if err := m.drain(ctx); err != nil {
 		return err
 	}
-	if len(scopes) > 8 {
+	// At most eight installed entries plus eight waiting explicit intents.
+	// These are event scopes only; the installed candidate limit remains eight.
+	if len(scopes) > 16 {
 		return ErrUnavailable
 	}
 	seen := map[uint32]bool{}

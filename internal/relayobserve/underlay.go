@@ -16,8 +16,9 @@ type underlayEventsKey struct{}
 // notifications for one exact owned unreachable-default tuple; it is never
 // approval, route readiness, or permission to ignore a foreign policy route.
 type TerminalScope struct {
-	UnderlayID    string
-	Table, Metric uint32
+	UnderlayID string `json:"underlay_id"`
+	Table      uint32 `json:"table"`
+	Metric     uint32 `json:"metric"`
 }
 
 func SetTerminalScopes(ctx context.Context, scopes []TerminalScope) error {

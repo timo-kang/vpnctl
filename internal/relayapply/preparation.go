@@ -28,17 +28,18 @@ var preparationRemovalSteps = []string{"probe-source", "link", "rule", "endpoint
 // InFlight is durable before a non-idempotent add. An interrupted add is cleaned
 // up with the original owner, never replayed or adopted as a successful install.
 type PreparationIntent struct {
-	PathID             string               `json:"path_id"`
-	Controller         string               `json:"controller_id"`
-	Revision           string               `json:"revision"`
-	Phase              string               `json:"phase"`
-	Step               int                  `json:"step"`
-	InFlight           bool                 `json:"in_flight,omitempty"`
-	Failures           int                  `json:"failures,omitempty"`
-	RetryBootNS        uint64               `json:"retry_boot_ns,omitempty"`
-	Reason             string               `json:"reason,omitempty"`
-	Previous           *PreparationIdentity `json:"previous,omitempty"`
-	UnderlayGeneration string               `json:"underlay_generation,omitempty"`
+	PathID             string                     `json:"path_id"`
+	Controller         string                     `json:"controller_id"`
+	Revision           string                     `json:"revision"`
+	TerminalScope      relayobserve.TerminalScope `json:"terminal_scope"`
+	Phase              string                     `json:"phase"`
+	Step               int                        `json:"step"`
+	InFlight           bool                       `json:"in_flight,omitempty"`
+	Failures           int                        `json:"failures,omitempty"`
+	RetryBootNS        uint64                     `json:"retry_boot_ns,omitempty"`
+	Reason             string                     `json:"reason,omitempty"`
+	Previous           *PreparationIdentity       `json:"previous,omitempty"`
+	UnderlayGeneration string                     `json:"underlay_generation,omitempty"`
 }
 type PreparationIdentity struct {
 	Owner      string             `json:"owner"`
@@ -71,6 +72,9 @@ func validatePreparations(j Journal) error {
 				return errors.New("invalid preparation event generation")
 			}
 		}
+		if p.TerminalScope.UnderlayID == "" || p.TerminalScope.Table < 100000 || p.TerminalScope.Table > 624287 || p.TerminalScope.Metric < 100000 || p.TerminalScope.Metric > 0x3fffffff+100000 {
+			return errors.New("invalid preparation terminal scope")
+		}
 		seen[p.PathID] = true
 		var entry *Entry
 		for i := range j.Entries {
@@ -78,7 +82,7 @@ func validatePreparations(j Journal) error {
 				entry = &j.Entries[i]
 			}
 		}
-		if entry != nil && (entry.Controller != p.Controller || entry.ProbeScope != 1 || !entry.ProbeRouting || entry.LeaseVersion != 3) {
+		if entry != nil && (entry.Controller != p.Controller || entry.ProbeScope != 1 || !entry.ProbeRouting || entry.LeaseVersion != 3 || p.TerminalScope != terminalScope(*entry)) {
 			return errors.New("preparation identity mismatch")
 		}
 		switch p.Phase {
@@ -173,17 +177,19 @@ func (e *Engine) RequestPreparation(ctx context.Context, path, controller string
 	if err = e.stillApproved(entry); err != nil || !time.Now().Before(until) || ctx.Err() != nil {
 		return failure(path, "approval_changed", errors.Join(ErrRecovery, err, ctx.Err()))
 	}
-	owner, _, _, err := token()
+	owner, metric, _, err := token()
 	if err != nil {
 		return failure(path, "intent_identity_unavailable", err)
 	}
-	p := PreparationIntent{PathID: path, Controller: entry.Controller, Revision: owner[7:], Phase: "waiting"}
+	entry.Metric = metric
+	p := PreparationIntent{PathID: path, Controller: entry.Controller, Revision: owner[7:], TerminalScope: terminalScope(entry), Phase: "waiting"}
 	if i := e.index(path); i >= 0 {
 		old := e.journal.Entries[i]
 		if old.Phase != "prepared" || old.Controller != entry.Controller || old.LeaseVersion != 3 || old.ProbeScope != 1 || !old.ProbeRouting {
 			return failure(path, "release_previous_candidate_first", ErrConflict)
 		}
 		p.Phase = "ready" // Explicitly manage an already journaled app candidate.
+		p.TerminalScope = terminalScope(old)
 	}
 	e.journal.Preparations = append(e.journal.Preparations, p)
 	if err = e.persist(); err != nil {
@@ -386,6 +392,15 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) 
 			if err != nil {
 				return out, err
 			}
+			// Keep the exact terminal event identity across this explicit intent's
+			// rebuilds, including the interval with no installed entry. Other
+			// processes may drain events before reading our latest journal. A new
+			// metric would make that legitimate creation look globally foreign.
+			// Link alias/index still rotate, and Check(available) must prove all
+			// old resources absent before any new kernel creation.
+			if p.TerminalScope.Table == entry.Candidate.Pin.Table && p.TerminalScope.UnderlayID == entry.Candidate.UnderlayID {
+				entry.Metric = p.TerminalScope.Metric
+			}
 			if err = validateEntry(entry, e.journal.Node); err != nil {
 				return out, err
 			}
@@ -396,6 +411,7 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) 
 				return out, e.rebuildFailure(i, "approval_or_budget_changed", err)
 			}
 			e.journal.Entries = append(e.journal.Entries, entry)
+			e.journal.Preparations[i].TerminalScope = terminalScope(entry)
 			e.journal.Preparations[i].Phase = "preparing"
 			e.journal.Preparations[i].Reason = "initially_closed_prepare"
 			return out, e.persist()
@@ -456,15 +472,41 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) 
 	return out, nil
 }
 
+func terminalScope(entry Entry) relayobserve.TerminalScope {
+	return relayobserve.TerminalScope{UnderlayID: entry.Candidate.UnderlayID, Table: entry.Candidate.Pin.Table, Metric: entry.Metric}
+}
+
 func (e *Engine) syncTerminalScopes(ctx context.Context) error {
 	var scopes []relayobserve.TerminalScope
-	for _, entry := range e.journal.Entries {
+	seen := map[uint32]relayobserve.TerminalScope{}
+	add := func(scope relayobserve.TerminalScope) error {
 		configured := false
 		for _, u := range e.underlays {
-			configured = configured || u.ID == entry.Candidate.UnderlayID
+			configured = configured || u.ID == scope.UnderlayID
 		}
-		if configured {
-			scopes = append(scopes, relayobserve.TerminalScope{UnderlayID: entry.Candidate.UnderlayID, Table: entry.Candidate.Pin.Table, Metric: entry.Metric})
+		if !configured {
+			return nil
+		}
+		if old, ok := seen[scope.Table]; ok {
+			if old != scope {
+				return ErrConflict
+			}
+			return nil
+		}
+		seen[scope.Table] = scope
+		scopes = append(scopes, scope)
+		return nil
+	}
+	for _, entry := range e.journal.Entries {
+		if err := add(terminalScope(entry)); err != nil {
+			return err
+		}
+	}
+	// Waiting intents retain scope through the durable removal/install gap.
+	// Explicit release removes the intent and therefore retires this scope.
+	for _, p := range e.journal.Preparations {
+		if err := add(p.TerminalScope); err != nil {
+			return err
 		}
 	}
 	return relayobserve.SetTerminalScopes(ctx, scopes)

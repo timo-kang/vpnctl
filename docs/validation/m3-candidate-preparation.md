@@ -114,8 +114,9 @@ running for only 6s. The new full apply race suite passed in that same job but
 consumed 578.858s alongside history/controller work. There was no reported data
 race or assertion failure in that log. The failed run and log are preserved.
 
-The complete relayapply race package now runs on a dedicated runner, with its
-original 10m package deadline. Every other package remains in the Go race job (serialized as recorded below);
+The complete relayapply race package was moved to a dedicated runner, with its
+original 10m package deadline. At this stage every other package remained in the
+Go race job; subsequent serialization and history separation are recorded below;
 no preparation, history, or controller test is removed, and no product/lease/
 observation timeout is widened. The final CI verdict must come from the revised
 commit, not the preceding locally passing subsets.
@@ -206,6 +207,50 @@ completion reports valid; their artifacts are retained at
 observation gaps were 4.360s / 4.962s and peak worker RSS 29,628 / 85,764KiB,
 within the unchanged 10s / 512MiB limits. These passing subsets do not override
 the failed common job.
+
+## Delayed-observer terminal identity correction
+
+[CI 37442861237](https://github.com/timo-kang/vpnctl/actions/runs/37442861237)
+found a real independent-app interruption during race `PreparationRecovery`.
+After the old endpoint route was removed, rebuilding p00 allocated a new random
+route metric. The separate app2 observer drained that creation notification
+under its previous journal mapping, classified the OIF-less route as unknown,
+and reset p01's confirmation. p01 remained reachable with a valid lease, but its
+application was correctly quarantined because its observation generation had
+changed. Earlier successful runs missed this ordering. The failure is preserved
+in `/tmp/vpnctl-preparation-ci-37442861237-race` and the matching `.log`.
+
+Preparation intent now durably retains the exact terminal table/metric/underlay
+tuple, including the gap without an installed entry. For an unchanged binding,
+reconstruction reuses that route metric while rotating installation alias/index.
+Every new install still proves resources available, and all existing live
+ownership checks remain. Observers continue to drain under their previous map;
+unknown/foreign/retired tuples still invalidate globally. The bounded scope map
+permits eight installed entries plus eight waiting intents, without increasing
+the eight-installed-candidate limit. Unit regressions reproduce delayed event
+consumption, missing-entry/reopen intervals, identity rotation, scope mismatch
+rejection and explicit release retirement.
+
+The same CI's serialized common Go job passed controller (354.096s) and history
+(381.821s), then hit its cumulative 15m job limit. GitHub stopped that job; no
+running experiment was manually canceled. History now runs on a separate runner
+with the original 10m package deadline and the same exclusions already covered
+by dedicated churn/byte-budget jobs. The common runner retains all other 34
+packages except relayapply/history; full relayapply remains separate. There are
+26 CI jobs, with no removed tests or extended deadlines. The stopped Go log is
+`/tmp/vpnctl-preparation-ci-37442861237-go.log`.
+
+After correction, the complete local production suite passed: capacity 111.27s,
+crash 18.27s, ENOSPC 8.51s, recovery 100.37s and foreign-state preservation
+108.71s. The race recovery suite passed three consecutive repetitions of all
+seven physical changes (101.89s / 102.21s / 102.45s). Full affected-package race
+passed, including relayapply 213.081s and CLI 43.571s. Focused event/intent
+regressions, vet, YAML/Bash and diff checks also passed. Artifacts and logs are
+`/tmp/vpnctl-preparation-stable-scope-production`,
+`...-stable-scope-race-repeat`, `...-stable-scope-full-race.log` and
+`...-stable-scope-regressions.log`. The complete race integration run is recorded
+separately at `...-stable-scope-race`; its final result and the revised full CI
+verdict must be confirmed in #171 / its PR before merge.
 
 ## Qualification boundary
 

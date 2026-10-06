@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"vpnctl/internal/relaycache"
+	"vpnctl/internal/relayobserve"
 	"vpnctl/internal/relayplan"
 )
 
@@ -184,7 +185,7 @@ func TestPreparationInventoryChangeAndForeignPreservation(t *testing.T) {
 				}
 				return
 			}
-			if old.Alias == current.Alias || current.Phase != "prepared" || len(k.removals) != len(preparationRemovalSteps) {
+			if old.Alias == current.Alias || old.LinkIndex == current.LinkIndex || old.Metric != current.Metric || current.Phase != "prepared" || len(k.removals) != len(preparationRemovalSteps) {
 				t.Fatal("owned path did not rebuild", e.preparationStatus(), k.removals)
 			}
 			if p := e.journal.Preparations[0]; p.Previous == nil || p.Previous.Owner != old.Alias {
@@ -575,5 +576,68 @@ func TestPreparationSecondUnitRequiresWallDeadlineHeadroom(t *testing.T) {
 	// deadline is below the second-unit reserve. Only the first intent advances.
 	if e.journal.Preparations[0].Phase != "preparing" || e.journal.Preparations[1].Phase != "waiting" || k.steps != 0 {
 		t.Fatal("parent deadline was reset or second unit started", e.preparationStatus(), k.steps)
+	}
+}
+
+// A separate observer can drain queued notifications before acquiring the next
+// journal. Its terminal tuple must remain valid even if it misses the entire
+// remove/wait/recreate interval. No generation freshness requirement is relaxed.
+type preparationScopeCapture struct{ scopes []relayobserve.TerminalScope }
+
+func (s *preparationScopeCapture) Generation(context.Context, string) (string, error) { return "", nil }
+func (s *preparationScopeCapture) SetTerminalScopes(_ context.Context, scopes []relayobserve.TerminalScope) error {
+	s.scopes = append([]relayobserve.TerminalScope(nil), scopes...)
+	return nil
+}
+func TestPreparationTerminalIdentitySurvivesMissingEntryAndRestart(t *testing.T) {
+	e, k, dir, now := preparationFixture(t)
+	ctx := context.Background()
+	if _, err := e.PrepareApplication(ctx, "p0", ""); err != nil {
+		t.Fatal(err)
+	}
+	old := e.journal.Entries[e.index("p0")]
+	if _, err := e.RequestPreparation(ctx, "p0", ""); err != nil {
+		t.Fatal(err)
+	}
+	capture := &preparationScopeCapture{}
+	observed := relayobserve.WithUnderlayEvents(ctx, capture)
+	assertScope := func() {
+		t.Helper()
+		if err := e.syncTerminalScopes(observed); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(capture.scopes, []relayobserve.TerminalScope{terminalScope(old)}) {
+			t.Fatal("observer lost or changed exact event identity", capture.scopes, terminalScope(old))
+		}
+	}
+	assertScope()
+	k.objects["p0"] = k.objects["p0"][:9]
+	for i := 0; i < 20 && e.index("p0") >= 0; i++ {
+		tickPreparation(t, e, now)
+		assertScope()
+	}
+	if e.index("p0") >= 0 || e.journal.Preparations[0].Phase != "waiting" {
+		t.Fatal("missing-entry interval not reached")
+	}
+	e = reopen(t, e, dir)
+	e.rebuildClock = func() (time.Duration, error) { return *now, nil }
+	assertScope()
+	readyPreparation(t, e, now, "p0")
+	current := e.journal.Entries[e.index("p0")]
+	if current.Metric != old.Metric || current.Alias == old.Alias || current.LinkIndex == old.LinkIndex {
+		t.Fatal("event identity changed or installation identity reused")
+	}
+	assertScope()
+	// Reject malformed scope/entry binding instead of weakening foreign checks.
+	e.journal.Preparations[0].TerminalScope.Metric++
+	if validatePreparations(e.journal) == nil {
+		t.Fatal("mismatched scope accepted")
+	}
+	e.journal.Preparations[0].TerminalScope.Metric--
+	if _, err := e.Release(ctx, "p0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.syncTerminalScopes(observed); err != nil || len(capture.scopes) != 0 {
+		t.Fatal("released scope survived", err, capture.scopes)
 	}
 }

@@ -109,24 +109,23 @@ jobs:
       # The apply fault matrix has hundreds of real durable write/reopen
       # boundaries. Run that package on its own runner so history's cumulative
       # 10m package deadline is not spent competing with reconstruction tests.
-      # Keep every other package here; the exact excluded package runs below.
-      # Run those packages serially: independent history SQLite stress must not
-      # consume the controller mesh test's unchanged 2s admission budget. Test
-      # goroutines and package-local concurrency still run with race detection.
-      - name: Race packages except the separately scheduled relayapply suite
+      # History also has a dedicated runner: serializing both heavy packages
+      # avoids admission contention but exceeds this job's cumulative budget.
+      # Exact package checks below prevent silently losing either full suite.
+      - name: Race packages except the separately scheduled apply and history suites
         shell: bash
         run: |
           package_list=$(go list ./...)
           packages=()
           excluded=0
           while IFS= read -r package; do
-            if [[ "$package" == vpnctl/internal/relayapply ]]; then
+            if [[ "$package" == vpnctl/internal/relayapply || "$package" == vpnctl/internal/history ]]; then
               excluded=$((excluded + 1))
             else
               packages+=("$package")
             fi
           done <<< "$package_list"
-          test "$excluded" -eq 1
+          test "$excluded" -eq 2
           test "${#packages[@]}" -gt 0
           go test -race -p 1 "${packages[@]}" -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
       - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic|DirectDiagnostics)|^TestCATransition' -count=1
@@ -135,6 +134,17 @@ jobs:
       - run: go vet ./...
       - run: go build ./cmd/vpnctl
       - run: go build ./cmd/vpnctl-lab-report
+
+  history-race:
+    name: History persistence and query race regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./internal/history -skip '^TestPathChurn|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$' -count=1 -timeout=10m
 
   wireguard-storage:
     name: WireGuard real byte budget and corruption race

@@ -91,6 +91,16 @@ Other OIF-less routes, unknown attributes, foreign metrics/tables and shared
 nexthop events still invalidate all underlays. Queued events are drained under
 the previous mapping before retiring it. This avoids interrupting an independent
 app merely because an owned candidate's terminal guard is removed/recreated.
+The explicit intent retains that tuple across the removal/wait/recreation gap.
+For the same table/underlay binding, the random route metric stays fixed for the
+intent's lifetime; installation alias and link index still rotate. This lets a
+separate observer drain queued removal/creation events before it reads the next
+journal without invalidating independent underlays. A newly installed entry must
+still pass the available-resource check; the stable tuple never adopts existing
+kernel objects. Release retires the intent's event scope. Catalog changes that
+move the table or underlay establish a new tuple and can invalidate globally.
+At most eight installed-entry scopes plus eight waiting-intent scopes are
+tracked; the installed candidate limit remains eight.
 Packet/approval/ownership verification is still required after any event.
 
 `inspect.preparations` and `supervise.preparation.preparations` expose consent,

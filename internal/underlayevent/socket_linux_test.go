@@ -190,3 +190,39 @@ func FuzzEventDecode(f *testing.F) {
 		_, _ = messages(data)
 	})
 }
+
+func TestTerminalScopeDelayedConsumerAcrossRebuild(t *testing.T) {
+	m, s := fixture(t)
+	ctx := context.Background()
+	scope := relayobserve.TerminalScope{UnderlayID: "wifi", Table: 123456, Metric: 987654}
+	if err := m.SetTerminalScopes(ctx, []relayobserve.TerminalScope{scope}); err != nil {
+		t.Fatal(err)
+	}
+	before, other := generation(t, m, "wifi"), generation(t, m, "lan")
+	msg := routeMessage(scope.Table, unix.RTN_UNREACHABLE, attr(unix.RTA_PRIORITY, u32(scope.Metric)))
+	msg.data[5] = 186
+	add, err := decode(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remove := add
+	remove.kind = delRoute
+	// Both notifications arrive while this observer is between admissions. The
+	// locked journal may show no installed entry, but retains the explicit intent.
+	s.events = [][]event{{remove, add}}
+	if err := m.SetTerminalScopes(ctx, []relayobserve.TerminalScope{scope}); err != nil {
+		t.Fatal(err)
+	}
+	if generation(t, m, "wifi") == before || generation(t, m, "lan") != other {
+		t.Fatal("delayed rebuild invalidated independent underlay")
+	}
+	// After explicit release, the identical retired tuple must be global again.
+	if err := m.SetTerminalScopes(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	other = generation(t, m, "lan")
+	s.events = [][]event{{add}}
+	if generation(t, m, "lan") == other {
+		t.Fatal("retired scope adopted foreign event")
+	}
+}
