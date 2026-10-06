@@ -72,6 +72,12 @@ cannot force seven other TCP timeouts to run in series. All workers are joined
 before releasing ownership. Public namespace inventories can be shared within
 that wave only; postchecks require an inventory read that started after their
 own TCP proof. Lease timers, per-interface state and approvals are never shared.
+Each candidate's public key, peer, fixed endpoint, allowed prefixes, disabled
+keepalive and absent PSK are checked with one bounded live WG dump. The private
+buffer is cleared on every exit and is never cached or reported. Maintenance
+avoids a duplicate intermediate LeaseStatus; the grant still validates live
+nft/flowtable/BPF ownership, conditionally renews and reads both gates back.
+
 Node engine calls and node supervision share a FIFO turn in the same private
 cache, bounded to 10s admission. Waiting performs no observation or renewal.
 The supervisor reserves its existing 5s work budget after admission (15s total);

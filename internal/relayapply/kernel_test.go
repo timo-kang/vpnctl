@@ -131,10 +131,8 @@ func TestWGExtraPeerRefusesRemoval(t *testing.T) {
 			return []byte(p.WGInterface + " " + decimal(p.FWMark)), nil
 		case strings.Contains(joined, "address show"):
 			out = []object{{"addr_info": []object{{"family": "inet", "local": strings.TrimSuffix(e.Candidate.InnerAddress, "/32"), "prefixlen": 32}}}}
-		case strings.HasSuffix(joined, "public-key"):
-			return []byte(e.Candidate.PublicKey), nil
-		case strings.HasSuffix(joined, " peers"):
-			return []byte(e.Candidate.RelayPublicKey + "\n" + public("unrelated")), nil
+		case joined == "show "+p.WGInterface+" dump":
+			return []byte(nodeWireFixture(e) + public("unrelated") + "\t(none)\t(none)\t(none)\t0\t0\t0\toff\n"), nil
 		default:
 			mutations++
 			return nil, errors.New("unexpected mutation " + name)
@@ -155,18 +153,14 @@ func TestWGUnapprovedPresharedKey(t *testing.T) {
 				if strings.Contains(strings.Join(args, " "), "address show") {
 					return json.Marshal([]object{{"addr_info": []object{{"family": "inet", "local": strings.TrimSuffix(e.Candidate.InnerAddress, "/32"), "prefixlen": 32}}}})
 				}
-				values := map[string]string{
-					"public-key":           e.Candidate.PublicKey,
-					"peers":                e.Candidate.RelayPublicKey,
-					"endpoints":            e.Candidate.RelayPublicKey + " " + e.Candidate.Endpoint,
-					"allowed-ips":          e.Candidate.RelayPublicKey + " " + strings.Join(prefixes(e), " "),
-					"persistent-keepalive": e.Candidate.RelayPublicKey + " off",
-					"preshared-keys":       e.Candidate.RelayPublicKey + " (none)",
+				if strings.Join(args, " ") != "show "+e.Candidate.Pin.WGInterface+" dump" {
+					t.Fatal("unexpected WG query")
 				}
+				raw := nodeWireFixture(e)
 				if extra {
-					values["preshared-keys"] = e.Candidate.RelayPublicKey + " " + secret
+					raw = strings.Replace(raw, "\t(none)\t", "\t"+secret+"\t", 1)
 				}
-				return []byte(values[args[len(args)-1]]), nil
+				return []byte(raw), nil
 			}}
 			ready, err := k.wireState(context.Background(), e, partial)
 			if extra && (!errors.Is(err, ErrConflict) || ready) || !extra && (err != nil || !ready) {

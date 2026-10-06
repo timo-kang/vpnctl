@@ -54,7 +54,11 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 	check := e.backend.Check
 	if k, ok := e.backend.(nodeKernel); ok {
 		k.run = maintenanceInventory(k.run)
-		check = k.Check
+		// Lease below reads the live nft timer/flowtables and BPF owner,
+		// conditionally renews, and reads both gates back. Checking the same
+		// lease here duplicates that work without strengthening the grant.
+		// Only public ownership inventories are shared; lease data is not.
+		check = k.kernel.Check
 	}
 	var all error
 	for i, old := range e.journal.Entries {
