@@ -115,7 +115,7 @@ consumed 578.858s alongside history/controller work. There was no reported data
 race or assertion failure in that log. The failed run and log are preserved.
 
 The complete relayapply race package now runs on a dedicated runner, with its
-original 10m package deadline. Every other package remains in the Go race job;
+original 10m package deadline. Every other package remains in the Go race job (serialized as recorded below);
 no preparation, history, or controller test is removed, and no product/lease/
 observation timeout is widened. The final CI verdict must come from the revised
 commit, not the preceding locally passing subsets.
@@ -176,6 +176,36 @@ observation gap 6.868s, peak 28 FDs and 85,384KiB RSS. Production intervals were
 `/tmp/vpnctl-preparation-ci-37436872347-{production,race}`. Those passing jobs do
 not turn the overall run with the fixture failure into a pass.
 The final revised-head CI result remains the merge gate.
+
+## Shared-runner admission contention
+
+[CI 37439814898](https://github.com/timo-kang/vpnctl/actions/runs/37439814898)
+passed the corrected complete candidate lifecycle job, but the common Go race
+job failed `TestAdminVariableMeshConcurrentMutationsAndRestart/nodes_253`.
+One of eight concurrent admin requests reached the existing 2s admission limit
+and correctly received 503 with `operation not started`. The integrity test
+then correctly reported one unremoved node after restart; it did not silently
+retry or accept the incomplete population. The controller and history packages
+were running concurrently and took 434.504s and 483.535s respectively. The raw
+failure remains at `/tmp/vpnctl-preparation-ci-37439814898-go.log`.
+
+The common race command now uses `-p 1`, isolating independent package workloads
+on the shared runner. The full controller graph, eight concurrent clients,
+package-local goroutines, overload tests, race instrumentation, production 2s
+admission limit, and existing test/job deadlines are unchanged. All packages
+still run; this change does not establish an overloaded production latency SLO.
+The matching complete common-package race command passed locally with caching
+disabled: controller 173.095s, history 175.298s, and all remaining packages
+passed (`/tmp/vpnctl-preparation-serial-package-race.log`). Workflow YAML and
+embedded Bash syntax checks passed. The revised full CI run remains required
+before merge.
+
+The same CI's production/race rebuilding jobs passed with all 28 detailed
+completion reports valid; their artifacts are retained at
+`/tmp/vpnctl-preparation-ci-37439814898-{production,race}`. Maximum capacity
+observation gaps were 4.360s / 4.962s and peak worker RSS 29,628 / 85,764KiB,
+within the unchanged 10s / 512MiB limits. These passing subsets do not override
+the failed common job.
 
 ## Qualification boundary
 

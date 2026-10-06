@@ -110,6 +110,9 @@ jobs:
       # boundaries. Run that package on its own runner so history's cumulative
       # 10m package deadline is not spent competing with reconstruction tests.
       # Keep every other package here; the exact excluded package runs below.
+      # Run those packages serially: independent history SQLite stress must not
+      # consume the controller mesh test's unchanged 2s admission budget. Test
+      # goroutines and package-local concurrency still run with race detection.
       - name: Race packages except the separately scheduled relayapply suite
         shell: bash
         run: |
@@ -125,7 +128,7 @@ jobs:
           done <<< "$package_list"
           test "$excluded" -eq 1
           test "${#packages[@]}" -gt 0
-          go test -race "${packages[@]}" -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
+          go test -race -p 1 "${packages[@]}" -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
       - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic|DirectDiagnostics)|^TestCATransition' -count=1
       - name: VM runner isolation and evidence regressions (no guest power actions)
         run: python3 -m unittest discover -s tests/vm -p 'test_*.py' -v
