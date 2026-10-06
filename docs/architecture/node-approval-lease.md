@@ -53,20 +53,31 @@ lease can be granted. A failed durable write prevents further grants in that
 engine. Target quarantine entries are retained during candidate cleanup; expiry
 must never release target quarantine and reopen the main/default fallback.
 
-The supervisor uses one shared one-second lock admission budget, a one-second
-controller request, and a five-second total cycle. It yields between cycles and
-writes bounded JSON after releasing locks. CLI candidate/target operations and
-selection retry only admission contention within one second and their outer
-deadline; they never retry a possibly completed mutation.
+Node operations and supervision enter through a FIFO queue in the same private
+cache, then acquire the existing cache and namespace locks. Admission is bounded
+to ten seconds and never renews leases or observes approval. A process retains
+its turn through contention and releases it with cache ownership; cancellation or
+process death releases its descriptor-owned slot. Unsafe or full queues fail
+closed. This applies to participating node binaries using the same cache, not
+other caches or external network managers. See [capacity qualification](../validation/m3-observation-capacity.md).
 
-Protected observation batches maintain leases between candidates while holding
-the same locks. Each protected candidate's observation gets at most three seconds,
-including its at-most-two-second TCP probe; the batch remains bounded to twenty
-seconds. Maintenance has a separate five-second cap and performs no TCP probes.
+After admission the supervisor retains a one-second controller request and a
+five-second work budget (at most fifteen seconds including admission). It yields
+between cycles and writes JSON after releasing locks. Other operations retain
+their outer deadline and never replay a possibly completed mutation. Kernel
+lease expiry remains independently bounded to ten seconds even if an owner is
+stopped while holding the queue, cache or namespace lock.
+
+Protected observation batches maintain all leases once before a common
+three-second wave of at most eight concurrent TCP proofs (each at most two
+seconds). Approval/cache, inventory, kernel checks and blocking stay serialized;
+all workers join before ownership is released. The outer observation bound
+remains twenty seconds, and maintenance has a five-second cap without TCP probes.
 Timeouts and changed/inactive guards produce unknown evidence, never a healthy
-path or a relaxed deadline. Generic inventory may be shared only within a
-maintenance pass for at most five BOOTTIME seconds; peer/address/guard reads and
-mutations remain live. Capacity qualification includes 1/4/8 prepared candidates.
+path or a relaxed deadline. Public inventory sharing is scoped to one maintenance
+pass or one observation wave; observation postchecks require a read begun after
+their own TCP proof. Peer/address/guard/underlay reads and mutations remain live.
+Capacity qualification includes 1/4/8 prepared candidates and two active targets.
 
 ## Deployment, stop, upgrade and recovery
 

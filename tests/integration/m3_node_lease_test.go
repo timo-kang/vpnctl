@@ -230,8 +230,8 @@ func checkProtectedSlowProbes(t *testing.T, f *m3AuthorityFixture, apply bool) {
 }`)
 	budget := 50 * time.Second
 	if apply {
-		// Include admission retries without changing the product's one-second
-		// lock or twenty-second observation budgets. Busy is not proof of
+		// Include bounded queued admission and twenty-second observations.
+		// Waiting performs no observation. Busy is not proof of
 		// quarantine and must not count as a completed slow observation.
 		budget = 90 * time.Second
 	}
