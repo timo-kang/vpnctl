@@ -250,15 +250,23 @@ func testDirectDataplane(t *testing.T, size int) {
 		netOutput(t, ns[i+1], "nft", "-f", faultPath)
 	}
 	failedAt := time.Now()
+	report["wg_fault_installed_at"] = failedAt.UTC()
 	eventually(t, 5*time.Second, "local direct removal with controller offline", func() error {
 		for _, i := range []int{0, 1} {
 			other := 1 - i
 			if strings.Contains(netOutput(t, ns[i+1], "wg", "show", "wg0", "peers"), nodes[other].Node.WGPublicKey) {
 				return fmt.Errorf("direct peer remains")
 			}
+			// Peer removal precedes publication of the completed Step result.
+			// Wait for both observations inside the same fallback deadline;
+			// a pre-fault active log is not evidence of reactivation.
+			if observed := state(i, other); observed != "relay_unverified" && observed != "cooldown" {
+				return fmt.Errorf("direct withdrawal not yet published: %d -> %d: %s", i, other, observed)
+			}
 		}
 		return probe()
 	})
+	report["withdrawal_observed_at"] = time.Now().UTC()
 	report["fallback_seconds"] = time.Since(failedAt).Seconds()
 	report["fallback_overlay_ok"] = true
 	// Stay beyond cooldown: successful UDP readiness cannot make broken WG active.
