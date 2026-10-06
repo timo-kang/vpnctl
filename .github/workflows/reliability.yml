@@ -11,7 +11,10 @@ permissions:
 
 concurrency:
   group: reliability-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Preserve running soak/fault experiments when another PR revision arrives.
+  # A newer pending revision may replace an older pending one, but it must not
+  # truncate evidence from a job that has already started.
+  cancel-in-progress: false
 
 jobs:
   m2-smoke:
