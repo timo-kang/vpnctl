@@ -148,3 +148,21 @@ fallback deadline. It preserves the following 12s retry watch and 5s loss bound.
 Five consecutive production / 2 CPU eight-node repetitions passed in
 `/tmp/vpnctl-direct-log-boundary-repeat`. Fault/withdrawal timestamps are retained.
 The complete production 2/3/8/32 and race 2/3/8 profiles are required in final CI.
+
+## Fallback fixture baseline (#165)
+
+The third CI run, [37399648534](https://github.com/timo-kang/vpnctl/actions/runs/37399648534),
+passed all three mixed race positions with both apps/eight leases intact. Its
+application race failure was instead the single first default-route TCP after
+explicit quarantine release. The target rule/table had been removed, but there
+was no pre-quarantine fallback payload or neighbour evidence; the original
+packet-loss/ARP cause cannot be determined from those artifacts.
+
+The fixed veth fixture now prepares only its own two permanent neighbours,
+proves the **same target and default source** before reserving/quarantining it,
+and records baseline/released route lookups, both payload results and both
+neighbour inventories. Quarantine still must block new and existing TCP with
+all bound probes alive. After explicit release, the original single 1s payload
+check remains; no post-release retry or larger deadline is added. Baseline
+readiness is setup evidence, not a relaxed protection assertion. ARP/roaming
+qualification remains a separate physical-underlay test.

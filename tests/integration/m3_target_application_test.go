@@ -34,10 +34,12 @@ func applicationFixture(t *testing.T, separate bool, size int) *m3AuthorityFixtu
 		writeM3Report(t, filepath.Join(f.results, "application-kernel.json"), map[string]string{
 			"cpu_stat_before": string(cpuBefore), "cpu_stat_after": string(cpuAfter), "cpu_limit": string(cpuLimit),
 			"memory_events_before": string(memoryBefore), "memory_events_after": string(memoryAfter),
-			"rules":     netOutput(t, f.robot, "ip", "-j", "-N", "-4", "rule", "show"),
-			"routes":    netOutput(t, f.robot, "ip", "-j", "-N", "-4", "route", "show", "table", "all"),
-			"rp_filter": netOutput(t, f.robot, "cat", "/proc/sys/net/ipv4/conf/all/rp_filter"),
-			"counters":  netOutput(t, f.robot, "cat", "/proc/net/netstat"),
+			"rules":             netOutput(t, f.robot, "ip", "-j", "-N", "-4", "rule", "show"),
+			"routes":            netOutput(t, f.robot, "ip", "-j", "-N", "-4", "route", "show", "table", "all"),
+			"rp_filter":         netOutput(t, f.robot, "cat", "/proc/sys/net/ipv4/conf/all/rp_filter"),
+			"robot_neighbours":  netOutput(t, f.robot, "ip", "-j", "neigh", "show"),
+			"target_neighbours": netOutput(t, f.target, "ip", "-j", "neigh", "show"),
+			"counters":          netOutput(t, f.robot, "cat", "/proc/net/netstat"),
 		})
 	})
 	f.releaseNodeCandidates()
