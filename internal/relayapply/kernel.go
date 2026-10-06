@@ -370,43 +370,12 @@ func (k kernel) wireState(ctx context.Context, e Entry, partial bool) (bool, err
 	if !(partial && len(got) == 0) && (len(got) != 1 || got[0] != e.Candidate.InnerAddress) {
 		return false, ErrConflict
 	}
-	// This candidate contract does not approve a PSK. Read that field through
-	// the bounded private command pipe and never include its contents in errors
-	// or reports. An externally configured PSK must block readiness and removal.
-	checks := []struct{ field, want string }{{"public-key", e.Candidate.PublicKey}, {"peers", e.Candidate.RelayPublicKey}, {"endpoints", e.Candidate.RelayPublicKey + " " + e.Candidate.Endpoint}, {"allowed-ips", e.Candidate.RelayPublicKey + " " + strings.Join(prefixes(e), " ")}, {"persistent-keepalive", e.Candidate.RelayPublicKey + " off"}, {"preshared-keys", e.Candidate.RelayPublicKey + " (none)"}}
-	for _, check := range checks {
-		b, err := k.run(ctx, "", "wg", "show", p.WGInterface, check.field)
-		if err != nil {
-			return false, err
-		}
-		got := strings.Join(strings.Fields(strings.ReplaceAll(string(b), ",", " ")), " ")
-		if check.field == "allowed-ips" {
-			f := strings.Fields(got)
-			if len(f) > 1 {
-				slices.Sort(f[1:])
-				got = strings.Join(f, " ")
-			}
-		}
-		if partial && (got == "" || check.field == "public-key" && got == "(none)" || (check.field == "allowed-ips" || check.field == "endpoints") && got == e.Candidate.RelayPublicKey+" (none)") {
-			continue
-		}
-		if partial && check.field == "allowed-ips" {
-			f := strings.Fields(got)
-			if len(f) > 0 && f[0] == e.Candidate.RelayPublicKey {
-				valid := true
-				for _, prefix := range f[1:] {
-					valid = valid && slices.Contains(prefixes(e), prefix)
-				}
-				if valid {
-					continue
-				}
-			}
-		}
-		if got != check.want {
-			return false, ErrConflict
-		}
+	b, err := k.run(ctx, "", "wg", "show", p.WGInterface, "dump")
+	if err != nil {
+		clear(b)
+		return false, err
 	}
-	return true, nil
+	return validateNodeWire(b, e, partial)
 }
 
 func routeArgs(e Entry, verb string, guard bool) []string {

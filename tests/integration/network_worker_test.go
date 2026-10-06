@@ -47,6 +47,8 @@ func TestNetworkWorker(t *testing.T) {
 	}
 	var err error
 	switch mode {
+	case "underlay-events":
+		err = runUnderlayEventWorker()
 	case "boot-guard-snapshot":
 		err = snapshotBootGuards()
 	case "vm-probe":

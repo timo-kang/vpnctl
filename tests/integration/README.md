@@ -158,3 +158,13 @@ instead of proceeding with partial package lists. The wrapper preserves
 `setup-*.log` and source identity even if preparation fails before the normal
 run manifest exists; `pipefail` propagates the Docker failure. These are setup
 bounds only and never relax the network tests' deadlines or success criteria.
+
+### Underlay 이벤트 세대 (#169)
+
+`TestNetns_UnderlayEvents`는 실제 link/address/route의 삭제·복원, rename, 동일 ifindex
+재사용, 공유 nexthop 변경, 미설정 장치 제외 및 2048개 이벤트 범람 후 새 snapshot을
+검증한다. `TestNetns_M3TargetApplicationUnderlayEvents`는 분리 controller·두 underlay·
+두 relay·두 독립 actuator에서 변경 전 성공을 재사용하지 않는 2회 확인과 실제 payload
+복구, 다른 앱의 통신 유지를 검사한다. 둘 다 application production/race CI에 포함한다.
+실제 Wi-Fi BSSID roaming, LTE/SIM 등록, NM/Netplan/udev daemon 호환성 인증은 아니다.
+`application-underlay-events.json`, `underlay-events.json` 및 원본 JSONL을 보존한다.

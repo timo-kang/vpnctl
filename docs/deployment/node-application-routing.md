@@ -72,6 +72,12 @@ cannot force seven other TCP timeouts to run in series. All workers are joined
 before releasing ownership. Public namespace inventories can be shared within
 that wave only; postchecks require an inventory read that started after their
 own TCP proof. Lease timers, per-interface state and approvals are never shared.
+Each candidate's public key, peer, fixed endpoint, allowed prefixes, disabled
+keepalive and absent PSK are checked with one bounded live WG dump. The private
+buffer is cleared on every exit and is never cached or reported. Maintenance
+avoids a duplicate intermediate LeaseStatus; the grant still validates live
+nft/flowtable/BPF ownership, conditionally renews and reads both gates back.
+
 Node engine calls and node supervision share a FIFO turn in the same private
 cache, bounded to 10s admission. Waiting performs no observation or renewal.
 The supervisor reserves its existing 5s work budget after admission (15s total);
@@ -98,3 +104,12 @@ The original 2 CPU race capacity failure and 4 CPU interim validation remain in
 [issue #162](https://github.com/timo-kang/vpnctl/issues/162). Reproduction, mixed
 healthy/slow paths, CPU profiles and remaining qualification limits are described
 in [observation capacity validation](../validation/m3-observation-capacity.md).
+
+### 물리 경로 변경 이벤트
+
+선택/reconcile 명령은 전체 실행 동안 설정 underlay의 커널 이벤트를 관측한다.
+주소·link·route가 잠시 바뀌었다가 복원돼도 `underlay_generation`이 달라져 이전의
+연속 성공을 재사용하지 않는다. 새로운 2회 확인과 앱 경로 검증을 거친다.
+수집 유실은 unknown이며 물리 경로 부재 판정이 아니다. source/gateway/장치가 실제로
+바뀐 경우 소유 후보의 자동 재구성은 아직 #22/#23 후속 범위다.
+[이벤트 계약과 검증 범위](../architecture/underlay-events.md)를 참조한다.

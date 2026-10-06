@@ -200,3 +200,30 @@ all bound probes alive. After explicit release, the original single 1s payload
 check remains; no post-release retry or larger deadline is added. Baseline
 readiness is setup evidence, not a relaxed protection assertion. ARP/roaming
 qualification remains a separate physical-underlay test.
+
+## Recurrent CI capacity failure and live-read consolidation (#170)
+
+[CI 37416863772](https://github.com/timo-kang/vpnctl/actions/runs/37416863772)
+reproduced the 2 CPU / 2 GiB race boundary under eight candidates/two actuators.
+Healthy positions 0 and 3 first activated in 16.305/15.612s, then lost eligibility
+when fresh observation gaps reached 10.097265/10.127456s. Their underlay generation
+was unchanged, so this was not event invalidation. Position 7 passed but reached
+9.929s between observations for the independent app. Original failures are kept;
+issue #162 was reopened. The prior successful run is not a durable capacity SLO.
+
+The follow-up replaces six per-interface WG queries with one uncached dump,
+checking the same public identity, single peer, absent PSK, pinned endpoint,
+allowed prefix set and disabled keepalive. It also validates the live mark.
+Partial recovery permits only approved subsets; foreign state still prevents
+adoption or removal. The private column and PSK stay in the original buffer,
+which is erased on all exits. The format follows
+[wireguard-tools dump_print](https://git.zx2c4.com/wireguard-tools/tree/src/show.c).
+There is no shared/private dump cache and counters confer no health evidence.
+
+Maintenance no longer calls LeaseStatus immediately before Lease: Lease itself
+reads the BPF owner and nft timer/flowtables before any grant, conditionally
+continues or requires fresh approval to rearm, then reads both enforcement gates
+back. Persisted approval changes still precede a longer grant. Failure still
+blocks independently. No lease lifetime, wave budget, freshness, confirmation,
+FIFO or container resource bound changes. Final exact-commit CI and raw artifact
+review must pass before this recurrence can be considered resolved.
