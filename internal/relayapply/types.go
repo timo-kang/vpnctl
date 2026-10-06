@@ -28,6 +28,7 @@ var ErrConflict = errors.New("candidate resource ownership conflict")
 var ErrRecovery = errors.New("candidate recovery required")
 
 type Entry struct {
+	StrictOwner    bool                `json:"strict_owner,omitempty"` // fully prepared ownership retained during automatic cleanup
 	LeaseVersion   int                 `json:"lease_version,omitempty"`
 	ApprovalBootNS uint64              `json:"approval_boot_ns,omitempty"`
 	ProbeScope     int                 `json:"probe_scope,omitempty"` // 1: device-bound application candidates
@@ -43,20 +44,23 @@ type Entry struct {
 	Phase          string              `json:"phase"`
 }
 type Journal struct {
-	Version int           `json:"version"`
-	Node    string        `json:"node_id"`
-	Domain  string        `json:"kernel_domain"`
-	Entries []Entry       `json:"entries"`
-	Targets []TargetGuard `json:"targets,omitempty"`
+	Version       int                 `json:"version"`
+	Node          string              `json:"node_id"`
+	Domain        string              `json:"kernel_domain"`
+	Entries       []Entry             `json:"entries"`
+	Targets       []TargetGuard       `json:"targets,omitempty"`
+	Preparations  []PreparationIntent `json:"preparations,omitempty"`
+	RebuildCursor string              `json:"rebuild_cursor,omitempty"`
 }
 type Result struct {
-	SchemaVersion int          `json:"schema_version"`
-	State         string       `json:"state"`
-	PathID        string       `json:"path_id,omitempty"`
-	Reason        string       `json:"reason,omitempty"`
-	KernelReady   bool         `json:"kernel_ready"`
-	UplinkHealth  string       `json:"uplink_health"`
-	Paths         []PathResult `json:"paths"`
+	SchemaVersion int                 `json:"schema_version"`
+	State         string              `json:"state"`
+	PathID        string              `json:"path_id,omitempty"`
+	Reason        string              `json:"reason,omitempty"`
+	KernelReady   bool                `json:"kernel_ready"`
+	UplinkHealth  string              `json:"uplink_health"`
+	Paths         []PathResult        `json:"paths"`
+	Preparations  []PreparationStatus `json:"preparations,omitempty"`
 }
 type PathResult struct {
 	PathID      string           `json:"path_id"`
@@ -71,17 +75,19 @@ type backend interface {
 	Remove(context.Context, Entry) error
 }
 type Engine struct {
-	cache     *relaycache.Store
-	journal   Journal
-	backend   backend
-	targets   targetBackend
-	underlays []relayplan.Underlay
-	collector relayplan.Collector
-	unlock    func()
-	save      func([]byte) error
-	uncertain bool
-	probe     func(context.Context, Entry, relaycatalog.Target) (targetProof, error)
-	appProbe  func(context.Context, TargetGuard, Entry, relaycatalog.Target) (ApplicationProof, error)
+	cache        *relaycache.Store
+	journal      Journal
+	backend      backend
+	targets      targetBackend
+	underlays    []relayplan.Underlay
+	collector    relayplan.Collector
+	unlock       func()
+	save         func([]byte) error
+	uncertain    bool
+	probe        func(context.Context, Entry, relaycatalog.Target) (targetProof, error)
+	appProbe     func(context.Context, TargetGuard, Entry, relaycatalog.Target) (ApplicationProof, error)
+	maintained   map[string]bool
+	rebuildClock func() (time.Duration, error)
 }
 
 func token() (string, uint32, uint32, error) {

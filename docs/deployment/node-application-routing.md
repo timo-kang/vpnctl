@@ -29,6 +29,14 @@ supervise service 위치를 실제 배포에 맞춘 뒤 설치한다. `%i`는 ca
 
 ## 운영과 복구
 
+물리 uplink 변경 후 소유 후보를 자동으로 다시 준비하려면
+`node relay prepare --app-routes --auto-rebuild --path-id <path> --config <config>`로
+경로별 의도를 명시적으로 등록한다. 응답 `scheduled`는 준비 완료가 아니다.
+supervise가 작은 단계로 준비/정리하고, 새 유효 승인과 새 연속 관측 후 앱을 재개한다.
+기존 수동 prepare는 자동관리 대상으로 전환되지 않는다. `release`는 자동 복구 허용을
+먼저 영속 철회한다. 저장 실패·재시작·충돌 처리와 배포 계약은
+[후보 준비/복구](../architecture/node-candidate-preparation.md)를 참조한다.
+
 JSONL의 최상위 `applied`, `application.state/reason/activated/guarded`, 후보별 제외 원인과
 `route_changed_at`, `app_verified_at`를 함께 수집한다. `ownership_unavailable`, `switching`,
 `journal_save_failed`, `kernel_conflict_or_unavailable`은 운영 조치가 필요하다.

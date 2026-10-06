@@ -21,6 +21,12 @@
   앱 guard의 최초 생성·회수도 출구 없는 변경이므로 전체 재확인을 유발할 수 있다.
   정상 앱 전환은 기존 guard를 유지하고 WG 출구가 명확한 route를 쓰므로 이 경우와
   구분된다. 기존 journal/커널 소유권 대조는 계속 유지한다.
+- 후보 자동 복구에서는 잠금 안에서 읽은 소유 journal의 table·임의 metric·underlay
+  tuple과 정확히 일치하는 protocol 186 unreachable default만 해당 underlay로 범위를
+  한정한다. 같은 자동관리 의도·table·underlay에서는 metric을 유지하며, 설치 객체가 없는
+  중간 구간에도 의도에 저장한 매핑을 유지한다. alias/ifindex는 새로 만들며 자원 부재를
+  확인한다. 명시적 해제는 이 이벤트 매핑도 회수한다. 다른 속성/metric/외부 table은 여전히 전체 무효화한다. 소유 매핑을 갱신하기
+  전에 대기 중인 이벤트를 이전 매핑으로 처리한다. 이는 readiness나 승인 근거가 아니다.
 - 결과의 `underlay_generation`은 프로세스별 임의 epoch와 underlay별 증가 세대를
   묶은 불투명 식별자다. 승인 generation/설치 fingerprint와 별개다. 재시작·이벤트
   유실 후 다시 조회하면 이전 연속 성공을 재사용하지 않는다. 영속적인 건강 증거가 아니다.
@@ -64,8 +70,8 @@ framing, 초기 dump 오류는 unknown으로 전환하고 구독을 닫는다. �
 물리 연결 profile, DHCP, DNS, default route, NetworkManager/Netplan/udev 설정은 읽기
 대상이며 변경하지 않는다. 설정 파일 변경 시 명령을 재시작하고 새 확인을 수행한다.
 source/gateway/ifindex가 실제로 달라져 설치 journal과 불일치하면 기존 보호에 따라
-차단된다. 이 단계는 그 소유 후보를 자동으로 release/reprepare하지 않는다. 후속
-#22/#23에서 소유권과 새 inventory에 맞춘 재구성·backoff·복구를 구현한다.
+차단된다. 명시적으로 자동 관리를 요청한 경로는 [후보 준비/복구](node-candidate-preparation.md)의
+소유권 대조·작업 예산·backoff에 따라 새로 준비한다. 수동 prepare는 자동 복구하지 않는다.
 
 RTNETLINK만으로 BSSID가 바뀌어도 L3/link 상태가 그대로인 Wi-Fi roaming, SIM/모뎀
 등록, DNS 변화를 알 수 있다고 주장하지 않는다. 이들은 nl80211/관리자별 읽기 provider와

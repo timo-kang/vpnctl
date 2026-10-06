@@ -17,7 +17,7 @@ func nodeLeaseEntry(e Entry) DeploymentEntry {
 }
 func nodeGuardOwner(e Entry) relayguard.Owner {
 	o := guardOwner(nodeLeaseEntry(e))
-	o.Pending = e.Phase != "prepared"
+	o.Pending = e.Phase != "prepared" && !e.StrictOwner
 	return o
 }
 
@@ -79,6 +79,36 @@ func (k nodeKernel) Remove(ctx context.Context, e Entry) error {
 		return relayguard.RemovePins(ctx, nodeGuardOwner(e))
 	}
 	return nil
+}
+
+func (k nodeKernel) RemoveStep(ctx context.Context, e Entry, step string) error {
+	if err := relayguard.InspectPartial(ctx, nodeGuardOwner(e)); err != nil {
+		return err
+	}
+	_, leaseExists, err := k.leaseKernel().leaseRead(ctx, nodeLeaseEntry(e))
+	if err != nil {
+		return err
+	}
+	if step == "verify" {
+		if leaseExists {
+			return ErrConflict
+		}
+		if err := relayguard.Preflight(nodeGuardOwner(e)); err != nil {
+			return err
+		}
+	}
+	if step == "lease" || step == "pins" {
+		// Never remove a remaining gate while a WG socket or any owned routes
+		// are still present, including a resource reappearing between turns.
+		if err := k.kernel.RemoveStep(ctx, e, "verify"); err != nil {
+			return err
+		}
+		if step == "lease" {
+			return k.leaseKernel().leaseRemove(ctx, nodeLeaseEntry(e))
+		}
+		return relayguard.RemovePins(ctx, nodeGuardOwner(e))
+	}
+	return k.kernel.RemoveStep(ctx, e, step)
 }
 func (k nodeKernel) Block(ctx context.Context, e Entry) error {
 	if e.LeaseVersion == 0 {

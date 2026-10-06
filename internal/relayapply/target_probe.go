@@ -72,6 +72,9 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 	if e.uncertain {
 		return out, errors.New("reopen uncertain journal before observation")
 	}
+	if err := e.syncTerminalScopes(parent); err != nil {
+		return out, err
+	}
 	ctx, cancel := context.WithTimeout(parent, MaxTargetProbeDuration)
 	defer cancel()
 	report, err := e.cache.Status()

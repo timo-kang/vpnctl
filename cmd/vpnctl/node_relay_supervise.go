@@ -16,6 +16,8 @@ import (
 	"vpnctl/internal/config"
 	"vpnctl/internal/relayapply"
 	"vpnctl/internal/relaycache"
+	"vpnctl/internal/relayobserve"
+	"vpnctl/internal/underlayevent"
 )
 
 type nodeSupervisionReport struct {
@@ -26,6 +28,7 @@ type nodeSupervisionReport struct {
 	Reason        string             `json:"reason,omitempty"`
 	Refresh       string             `json:"refresh"`
 	Kernel        *relayapply.Result `json:"kernel,omitempty"`
+	Preparation   *relayapply.Result `json:"preparation,omitempty"`
 }
 
 func nodeSupervisionCycle(ctx context.Context, cfg *config.NodeConfig, dir string, client relaycache.Client, refresh bool) (nodeSupervisionReport, error) {
@@ -53,7 +56,11 @@ func nodeSupervisionCycle(ctx context.Context, cfg *config.NodeConfig, dir strin
 	out.Kernel = &r
 	out.State = r.State
 	out.Reason = r.Reason
-	return out, err
+	preparation, rebuildErr := e.RebuildCandidates(ctx)
+	if len(preparation.Preparations) > 0 || preparation.PathID != "" {
+		out.Preparation = &preparation
+	}
+	return out, errors.Join(err, rebuildErr)
 }
 
 func runNodeRelaySupervise(args []string) error {
@@ -85,6 +92,12 @@ func runNodeRelaySupervise(args []string) error {
 	defer client.CloseIdleConnections()
 	ctx, stop := signalContext()
 	defer stop()
+	events, err := underlayevent.New(cfg.Node.RelayUnderlays)
+	if err != nil {
+		return err
+	}
+	defer events.Close()
+	ctx = relayobserve.WithUnderlayEvents(ctx, events)
 	next := time.Time{}
 	for ctx.Err() == nil {
 		start := time.Now()

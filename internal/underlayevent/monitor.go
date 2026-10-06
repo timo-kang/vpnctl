@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"vpnctl/internal/relayobserve"
 	"vpnctl/internal/relayplan"
 )
 
@@ -30,11 +31,13 @@ type link struct {
 	name  string
 }
 type event struct {
-	kind    uint16
-	index   int
-	name    string
-	indexes []int
-	global  bool
+	kind          uint16
+	index         int
+	name          string
+	indexes       []int
+	global        bool
+	terminal      bool
+	table, metric uint32
 }
 type source interface {
 	read() ([]event, error) // errEmpty means the nonblocking socket is drained
@@ -59,6 +62,7 @@ type Monitor struct {
 	nextRetry time.Time
 	closed    bool
 	failed    bool
+	terminals []relayobserve.TerminalScope
 }
 
 func New(underlays []relayplan.Underlay) (*Monitor, error) {
@@ -147,8 +151,16 @@ func (m *Monitor) drain(ctx context.Context) error {
 			return m.lose()
 		}
 		for _, ev := range events {
-			for _, s := range m.states {
+			for id, s := range m.states {
 				affected := ev.global
+				if ev.terminal {
+					for _, scope := range m.terminals {
+						if ev.table == scope.Table && ev.metric == scope.Metric {
+							affected = id == scope.UnderlayID
+							break
+						}
+					}
+				}
 				switch ev.kind {
 				case newLink, delLink:
 					if ev.name == s.name || s.index != 0 && ev.index == s.index {
@@ -178,6 +190,30 @@ func (m *Monitor) drain(ctx context.Context) error {
 	// A continuously readable socket cannot monopolize a lease/apply budget.
 	// Treat an unfinished drain exactly like loss; no partial generation escapes.
 	return m.lose()
+}
+
+func (m *Monitor) SetTerminalScopes(ctx context.Context, scopes []relayobserve.TerminalScope) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Drain queued events under the previous journal mapping before retiring it.
+	// No event from the interval between admissions gets reclassified as new ownership.
+	if err := m.drain(ctx); err != nil {
+		return err
+	}
+	// At most eight installed entries plus eight waiting explicit intents.
+	// These are event scopes only; the installed candidate limit remains eight.
+	if len(scopes) > 16 {
+		return ErrUnavailable
+	}
+	seen := map[uint32]bool{}
+	for _, s := range scopes {
+		if _, ok := m.states[s.UnderlayID]; !ok || s.Table < 100000 || s.Table > 624287 || s.Metric < 100000 || seen[s.Table] {
+			return ErrUnavailable
+		}
+		seen[s.Table] = true
+	}
+	m.terminals = append(m.terminals[:0], scopes...)
+	return nil
 }
 func (m *Monitor) Generation(ctx context.Context, id string) (string, error) {
 	m.mu.Lock()

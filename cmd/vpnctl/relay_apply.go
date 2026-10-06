@@ -19,6 +19,7 @@ func runNodeRelayApply(args []string) error {
 	cacheDir := fs.String("cache-dir", "", "private relay cache directory")
 	probeRoutes := fs.Bool("probe-routes", false, "prepare owned target routes for explicit candidate-source probes")
 	appRoutes := fs.Bool("app-routes", false, "prepare expiring application candidate with device-bound probes; implies --lease --probe-routes")
+	autoRebuild := fs.Bool("auto-rebuild", false, "persist explicit application preparation intent; supervise performs incremental creation and repair")
 	lease := fs.Bool("lease", false, "install initially closed BOOTTIME/nft expiry protection; requires node relay supervise")
 	path := fs.String("path-id", "", "approved path ID (prepare/release)")
 	controller := fs.String("controller-id", "", "expected controller identity (prepare)")
@@ -37,6 +38,9 @@ func runNodeRelayApply(args []string) error {
 	}
 	if *appRoutes && args[0] != "prepare" {
 		return fmt.Errorf("app-routes is only accepted by prepare")
+	}
+	if *autoRebuild && (args[0] != "prepare" || !*appRoutes) {
+		return fmt.Errorf("auto-rebuild requires prepare --app-routes")
 	}
 	if *lease && args[0] != "prepare" {
 		return fmt.Errorf("lease is only accepted by prepare")
@@ -75,7 +79,9 @@ func runNodeRelayApply(args []string) error {
 	var out relayapply.Result
 	switch args[0] {
 	case "prepare":
-		if *appRoutes {
+		if *autoRebuild {
+			out, err = engine.RequestPreparation(ctx, *path, *controller)
+		} else if *appRoutes {
 			out, err = engine.PrepareApplication(ctx, *path, *controller)
 		} else if *lease {
 			out, err = engine.PrepareProtected(ctx, *path, *controller, *probeRoutes)

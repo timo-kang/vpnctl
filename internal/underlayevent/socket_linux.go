@@ -138,10 +138,18 @@ func decode(m message) (event, error) {
 		if m.data[0] != unix.AF_INET {
 			return event{}, nil
 		}
+		e.table = uint32(m.data[4])
 		if b, ok := attrs[unix.RTA_TABLE]; ok {
 			if len(b) != 4 {
 				return e, ErrUnavailable
 			}
+			e.table = binary.NativeEndian.Uint32(b)
+		}
+		if b, ok := attrs[unix.RTA_PRIORITY]; ok {
+			if len(b) != 4 {
+				return e, ErrUnavailable
+			}
+			e.metric = binary.NativeEndian.Uint32(b)
 		}
 		if b, ok := attrs[unix.RTA_OIF]; ok {
 			i, err := indexAttribute(b)
@@ -185,6 +193,15 @@ func decode(m message) (event, error) {
 		// Conservatively invalidate all, including app terminal guard creation.
 		if len(e.indexes) == 0 {
 			e.global = true
+		}
+		// Scope only the exact terminal route form used by candidate preparation.
+		// Unknown attributes, selectors, nexthops, main tables and foreign metrics
+		// retain global invalidation; protocol/table range alone is insufficient.
+		e.terminal = len(e.indexes) == 0 && m.data[1] == 0 && m.data[2] == 0 && m.data[3] == 0 && m.data[5] == 186 && m.data[6] == unix.RT_SCOPE_UNIVERSE && m.data[7] == unix.RTN_UNREACHABLE && binary.NativeEndian.Uint32(m.data[8:12]) == 0
+		for kind := range attrs {
+			if kind != unix.RTA_TABLE && kind != unix.RTA_PRIORITY {
+				e.terminal = false
+			}
 		}
 	}
 	return e, nil

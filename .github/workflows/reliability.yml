@@ -106,13 +106,45 @@ jobs:
       # cumulative 10m test timer can terminate it despite forward progress.
       # Concurrent SQLite race packages on two CPUs can starve live producers
       # past their unchanged 45s convergence budget. Every test still runs.
-      - run: go test -race ./... -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
+      # The apply fault matrix has hundreds of real durable write/reopen
+      # boundaries. Run that package on its own runner so history's cumulative
+      # 10m package deadline is not spent competing with reconstruction tests.
+      # History also has a dedicated runner: serializing both heavy packages
+      # avoids admission contention but exceeds this job's cumulative budget.
+      # Exact package checks below prevent silently losing either full suite.
+      - name: Race packages except the separately scheduled apply and history suites
+        shell: bash
+        run: |
+          package_list=$(go list ./...)
+          packages=()
+          excluded=0
+          while IFS= read -r package; do
+            if [[ "$package" == vpnctl/internal/relayapply || "$package" == vpnctl/internal/history ]]; then
+              excluded=$((excluded + 1))
+            else
+              packages+=("$package")
+            fi
+          done <<< "$package_list"
+          test "$excluded" -eq 2
+          test "${#packages[@]}" -gt 0
+          go test -race -p 1 "${packages[@]}" -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
       - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic|DirectDiagnostics)|^TestCATransition' -count=1
       - name: VM runner isolation and evidence regressions (no guest power actions)
         run: python3 -m unittest discover -s tests/vm -p 'test_*.py' -v
       - run: go vet ./...
       - run: go build ./cmd/vpnctl
       - run: go build ./cmd/vpnctl-lab-report
+
+  history-race:
+    name: History persistence and query race regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./internal/history -skip '^TestPathChurn|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$' -count=1 -timeout=10m
 
   wireguard-storage:
     name: WireGuard real byte budget and corruption race
@@ -178,7 +210,7 @@ jobs:
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-network-results
           VPNCTL_RACE: '0'
           VPNCTL_TEST_PREVIOUS_BINARY: ${{ runner.temp }}/vpnctl-previous
-        run: ./scripts/test-netns.sh -test.skip='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale|ControlIsolation)$|^TestNetns_M3Node|^TestNetns_M3TargetApplication|^TestNetns_DirectDataplane$'
+        run: ./scripts/test-netns.sh -test.skip='^TestNetns_M3(AuthorityMatrix|LeaseConflicts|LeasePressure|SupervisionScale|ControlIsolation)$|^TestNetns_M3Node|^TestNetns_M3TargetApplication|^TestNetns_M3Preparation|^TestNetns_DirectDataplane$'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -317,6 +349,50 @@ jobs:
         with:
           name: m3-target-application-${{ matrix.profile }}
           path: ${{ runner.temp }}/vpnctl-target-application
+          if-no-files-found: error
+          retention-days: 14
+
+  m3-candidate-lifecycle:
+    name: M3 candidate lifecycle race regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Complete relayapply race suite including durable fault matrix
+        run: go test -race ./internal/relayapply -count=1 -timeout=10m
+
+  m3-preparation:
+    name: M3 owned candidate rebuilding (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: production
+            race: '0'
+          - profile: race
+            race: '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Durable consent, real underlay changes, SIGKILL and eight-candidate mixed apps
+        env:
+          VPNCTL_RACE: ${{ matrix.race }}
+          VPNCTL_TEST_CPUS: '2'
+          VPNCTL_TEST_MEMORY: 2g
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-preparation
+        run: ./scripts/test-m3-preparation.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: m3-preparation-${{ matrix.profile }}
+          path: ${{ runner.temp }}/vpnctl-preparation
           if-no-files-found: error
           retention-days: 14
 

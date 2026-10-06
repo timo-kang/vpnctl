@@ -28,6 +28,7 @@ func (e *Engine) hasLeases() bool {
 // release and observe. It never adds routes or adopts drift. A rejected entry
 // cannot prevent independent entries from being checked and renewed.
 func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
+	e.maintained = map[string]bool{}
 	parent, done := relayobserve.Phase(parent, "maintenance")
 	defer done()
 	ctx, cancel := context.WithTimeout(parent, NodeMaintenanceDuration)
@@ -68,7 +69,8 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 		p := PathResult{PathID: old.Candidate.PathID, Phase: old.Phase}
 		entry := old
 		approved := false
-		if !e.uncertain && !e.pendingTargetReferences(old.Candidate.PathID) && approvalErr == nil && old.Phase == "prepared" && old.Controller == w.Controller && old.Node == w.Node && w.Generation >= old.Generation {
+		consent, consentErr := e.preparationAllowed(old.Candidate.PathID)
+		if consent && consentErr == nil && !e.uncertain && !e.pendingTargetReferences(old.Candidate.PathID) && approvalErr == nil && old.Phase == "prepared" && old.Controller == w.Controller && old.Node == w.Node && w.Generation >= old.Generation {
 			for _, candidate := range plan.Paths {
 				if reflect.DeepEqual(candidate, old.Candidate) {
 					approved = true
@@ -113,6 +115,7 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 					err = errors.Join(err, b.Block(ctx, entry))
 				} else {
 					p.KernelReady = true
+					e.maintained[old.Candidate.PathID] = true
 				}
 			}
 		}

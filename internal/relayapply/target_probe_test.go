@@ -182,7 +182,15 @@ func TestTargetRouteRejectsLocalGatewayAndWrongSource(t *testing.T) {
 type observationIssuer struct{ view relaycatalog.View }
 
 func (i observationIssuer) RelayCatalog(context.Context, string) (relaycatalog.View, error) {
-	return i.view, nil
+	// Model the real API boundary: monotonic process-local time components
+	// cannot be transported in JSON or treated as controller approval time.
+	b, err := json.Marshal(i.view)
+	if err != nil {
+		return relaycatalog.View{}, err
+	}
+	var view relaycatalog.View
+	err = json.Unmarshal(b, &view)
+	return view, err
 }
 func (i observationIssuer) BindRelayPath(context.Context, relaycatalog.BindRequest) (relaycatalog.View, error) {
 	return relaycatalog.View{}, errors.New("unexpected rebinding")
