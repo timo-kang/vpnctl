@@ -175,13 +175,35 @@ func testDirectDataplane(t *testing.T, size int) {
 		}
 	})
 	start := func(i int) *networkProcess {
-		return startNetworkProcess(t, ns[i+1], filepath.Join(private, fmt.Sprintf("agent-%d.log", i)), nil, integrationBinary(t), "node", "run", "--config", paths[i])
+		return startNetworkProcess(t, ns[i+1], filepath.Join(private, fmt.Sprintf("agent-%d.log", i)), nil, integrationBinary(t), "node", "serve", "--config", paths[i])
 	}
-	_, foreignKey := wgKeyPair(t)
-	netOutput(t, ns[1], "wg", "set", "wg0", "peer", foreignKey, "endpoint", "192.0.2.254:51999", "allowed-ips", "172.31.99.1/32")
+	// Match deploy/vpnctl-node.service: node run is one session and exits on
+	// initial registration failure; node serve owns retry and cached recovery.
+	// Reject only node-1's controller connection until its retry is observed.
+	// Keep the API alive for other robots and every dataplane deadline intact.
+	(relayUplink{relay: ns[0]}).nft(t, `table inet direct_startup_fault {
+ chain input { type filter hook input priority filter; policy accept;
+ ip saddr 192.0.2.3 tcp dport 9443 reject with tcp reset
+ }
+}`)
+	report["startup_controller_fault_at"] = time.Now().UTC()
 	for i := range agents {
 		agents[i] = start(i)
 	}
+	eventually(t, 10*time.Second, "operational supervisor observes startup controller failure", func() error {
+		b, err := os.ReadFile(agents[1].log)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(string(b), "sync-config failed:") {
+			return fmt.Errorf("startup failure has not reached supervisor retry")
+		}
+		return nil
+	})
+	report["startup_retry_observed_at"] = time.Now().UTC()
+	netOutput(t, ns[0], "nft", "delete", "table", "inet", "direct_startup_fault")
+	report["startup_controller_restored_at"] = time.Now().UTC()
+	report["agent_entrypoint"] = "node serve"
 	// Wait for kernel IPv6 DAD before taking a full IPv4/IPv6 route snapshot.
 	eventually(t, 5*time.Second, "underlay address initialization", func() error {
 		if strings.Contains(netOutput(t, ns[1], "ip", "-j", "-6", "addr", "show"), "tentative") {
@@ -189,11 +211,6 @@ func testDirectDataplane(t *testing.T, size int) {
 		}
 		return nil
 	})
-	// This is fixture-owned unrelated routing state. Direct application must not
-	// flush policy tables or alter any pre-existing rules/routes.
-	netOutput(t, ns[1], "ip", "route", "add", "unreachable", "203.0.113.0/24", "table", "51820", "metric", "876")
-	routesBefore := netOutput(t, ns[1], "ip", "-j", "route", "show", "table", "all")
-	rulesBefore := netOutput(t, ns[1], "ip", "-j", "rule", "show")
 	state := func(i, j int) string {
 		data, _ := os.ReadFile(agents[i].log)
 		out := ""
@@ -220,6 +237,14 @@ func testDirectDataplane(t *testing.T, size int) {
 		return nil
 	})
 	report["initial_all_pairs_active"] = true
+	report["startup_supervisor_recovered"] = true
+	// Initial service provisioning is complete. Inject unrelated state now;
+	// every subsequent direct/fallback/restart operation must preserve it.
+	_, foreignKey := wgKeyPair(t)
+	netOutput(t, ns[1], "wg", "set", "wg0", "peer", foreignKey, "endpoint", "192.0.2.254:51999", "allowed-ips", "172.31.99.1/32")
+	netOutput(t, ns[1], "ip", "route", "add", "unreachable", "203.0.113.0/24", "table", "51820", "metric", "876")
+	routesBefore := netOutput(t, ns[1], "ip", "-j", "route", "show", "table", "all")
+	rulesBefore := netOutput(t, ns[1], "ip", "-j", "rule", "show")
 	endpoint := strings.TrimSuffix(nodes[1].Node.VPNIP, "/32") + ":51900"
 	probe := func() error {
 		worker, err := os.Executable()
