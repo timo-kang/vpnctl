@@ -69,7 +69,12 @@ to eight prepared candidates and two targets. The observer renews all leases
 once per reconcile (without a second full sweep before apply), then overlaps only TCP proofs in a common 3s window. Cache/approval,
 inventory, kernel checks and fail-closed changes stay serialized. A slow path
 cannot force seven other TCP timeouts to run in series. All workers are joined
-before releasing ownership. The 10s freshness and kernel lease bounds remain.
+before releasing ownership. Public namespace inventories can be shared within
+that wave only; postchecks require an inventory read that started after their
+own TCP proof. Lease timers, per-interface state and approvals are never shared.
+Busy watch admission uses a short jittered retry; admitted cycles retain the
+configured interval and the 1s admission bound remains. The 10s freshness and
+kernel lease bounds remain.
 
 These are test profiles, not minimum hardware or failover-SLO guarantees.
 `observation_budget_exhausted` means the bounded work could not establish enough

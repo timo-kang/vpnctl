@@ -43,9 +43,11 @@ all-healthy CI timing failure. The first auto confirmation took 2.780s including
 0.016s admission. Eight maintenance calls consumed 2.386s and 1,184 external
 commands; the entire observation consumed 1,552 commands.
 
-The new scheduler needs one sweep (eight renewals) instead of eight sweeps
-(64 renewals). For eight successful candidates the same checks consume 516
-external commands total, of which 148 belong to maintenance. This removes repeat
+The bounded-wave scheduler needs one sweep (eight renewals) instead of eight sweeps
+(64 renewals). For eight successful candidates the first wave version consumed 516
+external commands total, of which 148 belonged to maintenance. Further
+probe-bounded sharing reduces duplicate public inventory reads; final measured
+counts are recorded with the resource profiles rather than assumed constant. This removes repeat
 work, not approval or kernel verification. Each candidate still has pre/post
 checks and its own pinned TCP/route/WireGuard evidence.
 
@@ -96,7 +98,25 @@ independent app returned to quarantine. This failed CI is retained; local
 success is not substituted for it. The correction consumes the single sweep
 from bounded observation and retains independent apply-time validity checks.
 A regression test also expires the lease during apply revalidation and requires
-quarantine. Final corrected profile and CI results are recorded separately.
+quarantine. [CI 37397657290](https://github.com/timo-kang/vpnctl/actions/runs/37397657290)
+then found residual starvation: one app could miss lock admission for 45s, and
+competing full observations still broke continuous freshness. Neither failed
+run is accepted as qualification.
+
+The follow-up retries failed watch admission after 50–100ms of jitter instead of
+sleeping a full successful-cycle interval. The admission deadline remains 1s;
+failed operations are never replayed. Successful cycles retain their configured
+interval. Serialized checks within one wave share only public namespace-wide
+link/route/rule/mark inventories. A postcheck may reuse a snapshot only when its
+command started **after that candidate's TCP finished**, with BOOTTIME age below
+3s. A failed fresh read discards old data; cancellation/clock failure denies
+reuse. Per-interface WG/address, underlay inventory, approvals, nft/BPF timers
+and application-time checks remain fresh. The explicit pre/post live lease
+checks replace only the duplicate middle LeaseStatus inside the node backend.
+Tests verify freshness floors, failed reads, copied data, clock rollback and
+that lease/private/interface queries are never shared. The original sampling
+pressure, 45s fixture watchdog, 10s freshness and 10s lease remain unchanged.
+Final corrected resource and CI results are recorded separately in #162.
 Application CI returns to 2 CPU / 2 GiB for both production and race builds.
 The full suites additionally test expiry, revocation, SIGKILL, drift and rollback.
 Four slow-probe cycles preserve the existing minimum 8s continuous pressure

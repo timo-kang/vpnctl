@@ -5,8 +5,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"time"
@@ -73,9 +75,11 @@ func runNodeRelaySelection(args []string, apply bool) error {
 	encoder := json.NewEncoder(os.Stdout)
 	for i := 0; *watch || i < *samples; i++ {
 		var cycleErr error
+		admissionBusy := false
 		if apply {
 			out, err := reconcileApplicationTarget(ctx, cfg.Node, dir, *target, *controller, *timeout, selector)
 			cycleErr = err
+			admissionBusy = out.Selection.Reason == "ownership_unavailable" && errors.Is(err, context.DeadlineExceeded)
 			if err := encoder.Encode(out); err != nil {
 				return err
 			}
@@ -93,7 +97,14 @@ func runNodeRelaySelection(args []string, apply bool) error {
 		if !*watch && i+1 == *samples {
 			return cycleErr
 		}
-		timer := time.NewTimer(*interval)
+		wait := *interval
+		if *watch && admissionBusy {
+			// A failed admission observed nothing. Do not sleep another full
+			// healthy-cycle interval and repeatedly miss the supervisor's yield.
+			// Keep the existing 1s admission bound and a non-spinning, jittered retry.
+			wait = min(wait, 2*relayKernelRetryInterval+time.Duration(rand.Int64N(int64(2*relayKernelRetryInterval))))
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

@@ -137,6 +137,13 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 	}
 	wave, stopWave := context.WithTimeout(ctx, targetObservationWaveDuration)
 	defer stopWave()
+	if k, ok := e.backend.(nodeKernel); ok {
+		k.run = observationInventory(k.run, leaseBootTime)
+		// observePreparedGated checks the live lease at both boundaries itself.
+		// Avoid the duplicate middle LeaseStatus inside nodeKernel.Check; no
+		// lease/guard/timer data is shared or cached.
+		wave = context.WithValue(wave, observationCheckerKey{}, observationChecker(k.kernel.Check))
+	}
 	gate := make(chan struct{}, 1)
 	var workers sync.WaitGroup
 	for _, job := range jobs {
@@ -182,6 +189,10 @@ func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target r
 		ctx, cancel = context.WithTimeout(ctx, targetObservationWaveDuration)
 		defer cancel()
 	}
+	check := e.backend.Check
+	if shared, ok := ctx.Value(observationCheckerKey{}).(observationChecker); ok {
+		check = shared
+	}
 	out.ObservedAt = time.Time{}
 	finish := func(state, reason string) TargetObservation {
 		out.State, out.Reason = state, reason
@@ -211,7 +222,7 @@ func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target r
 	b, _ := json.Marshal(entry)
 	sum := sha256.Sum256(b)
 	out.Fingerprint = hex.EncodeToString(sum[:])
-	ready, err := e.backend.Check(ctx, entry, false)
+	ready, err := check(ctx, entry, false)
 	if err != nil || !ready {
 		return finish("unknown", "kernel_conflict_or_unavailable")
 	}
@@ -226,13 +237,20 @@ func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target r
 	out.ObservedAt = time.Now()
 	cancel()
 	endProbe()
+	if _, shared := ctx.Value(observationCheckerKey{}).(observationChecker); shared {
+		floor, err := leaseBootTime()
+		if err != nil {
+			return finish("unknown", "observation_clock_unavailable")
+		}
+		ctx = context.WithValue(ctx, observationFloorKey{}, floor)
+	}
 	ctx, finishStage, stageErr = observationStage(ctx, "postcheck", gate)
 	if stageErr != nil {
 		return finish("unknown", "observation_deadline")
 	}
 	// A successful TCP connect cannot override a concurrent ownership or
 	// inventory change. Even a network failure is attributable only after checks.
-	ready, err = e.backend.Check(ctx, entry, false)
+	ready, err = check(ctx, entry, false)
 	if err != nil || !ready {
 		return finish("unknown", "kernel_changed_during_probe")
 	}
