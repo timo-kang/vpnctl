@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"vpnctl/internal/relayobserve"
 )
 
 type commandFunc func(context.Context, string, string, ...string) ([]byte, error)
@@ -30,6 +31,8 @@ func (b *outputBuffer) Write(p []byte) (int, error) {
 // Configuration may contain a private key; neither command input nor stderr is
 // included in errors. Children inherit only a pipe, not a secret argv/file.
 func command(ctx context.Context, input, name string, args ...string) ([]byte, error) {
+	done := relayobserve.Command(ctx, false)
+	defer done()
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	c := exec.CommandContext(ctx, name, args...)

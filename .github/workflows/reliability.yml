@@ -298,7 +298,7 @@ jobs:
             cpus: '2'
           - profile: race
             race: '1'
-            cpus: '4'
+            cpus: '2'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

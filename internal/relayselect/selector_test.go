@@ -296,3 +296,28 @@ func TestRecordAppliedAnchorsRealDwellWithoutGrantingHealth(t *testing.T) {
 	f.s.RecordApplied("p1", f.at)
 	wantPath(t, f.step("reachable", "unknown"), "p0") // applied history cannot authorize a failed path
 }
+
+func TestObservationBudgetIsDiagnosticNotAuthority(t *testing.T) {
+	f := newScenario(t)
+	f.step("reachable", "reachable")
+	wantPath(t, f.step("reachable", "reachable"), "p0")
+	r := f.report("unknown", "unknown")
+	r.Reason = "observation_budget_exhausted"
+	d := f.s.Decide(r)
+	wantPath(t, d, "")
+	if d.State != "unknown" || d.Reason != r.Reason {
+		t.Fatal(d)
+	}
+	// A partial wave can use only newly confirmed healthy evidence, never the
+	// remembered former path or accounting fields as a substitute for proof.
+	for i := 0; i < 2; i++ {
+		r = f.report("unknown", "reachable")
+		r.Reason = "observation_budget_exhausted"
+		d = f.s.Decide(r)
+		want := ""
+		if i == 1 {
+			want = "p1"
+		}
+		wantPath(t, d, want)
+	}
+}

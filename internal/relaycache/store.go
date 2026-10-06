@@ -67,6 +67,7 @@ type Store struct {
 	wait       func(context.Context, int) error
 	mu         sync.Mutex
 	lock       *os.File
+	admission  *admission
 	state      diskState
 	nodeID     string
 	reserved   map[string]bool
@@ -161,6 +162,9 @@ func (s *Store) Close() error {
 	}
 	if s.root != nil {
 		e = errors.Join(e, s.root.Close())
+	}
+	if s.admission != nil {
+		e = errors.Join(e, s.admission.Close())
 	}
 	return e
 }

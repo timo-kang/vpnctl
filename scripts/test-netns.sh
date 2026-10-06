@@ -73,7 +73,12 @@ else
     go build "${build_flags[@]}" -o "$build_dir/vpnctl" ./cmd/vpnctl
 fi
 go test "${build_flags[@]}" -tags=integration -c -o "$build_dir/integration.test" ./tests/integration
-docker build --iidfile "$build_dir/image-id" -f tests/integration/Dockerfile tests/integration
+# Preserve setup output even if the image cannot be built and no test manifest
+# exists yet. pipefail retains Docker's failure; a setup failure is never a pass.
+setup_log="$artifact_dir/setup-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+printf 'suite_commit=%s\nsuite_dirty=%s\nphase=image_setup\n' \
+    "$(git rev-parse HEAD)" "$(test -z "$(git status --porcelain --untracked-files=no)" && echo false || echo true)" > "$setup_log"
+docker build --iidfile "$build_dir/image-id" -f tests/integration/Dockerfile tests/integration 2>&1 | tee -a "$setup_log"
 image_id=$(cat "$build_dir/image-id")
 # A plain-text manifest is deliberately independent of any reporting service.
 # The immutable binary digest identifies external builds; the race flag controls

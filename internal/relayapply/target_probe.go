@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 )
 
 const MaxTargetProbeDuration = 20 * time.Second
+const targetObservationWaveDuration = 3 * time.Second
 
 type TargetObservation = relayobserve.TargetObservation
 type TargetReport = relayobserve.TargetReport
@@ -35,7 +37,7 @@ type targetProof struct {
 
 // ObserveTarget holds the same cache and namespace locks as prepare. No route,
 // peer, interface or policy-routing rule is changed. Protected candidates cooperatively renew
-// their leases between bounded probes while holding the shared lock. Each TCP socket pins both the approved
+// their leases before a bounded probe wave while holding the shared lock. Each TCP socket pins both the approved
 // candidate interface and its inner source; it cannot use a healthy neighbour.
 func (e *Engine) ObserveTarget(parent context.Context, targetID, controller string, timeout time.Duration) (TargetReport, error) {
 	return e.observeTarget(parent, targetID, controller, timeout, e.candidateProbe())
@@ -49,6 +51,8 @@ func (e *Engine) candidateProbe() func(context.Context, Entry, relaycatalog.Targ
 }
 
 func (e *Engine) observeTarget(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) (out TargetReport, err error) {
+	parent, recorder := relayobserve.Start(parent)
+	defer func() { out.Diagnostics = recorder.Snapshot() }()
 	out = TargetReport{SchemaVersion: 1, TargetID: targetID, StartedAt: time.Now(), Paths: []TargetObservation{}}
 	defer func() {
 		out.ObservedAt = time.Now()
@@ -100,14 +104,20 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 		return out, err
 	}
 	remaining := time.Until(view.ExpiresAt)
+	// One full sweep precedes the bounded wave. There is no journal/lease
+	// renewal concurrently with candidate checks. At most eight socket proofs
+	// overlap; pre/post checks and fail-closed mutations remain serialized.
+	if e.hasLeases() {
+		_, _ = e.MaintainLeases(ctx)
+	}
+	type work struct {
+		index int
+		entry Entry
+	}
+	jobs := []work{}
 	for _, path := range view.Spec.Paths {
 		if !slices.Contains(path.TargetIDs, targetID) {
 			continue
-		}
-		if e.hasLeases() {
-			// Long batches must not exclude the supervisor for an entire 20s
-			// without lease maintenance. This cannot rearm from cached evidence.
-			_, _ = e.MaintainLeases(ctx)
 		}
 		observation := TargetObservation{PathID: path.ID, RelayID: path.RelayID, UnderlayID: path.UnderlayID, Priority: path.Priority, Cost: path.Cost, State: "unknown", ObservedAt: time.Now()}
 		switch {
@@ -120,11 +130,34 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 			if i < 0 {
 				observation.Reason = "candidate_not_prepared"
 			} else {
-				observation = e.observePrepared(ctx, e.journal.Entries[i], target, timeout, observation, probe)
+				jobs = append(jobs, work{len(out.Paths), e.journal.Entries[i]})
 			}
 		}
 		out.Paths = append(out.Paths, observation)
 	}
+	wave, stopWave := context.WithTimeout(ctx, targetObservationWaveDuration)
+	defer stopWave()
+	if k, ok := e.backend.(nodeKernel); ok {
+		k.run = observationInventory(k.run, leaseBootTime)
+		// observePreparedGated checks the live lease at both boundaries itself.
+		// Avoid the duplicate middle LeaseStatus inside nodeKernel.Check; no
+		// lease/guard/timer data is shared or cached.
+		wave = context.WithValue(wave, observationCheckerKey{}, observationChecker(k.kernel.Check))
+	}
+	gate := make(chan struct{}, 1)
+	var workers sync.WaitGroup
+	for _, job := range jobs {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			out.Paths[job.index] = e.observePreparedGated(wave, job.entry, target, timeout, out.Paths[job.index], probe, gate)
+		}()
+	}
+	workers.Wait() // No probe may outlive the cache/namespace ownership.
+	if errors.Is(wave.Err(), context.DeadlineExceeded) {
+		out.Reason = "observation_budget_exhausted"
+	}
+
 	// Reject the complete batch on expiry, clock discontinuity or cancellation;
 	// earlier successes must not escape a batch whose authority has expired.
 	endBoot, bootErr := leaseBootTime()
@@ -145,10 +178,20 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 }
 
 func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) TargetObservation {
+	return e.observePreparedGated(ctx, entry, target, timeout, out, probe, nil)
+}
+
+// Only the socket proof may overlap. Approval/cache, inventory, kernel checks
+// and any fail-closed lease mutation use the shared, context-bounded gate.
+func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), gate chan struct{}) TargetObservation {
 	if entry.LeaseVersion != 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 3*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, targetObservationWaveDuration)
 		defer cancel()
+	}
+	check := e.backend.Check
+	if shared, ok := ctx.Value(observationCheckerKey{}).(observationChecker); ok {
+		check = shared
 	}
 	out.ObservedAt = time.Time{}
 	finish := func(state, reason string) TargetObservation {
@@ -157,6 +200,11 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 			out.ObservedAt = time.Now()
 		}
 		return out
+	}
+	ctx, finishStage, stageErr := observationStage(ctx, "precheck", gate)
+	defer func() { finishStage() }()
+	if stageErr != nil {
+		return finish("unknown", "observation_deadline")
 	}
 	if !entry.ProbeRouting {
 		return finish("unknown", "probe_routing_not_prepared")
@@ -174,20 +222,35 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 	b, _ := json.Marshal(entry)
 	sum := sha256.Sum256(b)
 	out.Fingerprint = hex.EncodeToString(sum[:])
-	ready, err := e.backend.Check(ctx, entry, false)
+	ready, err := check(ctx, entry, false)
 	if err != nil || !ready {
 		return finish("unknown", "kernel_conflict_or_unavailable")
 	}
 	if err = inventoryMatches(ctx, entry, e.underlays, e.collector); err != nil {
 		return finish("unknown", "inventory_changed")
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	finishStage()
+	finishStage = func() {}
+	probeCtx, endProbe := relayobserve.Phase(ctx, "probe")
+	probeCtx, cancel := context.WithTimeout(probeCtx, timeout)
 	proof, probeErr := probe(probeCtx, entry, target)
 	out.ObservedAt = time.Now()
 	cancel()
+	endProbe()
+	if _, shared := ctx.Value(observationCheckerKey{}).(observationChecker); shared {
+		floor, err := leaseBootTime()
+		if err != nil {
+			return finish("unknown", "observation_clock_unavailable")
+		}
+		ctx = context.WithValue(ctx, observationFloorKey{}, floor)
+	}
+	ctx, finishStage, stageErr = observationStage(ctx, "postcheck", gate)
+	if stageErr != nil {
+		return finish("unknown", "observation_deadline")
+	}
 	// A successful TCP connect cannot override a concurrent ownership or
 	// inventory change. Even a network failure is attributable only after checks.
-	ready, err = e.backend.Check(ctx, entry, false)
+	ready, err = check(ctx, entry, false)
 	if err != nil || !ready {
 		return finish("unknown", "kernel_changed_during_probe")
 	}
@@ -345,4 +408,17 @@ func (k kernel) targetRoute(ctx context.Context, entry Entry, target relaycatalo
 		return errors.New("target route does not use approved candidate")
 	}
 	return nil
+}
+
+func observationStage(ctx context.Context, phase string, gate chan struct{}) (context.Context, func(), error) {
+	ctx, done := relayobserve.Phase(ctx, phase)
+	if gate == nil {
+		return ctx, done, ctx.Err()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx, done, ctx.Err()
+	case gate <- struct{}{}:
+		return ctx, func() { <-gate; done() }, ctx.Err()
+	}
 }

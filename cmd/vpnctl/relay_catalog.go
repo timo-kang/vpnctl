@@ -230,6 +230,10 @@ func runNodeRelay(args []string) error {
 }
 
 func openNodeRelayCache(cfg *config.NodeConfig, dir string, create bool) (*relaycache.Store, error) {
+	return openNodeRelayCacheUsing(cfg, dir, create, relaycache.Open)
+}
+
+func openNodeRelayCacheUsing(cfg *config.NodeConfig, dir string, create bool, open func(string, relaycache.Options) (*relaycache.Store, error)) (*relaycache.Store, error) {
 	legacy := []string{cfg.WGPublicKey, cfg.ServerPublicKey}
 	if cfg.WGPrivateKey != "" {
 		data, err := base64.StdEncoding.DecodeString(cfg.WGPrivateKey)
@@ -246,7 +250,7 @@ func openNodeRelayCache(cfg *config.NodeConfig, dir string, create bool) (*relay
 		}
 		legacy = append(legacy, public)
 	}
-	return relaycache.Open(dir, relaycache.Options{NodeID: cfg.Name, Create: create, LegacyPublicKeys: legacy})
+	return open(dir, relaycache.Options{NodeID: cfg.Name, Create: create, LegacyPublicKeys: legacy})
 }
 
 func printRelayPlan(ctx context.Context, node, controller string, report relaycache.Report, underlays []relayplan.Underlay, cache *relaycache.Store) error {

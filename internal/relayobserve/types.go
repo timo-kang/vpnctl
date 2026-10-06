@@ -37,4 +37,5 @@ type TargetReport struct {
 	Valid         bool                `json:"valid"`
 	Reason        string              `json:"reason,omitempty"`
 	Paths         []TargetObservation `json:"paths"`
+	Diagnostics   *Diagnostics        `json:"diagnostics,omitempty"`
 }

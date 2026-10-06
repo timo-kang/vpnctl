@@ -25,14 +25,21 @@ func applicationFixture(t *testing.T, separate bool, size int) *m3AuthorityFixtu
 		underlays = 4
 	}
 	f := newM3AuthorityFixtureWithOptions(t, m3AuthorityOptions{separateController: separate, independentRecipients: true, underlays: underlays, extraTarget: true})
+	cpuBefore, _ := os.ReadFile("/sys/fs/cgroup/cpu.stat")
+	memoryBefore, _ := os.ReadFile("/sys/fs/cgroup/memory.events")
 	t.Cleanup(func() {
+		cpuAfter, _ := os.ReadFile("/sys/fs/cgroup/cpu.stat")
+		memoryAfter, _ := os.ReadFile("/sys/fs/cgroup/memory.events")
+		cpuLimit, _ := os.ReadFile("/sys/fs/cgroup/cpu.max")
 		writeM3Report(t, filepath.Join(f.results, "application-kernel.json"), map[string]string{
+			"cpu_stat_before": string(cpuBefore), "cpu_stat_after": string(cpuAfter), "cpu_limit": string(cpuLimit),
+			"memory_events_before": string(memoryBefore), "memory_events_after": string(memoryAfter),
 			"rules":             netOutput(t, f.robot, "ip", "-j", "-N", "-4", "rule", "show"),
 			"routes":            netOutput(t, f.robot, "ip", "-j", "-N", "-4", "route", "show", "table", "all"),
 			"rp_filter":         netOutput(t, f.robot, "cat", "/proc/sys/net/ipv4/conf/all/rp_filter"),
-			"counters":          netOutput(t, f.robot, "cat", "/proc/net/netstat"),
 			"robot_neighbours":  netOutput(t, f.robot, "ip", "-j", "neigh", "show"),
 			"target_neighbours": netOutput(t, f.target, "ip", "-j", "neigh", "show"),
+			"counters":          netOutput(t, f.robot, "cat", "/proc/net/netstat"),
 		})
 	})
 	f.releaseNodeCandidates()

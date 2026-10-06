@@ -30,21 +30,17 @@ type nodeSupervisionReport struct {
 
 func nodeSupervisionCycle(ctx context.Context, cfg *config.NodeConfig, dir string, client relaycache.Client, refresh bool) (nodeSupervisionReport, error) {
 	out := nodeSupervisionReport{SchemaVersion: 1, State: "blocked", Refresh: "not_due"}
-	locks, cancel := relaySupervisionLockContext(ctx)
-	defer cancel()
-	c, err := retrySupervisedLock(locks, func() (*relaycache.Store, error) { return openNodeRelayCache(cfg, dir, false) }, relaycache.ErrBusy)
+	c, e, err := openNodeRelayEngine(ctx, cfg, dir)
 	if err != nil {
-		out.Reason = "cache_unavailable"
+		out.Reason = nodeAdmissionReason(err)
 		return out, err
 	}
 	defer c.Close()
-	e, err := retrySupervisedLock(locks, func() (*relayapply.Engine, error) { return relayapply.Open(c, cfg.RelayUnderlays) }, relayapply.ErrKernelBusy)
-	if err != nil {
-		out.Reason = "enforcement_unavailable"
-		return out, err
-	}
 	defer e.Close()
-	cancel()
+	// Admission must not consume the authenticated refresh / maintenance budget.
+	// Each successful observer also maintains all leases while this waits.
+	ctx, cancel := context.WithTimeout(ctx, relayapply.NodeMaintenanceDuration)
+	defer cancel()
 	if refresh {
 		request, stop := context.WithTimeout(ctx, time.Second)
 		r, _ := c.Refresh(request, client)
@@ -93,7 +89,7 @@ func runNodeRelaySupervise(args []string) error {
 	for ctx.Err() == nil {
 		start := time.Now()
 		refresh := !start.Before(next)
-		bounded, cancel := context.WithTimeout(ctx, relayapply.NodeMaintenanceDuration)
+		bounded, cancel := context.WithTimeout(ctx, nodeAdmissionDuration+relayapply.NodeMaintenanceDuration)
 		out, cycleErr := nodeSupervisionCycle(bounded, cfg.Node, *dir, client, refresh)
 		cancel()
 		if refresh && out.Refresh != "not_due" {

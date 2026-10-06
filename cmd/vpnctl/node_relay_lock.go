@@ -4,18 +4,24 @@ package main
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"vpnctl/internal/config"
 	"vpnctl/internal/relayapply"
 	"vpnctl/internal/relaycache"
 )
 
-// Mutating CLI calls and observations share the supervisor's bounded admission
-// retry. Only lock contention is retried; a failed operation is never replayed.
+// Waiting carries no observations or authority. Keep the FIFO ticket through
+// contention so an immediately rejoining process cannot overtake an older one.
+const nodeAdmissionDuration = 10 * time.Second
+
 func openNodeRelayEngine(ctx context.Context, node *config.NodeConfig, dir string) (*relaycache.Store, *relayapply.Engine, error) {
-	locks, cancel := relaySupervisionLockContext(ctx)
+	locks, cancel := context.WithTimeout(ctx, nodeAdmissionDuration)
 	defer cancel()
-	c, err := retrySupervisedLock(locks, func() (*relaycache.Store, error) { return openNodeRelayCache(node, dir, false) }, relaycache.ErrBusy)
+	c, err := openNodeRelayCacheUsing(node, dir, false, func(dir string, opts relaycache.Options) (*relaycache.Store, error) {
+		return relaycache.OpenQueued(locks, dir, opts)
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -25,4 +31,11 @@ func openNodeRelayEngine(ctx context.Context, node *config.NodeConfig, dir strin
 		return nil, nil, err
 	}
 	return c, e, nil
+}
+
+func nodeAdmissionReason(err error) string {
+	if errors.Is(err, relaycache.ErrAdmissionFull) {
+		return "admission_capacity_exhausted"
+	}
+	return "ownership_unavailable"
 }

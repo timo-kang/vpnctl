@@ -53,7 +53,7 @@ JSONL의 최상위 `applied`, `application.state/reason/activated/guarded`, 후�
 
 ```sh
 VPNCTL_ARTIFACT_DIR=/tmp/app-production scripts/test-m3-target-application.sh
-VPNCTL_RACE=1 VPNCTL_ARTIFACT_DIR=/tmp/app-race scripts/test-m3-target-application.sh
+VPNCTL_RACE=1 VPNCTL_TEST_CPUS=2 VPNCTL_ARTIFACT_DIR=/tmp/app-race scripts/test-m3-target-application.sh
 ```
 
 같은 테스트를 `VPNCTL_TEST_BINARY=/path/to/vpnctl`로 외부 배포 binary에 적용할 수 있다.
@@ -64,14 +64,37 @@ production/race 결과를 구분한다. 결과에는 배치, 후보 수, phase�
 
 ## Capacity qualification
 
-The current application integration profiles use 2 CPU / 2 GiB for production
-and 4 CPU / 2 GiB for the race build, with up to eight prepared candidates and
-two targets. These are test profiles, not minimum hardware guarantees. A 2 CPU
-race run exceeded the 10s observation freshness window with eight healthy
-candidates and correctly retained quarantine. Mixed healthy/slow candidates and
-CPU contention can also consume the freshness budget; available physical uplink
-does not by itself guarantee activation under overload. Keep observation/admission
-records when diagnosing this state. [Issue #162](https://github.com/timo-kang/vpnctl/issues/162)
-tracks bounded scheduling, supported capacity and operational availability before
-hardware-wide or failover-SLO qualification. Do not increase approval/lease
-lifetimes or accept stale evidence to work around insufficient processing capacity.
+Application CI uses 2 CPU / 2 GiB for both production and race builds, with up
+to eight prepared candidates and two targets. The observer renews all leases
+once per reconcile (without a second full sweep before apply), then overlaps only TCP proofs in a common 3s window. Cache/approval,
+inventory, kernel checks and fail-closed changes stay serialized. A slow path
+cannot force seven other TCP timeouts to run in series. All workers are joined
+before releasing ownership. Public namespace inventories can be shared within
+that wave only; postchecks require an inventory read that started after their
+own TCP proof. Lease timers, per-interface state and approvals are never shared.
+Node engine calls and node supervision share a FIFO turn in the same private
+cache, bounded to 10s admission. Waiting performs no observation or renewal.
+The supervisor reserves its existing 5s work budget after admission (15s total);
+completed watch cycles retain the configured interval. All participating node
+processes must use this version and the same cache. The 32 descriptor-owned queue
+slots are released on exit/cancellation; never unlink queue files while running.
+Existing cache/netns exclusion still applies. Other caches, old binaries and
+external network managers do not participate in this scheduling guarantee. The 10s freshness and
+kernel lease bounds remain.
+
+These are test profiles, not minimum hardware or failover-SLO guarantees.
+`observation_budget_exhausted` means the bounded work could not establish enough
+fresh evidence. It must not trigger accepting stale observations, extending lease
+lifetimes, or removing the target reservation. A partial observation may select
+only a candidate with new valid confirmations and the usual apply-time checks.
+
+Use `diagnostics` on reconcile results and `observation_diagnostics` on selections
+for monotonic/BOOTTIME elapsed time, phase calls and external kernel/inventory
+command counts. Phase and command durations are sums; concurrent phases can
+exceed the operation elapsed time; nested phases overlap too. They contain no command arguments, output or
+credentials, and provide no authorization. BPF syscalls are not external commands.
+
+The original 2 CPU race capacity failure and 4 CPU interim validation remain in
+[issue #162](https://github.com/timo-kang/vpnctl/issues/162). Reproduction, mixed
+healthy/slow paths, CPU profiles and remaining qualification limits are described
+in [observation capacity validation](../validation/m3-observation-capacity.md).

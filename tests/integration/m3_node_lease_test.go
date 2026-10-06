@@ -230,8 +230,8 @@ func checkProtectedSlowProbes(t *testing.T, f *m3AuthorityFixture, apply bool) {
 }`)
 	budget := 50 * time.Second
 	if apply {
-		// Include admission retries without changing the product's one-second
-		// lock or twenty-second observation budgets. Busy is not proof of
+		// Include bounded queued admission and twenty-second observations.
+		// Waiting performs no observation. Busy is not proof of
 		// quarantine and must not count as a completed slow observation.
 		budget = 90 * time.Second
 	}
@@ -245,7 +245,9 @@ func checkProtectedSlowProbes(t *testing.T, f *m3AuthorityFixture, apply bool) {
 	if apply {
 		args = append(args, "--watch", "--interval", "2s")
 	} else {
-		args = append(args, "--samples", "2", "--interval", "100ms")
+		// Four concurrent timeout waves retain at least eight seconds of
+		// continuous lease pressure; the old sequential suite needed only two.
+		args = append(args, "--samples", "4", "--interval", "100ms")
 	}
 	cmd := netCommand(ctx, f.robot, args...)
 	output, err := os.Create(filepath.Join(f.results, "slow-selection.jsonl"))
@@ -309,10 +311,10 @@ func checkProtectedSlowProbes(t *testing.T, f *m3AuthorityFixture, apply bool) {
 			negative, busy := 0, 0
 			if apply {
 				negative, busy = completedApplications(b)
-				if negative < 2 || negative+busy != len(lines) {
+				if negative < 4 || negative+busy != len(lines) {
 					t.Fatal("missing completed slow application observations", string(b))
 				}
-			} else if len(lines) != 2 {
+			} else if len(lines) != 4 {
 				t.Fatal("missing slow observation decisions", string(b))
 			}
 			for _, line := range lines {
@@ -342,7 +344,7 @@ func checkProtectedSlowProbes(t *testing.T, f *m3AuthorityFixture, apply bool) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if negative, _ := completedApplications(b); negative >= 2 {
+			if negative, _ := completedApplications(b); negative >= 4 {
 				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 					t.Fatal("stop completed slow workload", err)
 				}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"vpnctl/internal/relaycache"
+	"vpnctl/internal/relayobserve"
 	"vpnctl/internal/relayplan"
 )
 
@@ -27,6 +28,8 @@ func (e *Engine) hasLeases() bool {
 // release and observe. It never adds routes or adopts drift. A rejected entry
 // cannot prevent independent entries from being checked and renewed.
 func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
+	parent, done := relayobserve.Phase(parent, "maintenance")
+	defer done()
 	ctx, cancel := context.WithTimeout(parent, NodeMaintenanceDuration)
 	defer cancel()
 	out := result("empty", "", "")

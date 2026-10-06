@@ -129,14 +129,13 @@ The fixture provisions rp_filter only inside its owned robot namespace using
 a temporary private proc mount. No host sysctl, network, clock or power changes.
 See [deployment prerequisites](../../docs/deployment/node-application-routing.md).
 
-CI keeps the production application profile at 2 CPU / 2 GiB and runs the race
-profile at 4 CPU / 2 GiB, with identical deadlines and assertions. Reproduce the
-race profile with `VPNCTL_RACE=1 VPNCTL_TEST_CPUS=4 ./scripts/test-m3-target-application.sh`.
-The wrapper default remains 2 CPU; use a new `VPNCTL_ARTIFACT_DIR` for each run.
-Eight healthy candidates exceeded observation freshness in a 2 CPU race run;
-[issue #162](https://github.com/timo-kang/vpnctl/issues/162) tracks that capacity
-boundary and mixed healthy/slow candidate scheduling. A pass on these profiles
-does not establish availability on arbitrary robot hardware.
+Application CI runs production and race at 2 CPU / 2 GiB with identical safety
+deadlines and assertions. `scripts/test-m3-observation-capacity.sh` focuses on
+1/4/8 prepared candidates and two actuators with one healthy path among seven
+2s timeouts, in first/middle/last catalog positions. Set `VPNCTL_RACE=0|1` and
+`VPNCTL_TEST_CPUS=1|2|4` for capacity profiles; use a new `VPNCTL_ARTIFACT_DIR`
+for each run. The full application suite also runs these cases. See
+[capacity evidence and limits](../../docs/validation/m3-observation-capacity.md).
 
 Direct retry loss uses a persistent namespace worker (`retry-packets.jsonl`),
 with monotonic sample times, a 100ms nonce timeout and 50ms spacing. The original
@@ -152,3 +151,10 @@ are permanent, and route/packet/neighbour evidence is retained on failure.
 The post-release check is still one TCP probe with a 1s deadline. This fixture
 checks target protection; physical ARP/roaming convergence remains a separate
 test. Neither fixture changes the shared host's network or Wi-Fi settings.
+
+Image preparation limits each APT phase to 180s (plus a 5s kill grace), with
+30s HTTP/HTTPS inactivity timeouts and two retries. APT update errors fail setup
+instead of proceeding with partial package lists. The wrapper preserves
+`setup-*.log` and source identity even if preparation fails before the normal
+run manifest exists; `pipefail` propagates the Docker failure. These are setup
+bounds only and never relax the network tests' deadlines or success criteria.
