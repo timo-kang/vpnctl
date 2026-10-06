@@ -15,6 +15,7 @@ import (
 	"vpnctl/internal/relayapply"
 	"vpnctl/internal/relayobserve"
 	"vpnctl/internal/relayselect"
+	"vpnctl/internal/underlayevent"
 )
 
 func runNodeRelaySelect(args []string) error {
@@ -70,6 +71,12 @@ func runNodeRelaySelection(args []string, apply bool) error {
 	}
 	ctx, stop := signalContext()
 	defer stop()
+	events, err := underlayevent.New(cfg.Node.RelayUnderlays)
+	if err != nil {
+		return err
+	}
+	defer events.Close()
+	ctx = relayobserve.WithUnderlayEvents(ctx, events)
 	encoder := json.NewEncoder(os.Stdout)
 	for i := 0; *watch || i < *samples; i++ {
 		var cycleErr error
@@ -93,13 +100,9 @@ func runNodeRelaySelection(args []string, apply bool) error {
 		if !*watch && i+1 == *samples {
 			return cycleErr
 		}
-		timer := time.NewTimer(*interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil
-		case <-timer.C:
-		}
+		// A relevant event wakes the next bounded cycle; periodic full verification
+		// remains required even when the event stream is quiet.
+		_ = events.Wait(ctx, *interval)
 	}
 	return nil
 }

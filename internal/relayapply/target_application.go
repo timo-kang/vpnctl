@@ -28,11 +28,12 @@ type TargetRoute struct {
 	Alias     string `json:"alias"`
 }
 type ApplicationProof struct {
-	Evidence    string        `json:"evidence"`
-	Interface   string        `json:"interface"`
-	Source      string        `json:"source"`
-	ObservedAt  time.Time     `json:"observed_at"`
-	ConnectTime time.Duration `json:"connect_time_ns"`
+	Evidence           string        `json:"evidence"`
+	Interface          string        `json:"interface"`
+	Source             string        `json:"source"`
+	ObservedAt         time.Time     `json:"observed_at"`
+	ConnectTime        time.Duration `json:"connect_time_ns"`
+	UnderlayGeneration string        `json:"underlay_generation,omitempty"`
 }
 type TargetReconcileResult struct {
 	SchemaVersion int                       `json:"schema_version"`
@@ -172,6 +173,14 @@ func (e *Engine) blockTargetCandidates(ctx context.Context, g TargetGuard) error
 	return err
 }
 func (e *Engine) applicationProof(ctx context.Context, g TargetGuard, route *TargetRoute) (ApplicationProof, error) {
+	entry, _, err := e.targetEntry(g, route)
+	if err != nil {
+		return ApplicationProof{}, err
+	}
+	generation, err := relayobserve.UnderlayGeneration(ctx, entry.Candidate.UnderlayID)
+	if err != nil {
+		return ApplicationProof{}, err
+	}
 	entry, target, err := e.approvedTargetEntry(ctx, g, route)
 	if err != nil {
 		return ApplicationProof{}, err
@@ -199,6 +208,11 @@ func (e *Engine) applicationProof(ctx context.Context, g TargetGuard, route *Tar
 	if err := b.CheckRoutes(ctx, g, e.journal.Entries, route); err != nil {
 		return proof, err
 	}
+	current, err := relayobserve.UnderlayGeneration(ctx, entry.Candidate.UnderlayID)
+	if err != nil || current != generation {
+		return proof, errors.New("underlay changed during application proof")
+	}
+	proof.UnderlayGeneration = current
 	return proof, ctx.Err()
 }
 func (e *Engine) inspectActiveTarget(parent context.Context, g TargetGuard) (TargetGuardResult, error) {
@@ -344,7 +358,7 @@ func (e *Engine) verifyTargetChoice(ctx context.Context, g TargetGuard, route *T
 		return entry, errors.New("candidate revalidation failed: " + proof.Reason)
 	}
 	for _, c := range d.Candidates {
-		if c.PathID == route.PathID && c.Eligible && c.Fingerprint == proof.Fingerprint {
+		if c.PathID == route.PathID && c.Eligible && c.Fingerprint == proof.Fingerprint && c.UnderlayGeneration == proof.UnderlayGeneration {
 			return entry, nil
 		}
 	}
@@ -391,6 +405,9 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 	if !time.Now().Before(d.ValidUntil) {
 		return e.targetFailure(id, "decision_expired", ErrLeaseExpired)
 	}
+	if err := decisionUnderlay(ctx, entry, d, proof.UnderlayGeneration); err != nil {
+		return e.targetFailure(id, "underlay_changed_before_commit", err)
+	}
 	g.Active, g.Pending, g.Phase, g.Generation, g.VerifiedAt = desired, nil, "active", entry.Generation, &proof.ObservedAt
 	e.journal.Targets[e.targetIndex(id)] = g
 	if err := e.persist(); err != nil {
@@ -413,7 +430,7 @@ func (e *Engine) rollbackTarget(ctx context.Context, old TargetGuard, d relaysel
 		}
 		if err == nil {
 			proof, probeErr := e.applicationProof(ctx, g, old.Active)
-			if probeErr == nil && time.Now().Before(d.ValidUntil) {
+			if probeErr == nil && time.Now().Before(d.ValidUntil) && decisionUnderlay(ctx, entry, d, proof.UnderlayGeneration) == nil {
 				g.Active, g.Pending, g.Phase, g.Generation, g.VerifiedAt = old.Active, nil, "active", entry.Generation, &proof.ObservedAt
 				at := time.Now()
 				g.ChangedAt = &at
@@ -431,4 +448,19 @@ func (e *Engine) rollbackTarget(ctx context.Context, old TargetGuard, d relaysel
 	}
 	out, err := e.quarantineTarget(ctx, id)
 	return out, errors.Join(cause, err)
+}
+
+// Recheck after unbound proof/route writes too. A change between the bound proof
+// and the unbound proof must not turn one success in a new epoch into approval.
+func decisionUnderlay(ctx context.Context, entry Entry, d relayselect.Decision, proofGeneration string) error {
+	current, err := relayobserve.UnderlayGeneration(ctx, entry.Candidate.UnderlayID)
+	if err != nil || current != proofGeneration {
+		return errors.New("underlay generation changed")
+	}
+	for _, c := range d.Candidates {
+		if c.PathID == entry.Candidate.PathID && c.Eligible && c.UnderlayGeneration == current {
+			return nil
+		}
+	}
+	return errors.New("underlay generation differs from confirmed decision")
 }

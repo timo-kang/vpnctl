@@ -158,6 +158,21 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 		out.Reason = "observation_budget_exhausted"
 	}
 
+	// A later candidate can observe an event after an earlier proof completed.
+	// Do not export that earlier proof as current at the end of this batch.
+	for i := range out.Paths {
+		p := &out.Paths[i]
+		if p.State != "reachable" && p.State != "unreachable" {
+			continue
+		}
+		current, eventErr := relayobserve.UnderlayGeneration(ctx, p.UnderlayID)
+		if eventErr != nil {
+			p.State, p.Reason = "unknown", "underlay_events_unavailable"
+		} else if current != p.UnderlayGeneration {
+			p.State, p.Reason = "unknown", "underlay_changed_during_batch"
+		}
+	}
+
 	// Reject the complete batch on expiry, clock discontinuity or cancellation;
 	// earlier successes must not escape a batch whose authority has expired.
 	endBoot, bootErr := leaseBootTime()
@@ -206,6 +221,11 @@ func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target r
 	if stageErr != nil {
 		return finish("unknown", "observation_deadline")
 	}
+	generation, eventErr := relayobserve.UnderlayGeneration(ctx, entry.Candidate.UnderlayID)
+	if eventErr != nil {
+		return finish("unknown", "underlay_events_unavailable")
+	}
+	out.UnderlayGeneration = generation
 	if !entry.ProbeRouting {
 		return finish("unknown", "probe_routing_not_prepared")
 	}
@@ -265,6 +285,13 @@ func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target r
 	}
 	if _, err := e.checkLease(ctx, entry); err != nil {
 		return finish("unknown", "lease_expired_during_probe")
+	}
+	current, eventErr := relayobserve.UnderlayGeneration(ctx, entry.Candidate.UnderlayID)
+	if eventErr != nil {
+		return finish("unknown", "underlay_events_unavailable")
+	}
+	if current != generation {
+		return finish("unknown", "underlay_changed_during_probe")
 	}
 	if probeErr != nil {
 		var failure *targetConnectError

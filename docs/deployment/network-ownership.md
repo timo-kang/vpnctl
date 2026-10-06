@@ -12,7 +12,7 @@ NetworkManager, systemd-networkd, netplan이 생성한 설정, DHCP client, wg-q
 | `vd…` WG, peer `/32` 반환 route, `vl…` lease와 BPF guard | vpnctl relay | 승인과 커널 소유권이 일치할 때만 유지 |
 | `vf…` source/target 제한 | vpnctl relay | 승인된 source와 target prefix의 조합만 허용; 외부 firewall의 차단은 계속 적용 |
 | forwarding sysctl, uplink route, 외부 endpoint NAT, 앱 포트 firewall, SNAT/서버 반환 route | 배포 저장소 | 제품 설치 상태와 별도로 실제 서버 통신으로 검증 |
-| 앱 target route 선택·전환 | #20~#23 후속 구현 | 범위·table·rule 우선순위를 먼저 예약하고 실제 lookup/통신으로 검증 |
+| 앱 target route 선택·전환 | vpnctl node | 승인된 target reservation의 table/rule/route만 적용하고 실제 lookup·통신 검증; 물리 경로 변경 후 재구성은 후속 작업 |
 
 `protocol=186`, interface 접두사, table 번호만으로 기존 자원을 채택하지 않는다.
 소유 journal, interface index/group/alias와 실제 peer/route/rule 내용이 함께 일치해야 한다.
@@ -23,7 +23,8 @@ NetworkManager, systemd-networkd, netplan이 생성한 설정, DHCP client, wg-q
 [자동 direct 감독](../architecture/direct-readiness.md)은 소유한 `/32` peer만 변경하며
 route/rule/table을 flush하지 않는다. 기존 수동 `up`/`down`, 최초 baseline 생성은
 지정 WG/table의 전용 소유를 전제로 하므로 공유 외부 WG를 인수하는 용도로 쓰지 않는다.
-실제 네트워크 관리자 공존과 앱 target route 선택은 #21~#23의 잔여 조건이다.
+앱 target route 선택·적용은 구현되어 있으며, 실제 네트워크 관리자 공존과 변경된 물리 경로의 자동 재구성은 #22/#23의 잔여 조건이다.
+[underlay 이벤트 세대](../architecture/underlay-events.md)는 변경 전 성공 증거의 재사용을 막지만 관리자 설정을 변경하거나 복구하지 않는다.
 
 ## 배포 설정 예제
 

@@ -321,3 +321,32 @@ func TestObservationBudgetIsDiagnosticNotAuthority(t *testing.T) {
 		wantPath(t, d, want)
 	}
 }
+
+func TestUnderlayGenerationRequiresFreshConfirmationsAndPreservesOtherPath(t *testing.T) {
+	f := newScenario(t)
+	report := func(a, b string) relayobserve.TargetReport {
+		r := f.report("reachable", "reachable")
+		r.Paths[0].UnderlayGeneration = a
+		r.Paths[1].UnderlayGeneration = b
+		return r
+	}
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	wantPath(t, f.s.Decide(report(a, b)), "")
+	wantPath(t, f.s.Decide(report(a, b)), "p0")
+	// Journal/resource identity is unchanged; only the intervening event changed.
+	d := f.s.Decide(report(strings.Repeat("c", 64), b))
+	wantPath(t, d, "p1")
+	if d.Candidates[0].ConsecutiveSuccesses != 1 || d.Candidates[0].Eligible || d.Candidates[1].ConsecutiveSuccesses != 2 || d.Candidates[1].Samples != 3 || !d.Candidates[1].Eligible {
+		t.Fatal(d)
+	}
+	d = f.s.Decide(report(strings.Repeat("c", 64), b))
+	if !d.Candidates[0].Eligible || d.Candidates[0].ConsecutiveSuccesses != 2 {
+		t.Fatal(d)
+	}
+	// Losing the provider cannot reuse its confirmed streak through empty stamps.
+	d = f.s.Decide(report("", ""))
+	wantPath(t, d, "")
+	if d.Candidates[0].ConsecutiveSuccesses != 1 || d.Candidates[1].ConsecutiveSuccesses != 1 {
+		t.Fatal(d)
+	}
+}

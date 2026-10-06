@@ -67,11 +67,12 @@ type Decision struct {
 	ObservationDiagnostics *relayobserve.Diagnostics `json:"observation_diagnostics,omitempty"`
 }
 type history struct {
-	fingerprint  string
-	observed     time.Time
-	healthySince time.Time
-	successes    int
-	attempts     []bool // true is failure
+	fingerprint        string
+	underlayGeneration string
+	observed           time.Time
+	healthySince       time.Time
+	successes          int
+	attempts           []bool // true is failure
 }
 type Selector struct {
 	policy                   Policy
@@ -174,8 +175,8 @@ func (s *Selector) Decide(report relayobserve.TargetReport) Decision {
 		seen[observation.PathID] = true
 		c := Candidate{TargetObservation: observation}
 		h := s.histories[c.PathID]
-		if h == nil || h.fingerprint != c.Fingerprint {
-			h = &history{fingerprint: c.Fingerprint}
+		if h == nil || h.fingerprint != c.Fingerprint || h.underlayGeneration != c.UnderlayGeneration {
+			h = &history{fingerprint: c.Fingerprint, underlayGeneration: c.UnderlayGeneration}
 			s.histories[c.PathID] = h
 		}
 		switch {
@@ -195,7 +196,7 @@ func (s *Selector) Decide(report relayobserve.TargetReport) Decision {
 			c.Exclusion = reportReason(c.Reason, "target_connect_failed")
 			failed = true
 			h.attempts = appendAttempt(h.attempts, true)
-		case c.State != "reachable" || len(c.Fingerprint) != 64 || c.Handshake <= 0 || c.RXDelta == 0 || c.TXDelta == 0 || c.ConnectTime < 0:
+		case c.State != "reachable" || len(c.Fingerprint) != 64 || c.UnderlayGeneration != "" && len(c.UnderlayGeneration) != 64 || c.Handshake <= 0 || c.RXDelta == 0 || c.TXDelta == 0 || c.ConnectTime < 0:
 			return reject("invalid_candidate_evidence")
 		case c.ConnectTime > s.policy.MaxConnectTime:
 			c.Exclusion = "connect_time_limit"
