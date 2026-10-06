@@ -137,3 +137,18 @@ Eight healthy candidates exceeded observation freshness in a 2 CPU race run;
 [issue #162](https://github.com/timo-kang/vpnctl/issues/162) tracks that capacity
 boundary and mixed healthy/slow candidate scheduling. A pass on these profiles
 does not establish availability on arbitrary robot hardware.
+
+Direct retry loss uses a persistent namespace worker (`retry-packets.jsonl`),
+with monotonic sample times, a 100ms nonce timeout and 50ms spacing. The original
+5s maximum observed gap, minimum 12s fault exposure, final recovery reply before
+fault removal, and 15s offline reactivation bounds remain. CI also runs a
+negative control which stops a real responder after the baseline and must reject
+a gap exceeding 5s. The original 32-node coarse-measurement failure is retained
+in #166; it is not retrospectively classified as a passing run.
+
+The quarantine fallback fixture proves the same target/default-route payload
+before reservation and after explicit release. Its two owned veth neighbours
+are permanent, and route/packet/neighbour evidence is retained on failure.
+The post-release check is still one TCP probe with a 1s deadline. This fixture
+checks target protection; physical ARP/roaming convergence remains a separate
+test. Neither fixture changes the shared host's network or Wi-Fi settings.

@@ -63,6 +63,8 @@ func TestNetworkWorker(t *testing.T) {
 		err = runM3Probe()
 	case "soak-read":
 		err = readSoakObservation()
+	case "direct-loss-watch":
+		err = runDirectLossWatch()
 	case "peer-probe":
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
