@@ -123,7 +123,7 @@ func TestNodeLeaseObserveKeepsMaintenanceSeparate(t *testing.T) {
 	r, err := e.observeTarget(context.Background(), "app", "", time.Second, func(context.Context, Entry, relaycatalog.Target) (targetProof, error) {
 		return targetProof{handshake: 1, rx: 1, tx: 1}, nil
 	})
-	if err != nil || !r.Valid || len(r.Paths) != 8 || k.renewals-before != 64 {
+	if err != nil || !r.Valid || len(r.Paths) != 8 || k.renewals-before != 8 {
 		t.Fatal(r, err, k.renewals-before)
 	}
 	for _, p := range r.Paths {

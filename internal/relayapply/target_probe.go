@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 )
 
 const MaxTargetProbeDuration = 20 * time.Second
+const targetObservationWaveDuration = 3 * time.Second
 
 type TargetObservation = relayobserve.TargetObservation
 type TargetReport = relayobserve.TargetReport
@@ -35,7 +37,7 @@ type targetProof struct {
 
 // ObserveTarget holds the same cache and namespace locks as prepare. No route,
 // peer, interface or policy-routing rule is changed. Protected candidates cooperatively renew
-// their leases between bounded probes while holding the shared lock. Each TCP socket pins both the approved
+// their leases before a bounded probe wave while holding the shared lock. Each TCP socket pins both the approved
 // candidate interface and its inner source; it cannot use a healthy neighbour.
 func (e *Engine) ObserveTarget(parent context.Context, targetID, controller string, timeout time.Duration) (TargetReport, error) {
 	return e.observeTarget(parent, targetID, controller, timeout, e.candidateProbe())
@@ -102,14 +104,20 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 		return out, err
 	}
 	remaining := time.Until(view.ExpiresAt)
+	// One full sweep precedes the bounded wave. There is no journal/lease
+	// renewal concurrently with candidate checks. At most eight socket proofs
+	// overlap; pre/post checks and fail-closed mutations remain serialized.
+	if e.hasLeases() {
+		_, _ = e.MaintainLeases(ctx)
+	}
+	type work struct {
+		index int
+		entry Entry
+	}
+	jobs := []work{}
 	for _, path := range view.Spec.Paths {
 		if !slices.Contains(path.TargetIDs, targetID) {
 			continue
-		}
-		if e.hasLeases() {
-			// Long batches must not exclude the supervisor for an entire 20s
-			// without lease maintenance. This cannot rearm from cached evidence.
-			_, _ = e.MaintainLeases(ctx)
 		}
 		observation := TargetObservation{PathID: path.ID, RelayID: path.RelayID, UnderlayID: path.UnderlayID, Priority: path.Priority, Cost: path.Cost, State: "unknown", ObservedAt: time.Now()}
 		switch {
@@ -122,11 +130,27 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 			if i < 0 {
 				observation.Reason = "candidate_not_prepared"
 			} else {
-				observation = e.observePrepared(ctx, e.journal.Entries[i], target, timeout, observation, probe)
+				jobs = append(jobs, work{len(out.Paths), e.journal.Entries[i]})
 			}
 		}
 		out.Paths = append(out.Paths, observation)
 	}
+	wave, stopWave := context.WithTimeout(ctx, targetObservationWaveDuration)
+	defer stopWave()
+	gate := make(chan struct{}, 1)
+	var workers sync.WaitGroup
+	for _, job := range jobs {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			out.Paths[job.index] = e.observePreparedGated(wave, job.entry, target, timeout, out.Paths[job.index], probe, gate)
+		}()
+	}
+	workers.Wait() // No probe may outlive the cache/namespace ownership.
+	if errors.Is(wave.Err(), context.DeadlineExceeded) {
+		out.Reason = "observation_budget_exhausted"
+	}
+
 	// Reject the complete batch on expiry, clock discontinuity or cancellation;
 	// earlier successes must not escape a batch whose authority has expired.
 	endBoot, bootErr := leaseBootTime()
@@ -155,7 +179,7 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), gate chan struct{}) TargetObservation {
 	if entry.LeaseVersion != 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 3*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, targetObservationWaveDuration)
 		defer cancel()
 	}
 	out.ObservedAt = time.Time{}

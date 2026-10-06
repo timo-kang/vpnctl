@@ -260,6 +260,9 @@ func (s *Selector) Decide(report relayobserve.TargetReport) Decision {
 			return finish("", "unavailable", "manual_pin_unavailable")
 		}
 		if unknown {
+			if report.Reason == "observation_budget_exhausted" {
+				return finish("", "unknown", report.Reason)
+			}
 			return finish("", "unknown", "candidate_evidence_incomplete")
 		}
 		if failed {
