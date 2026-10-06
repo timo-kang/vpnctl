@@ -213,7 +213,7 @@ jobs:
           VPNCTL_DIRECT_SIZES: ${{ matrix.sizes }}
           VPNCTL_TEST_CPUS: '2'
           VPNCTL_TEST_MEMORY: 2g
-        run: ./scripts/test-netns.sh -test.run='^TestNetns_DirectDataplane$' -test.timeout=8m
+        run: ./scripts/test-netns.sh -test.run='^Test(Netns_DirectDataplane|DirectLossWatchRejectsOverlongOutage)$' -test.timeout=8m
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

@@ -136,3 +136,18 @@ deadlines and assertions. `scripts/test-m3-observation-capacity.sh` focuses on
 `VPNCTL_TEST_CPUS=1|2|4` for capacity profiles; use a new `VPNCTL_ARTIFACT_DIR`
 for each run. The full application suite also runs these cases. See
 [capacity evidence and limits](../../docs/validation/m3-observation-capacity.md).
+
+Direct retry loss uses a persistent namespace worker (`retry-packets.jsonl`),
+with monotonic sample times, a 100ms nonce timeout and 50ms spacing. The original
+5s maximum observed gap, minimum 12s fault exposure, final recovery reply before
+fault removal, and 15s offline reactivation bounds remain. CI also runs a
+negative control which stops a real responder after the baseline and must reject
+a gap exceeding 5s. The original 32-node coarse-measurement failure is retained
+in #166; it is not retrospectively classified as a passing run.
+
+The quarantine fallback fixture proves the same target/default-route payload
+before reservation and after explicit release. Its two owned veth neighbours
+are permanent, and route/packet/neighbour evidence is retained on failure.
+The post-release check is still one TCP probe with a 1s deadline. This fixture
+checks target protection; physical ARP/roaming convergence remains a separate
+test. Neither fixture changes the shared host's network or Wi-Fi settings.

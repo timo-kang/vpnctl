@@ -134,3 +134,15 @@ baseline을 재생성하고 서비스를 시작한다. 다른 peer/route를 함�
 재생성을 요구하지 않는다. 자동 journal 이관은 지원하지 않는다.
 
 재현 명령과 제한은 [dataplane 검증 기록](../validation/direct-dataplane.md)에 둔다.
+
+### 직접 경로 시험의 패킷 증거
+
+직접 peer 제거는 상태 로그 발행보다 먼저 완료될 수 있다. 통합 시험은 기존 5초
+fallback 예산 안에서 peer 제거·양방향 철회 로그·실제 relay payload를 함께 기다린다.
+재시도 손실은 별도 namespace worker가 100ms nonce timeout과 50ms 간격으로 연속
+측정한다. 매 패킷의 monotonic 경과와 마지막 성공 이후 gap을 artifact에 기록하며,
+최소 12초 장애를 유지하고 마지막 손실 구간의 성공 응답까지 확인한다. 기존 5초
+최대 관측 gap 및 장애 제거 후 15초 offline 재연결 기준은 유지한다. 측정 worker의
+초기 성공·sample 순서·중단을 검사하고, 실제 5초 초과 단절을 거절하는 대조 시험도
+함께 실행한다. 개별 프로세스 실행 및 500ms 수신 대기로 생기던 관측 공백을 줄이는
+시험 보강이며 실제 장비의 hard real-time 보장은 아니다.
