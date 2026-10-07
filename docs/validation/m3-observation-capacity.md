@@ -348,3 +348,11 @@ The same production source also passed all six robot-only 0.25 CPU cases in
 `/tmp/vpnctl-fix-cpu-connect-quarter-v1`: four-path first payload 4.590–4.680s,
 maximum gap 3.301s; eight-path first payload 6.307–6.501s, maximum gap 4.499s.
 Race instrumentation has a separate cost profile and requires its own result.
+
+At clean source `896a53b`, the CI-equivalent race build also passed all six
+robot-only 0.5 CPU cases in `/tmp/vpnctl-fix-cpu-connect-race-v1`. Four-path
+first payload was 3.971–4.158s and its largest fresh observation gap was 2.679s;
+eight-path values were 5.987–6.371s and 4.423s. Every position retained both
+application payloads and all candidate leases for at least 15s and four additional
+applied cycles per app. This is separate local evidence; remote CI and the
+deployment/startup/long-duration qualifications above remain required.
