@@ -390,5 +390,27 @@ class ApplicationMixedEvidenceTests(unittest.TestCase):
                 observer.validate_application_mixed_result(status)
 
 
+class ApplicationApprovalEvidenceTests(unittest.TestCase):
+    def valid(self):
+        return dict(exit=0, reports=[dict(report=dict(fault=fault, completed=True,
+                    old_and_new_unbound_tcp_blocked=True, relay_approvals_live=True,
+                    isolated_grant_generation=12, applied_generation=12)) for fault in ('expiry', 'revocation')])
+
+    def test_complete_approval_matrix(self):
+        observer.validate_application_approval_result(self.valid())
+
+    def test_missing_stale_or_false_evidence_fails(self):
+        for change in (lambda s: s.update(exit=1), lambda s: s['reports'].pop(),
+                       lambda s: s['reports'][0]['report'].update(fault='revocation'),
+                       lambda s: s['reports'][0]['report'].update(completed=False),
+                       lambda s: s['reports'][0]['report'].update(applied_generation=11),
+                       lambda s: s['reports'][0]['report'].update(relay_approvals_live=False),
+                       lambda s: s['reports'][1]['report'].update(old_and_new_unbound_tcp_blocked=False)):
+            status = self.valid()
+            change(status)
+            with self.assertRaises(RuntimeError):
+                observer.validate_application_approval_result(status)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -181,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
                         return json.load(r)
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     result = list(pool.map(probe, jobs))
-            elif action == 'application-mixed-start':
+            elif action in ('application-mixed-start', 'application-approval-start'):
                 with LOCK:
                     if WORKER is not None:
                         raise RuntimeError('only one fixture per VM')
@@ -192,17 +192,19 @@ class Handler(BaseHTTPRequestHandler):
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
                                TMPDIR='/tmp', GORACE='atexit_sleep_ms=0')
                     with (ROOT / 'worker.log').open('wb') as log:
+                        test = 'MixedCandidates' if action == 'application-mixed-start' else 'Approval'
                         WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test',
-                            '-test.run=^TestNetns_M3TargetApplicationMixedCandidates$', '-test.v', '-test.timeout=15m'],
+                            '-test.run=^TestNetns_M3TargetApplication' + test + '$', '-test.v', '-test.timeout=15m'],
                             env=env, stdout=log, stderr=log, start_new_session=True)
                 result = {'started': True}
-            elif action == 'application-mixed-result':
+            elif action in ('application-mixed-result', 'application-approval-result'):
                 if WORKER is None:
                     raise RuntimeError('mixed application fixture not started')
                 result = {'exit': WORKER.poll()}
                 if result['exit'] is not None:
                     reports, total = [], 0
-                    for report in sorted((ROOT / 'results').glob('*/application-mixed-candidates.json')):
+                    filename = 'application-mixed-candidates.json' if action == 'application-mixed-result' else 'application-approval.json'
+                    for report in sorted((ROOT / 'results').glob('*/' + filename)):
                         total += report.stat().st_size
                         if total > 8 * 1024 * 1024:
                             raise RuntimeError('mixed application diagnostics exceed limit')

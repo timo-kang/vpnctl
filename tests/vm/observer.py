@@ -265,6 +265,22 @@ def host_clock():
             'wall_ns': time.time_ns(), 'monotonic_ns': time.monotonic_ns(),
             'boottime_ns': time.clock_gettime_ns(time.CLOCK_BOOTTIME)}
 
+def validate_application_approval_result(status):
+    reports = [row.get('report', {}) for row in status.get('reports', [])]
+    if (status.get('exit') != 0 or len(reports) != 2
+            or {row.get('fault') for row in reports} != {'expiry', 'revocation'}):
+        raise RuntimeError('application approval matrix failed or omitted cases')
+    for row in reports:
+        if (row.get('completed') is not True or row.get('old_and_new_unbound_tcp_blocked') is not True
+                or row.get('relay_approvals_live') is not True):
+            raise RuntimeError('application approval enforcement evidence incomplete')
+        if row['fault'] == 'expiry':
+            generation = row.get('isolated_grant_generation')
+            if (type(generation) is not int or generation <= 0
+                    or row.get('applied_generation') != generation):
+                raise RuntimeError('application expiry did not isolate the intended grant')
+
+
 def validate_application_mixed_result(status):
     reports = [row.get('report', {}) for row in status.get('reports', [])]
     if (status.get('exit') != 0 or len(reports) != 3
@@ -460,15 +476,18 @@ def exercise(vm, case, mode, delta, result):
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
         return result
-    if case == 'application-mixed':
-        vm.call('application-mixed-start')
+    if case in ('application-mixed', 'application-approval'):
+        vm.call(case + '-start')
         until = time.monotonic() + 16 * 60
         while time.monotonic() < until:
-            status = vm.call('application-mixed-result')
+            status = vm.call(case + '-result')
             if status['exit'] is not None:
-                result['application-mixed'] = status
-                vm.record('application-mixed-result', status)
-                validate_application_mixed_result(status)
+                result[case] = status
+                vm.record(case + '-result', status)
+                if case == 'application-mixed':
+                    validate_application_mixed_result(status)
+                else:
+                    validate_application_approval_result(status)
                 return result
             time.sleep(2)
         raise RuntimeError('mixed application fixture timed out')
@@ -696,7 +715,7 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])

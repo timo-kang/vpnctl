@@ -306,6 +306,7 @@ func TestNetns_M3TargetApplicationApproval(t *testing.T) {
 	for _, fault := range []string{"expiry", "revocation"} {
 		t.Run(fault, func(t *testing.T) {
 			f := applicationFixture(t, true, 4)
+			evidence := map[string]any{"fault": fault}
 			if fault == "expiry" {
 				grant := f.controller.apply(f.spec, 60)
 				// The ordinary refresh command intentionally refuses a busy cache.
@@ -316,6 +317,7 @@ func TestNetns_M3TargetApplicationApproval(t *testing.T) {
 				if applied.Selection.Generation != grant.Generation {
 					t.Fatal("outage would isolate a different approval generation", applied.Selection.Generation, grant.Generation)
 				}
+				evidence["isolated_grant_generation"], evidence["applied_generation"] = grant.Generation, applied.Selection.Generation
 				stream := applicationStream(t, f, "expiry")
 				nodeControllerOutage(t, f)
 				f.controller.apply(f.spec, 3600)
@@ -364,7 +366,8 @@ func TestNetns_M3TargetApplicationApproval(t *testing.T) {
 					}
 				}
 			}
-			writeM3Report(t, filepath.Join(f.results, "application-approval.json"), map[string]any{"completed": !t.Failed(), "fault": fault, "old_and_new_unbound_tcp_blocked": true, "relay_approvals_live": true})
+			evidence["completed"], evidence["old_and_new_unbound_tcp_blocked"], evidence["relay_approvals_live"] = !t.Failed(), true, true
+			writeM3Report(t, filepath.Join(f.results, "application-approval.json"), evidence)
 		})
 	}
 }
