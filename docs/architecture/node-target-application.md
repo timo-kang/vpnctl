@@ -74,6 +74,12 @@ manual pin 실패는 다른 건강한 후보로 우회하지 않는다. stale/un
 검사와 lease 유지/차단은 매 주기 그대로 수행한다. 선택 후보의 연속 성공, 관측 유효시간,
 적용 전후 검증과 실제 unbound 앱 TCP 검증도 유지한다. 이 제한은 reconcile에만 적용하며
 별도 `node relay select`의 전체 후보 관측을 축소하지 않는다.
+
+이미 활성화된 동일 route를 유지할 때는 현재 decision의 설치 fingerprint·underlay 세대를
+대조한 뒤, 실제 unbound 앱 TCP 전후의 승인·live lease·inventory·소유권·route 검사로
+재검증한다. 관측 wave 다음에 같은 경로의 bound TCP를 한 번 더 실행하지 않는다.
+새 route 적용과 rollback은 변경 전 bound 후보 재검증을 유지하며, 앱 검증 실패·관측 만료·
+동시 underlay 변경은 동일하게 차단한다. 관측 이력과 fresh 확인 횟수를 재사용/완화하지 않는다.
 승인 만료·철회·후보 release는 target 예약을 해제하지 않는다.
 
 SIGKILL 후 남은 switching intent는 감독기가 관련 후보 lease 갱신을 거절하도록 한다.

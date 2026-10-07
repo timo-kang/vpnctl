@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -403,12 +402,13 @@ func TestTargetApplicationOneSweepAndApplyTimeLeaseExpiry(t *testing.T) {
 			e, _, k, _ := appFixture(t)
 			s := activateApp(t, e)
 			before := k.renewals
-			var proofs atomic.Int32
-			e.probe = func(_ context.Context, entry Entry, _ relaycatalog.Target) (targetProof, error) {
-				if proofs.Add(1) == 4 && expire {
+			probe := e.appProbe
+			e.appProbe = func(ctx context.Context, guard TargetGuard, entry Entry, target relaycatalog.Target) (ApplicationProof, error) {
+				proof, err := probe(ctx, guard, entry, target)
+				if expire {
 					k.active[entry.Candidate.PathID] = false
 				}
-				return targetProof{handshake: 1, rx: 1, tx: 1}, nil
+				return proof, err
 			}
 			out, err := e.ReconcileTarget(context.Background(), "app", "", s, time.Second)
 			if k.renewals-before != 3 || out.Diagnostics.Phases["maintenance"].Calls != 1 {
