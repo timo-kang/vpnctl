@@ -399,6 +399,7 @@ class ApplicationRobotCapacityEvidenceTests(unittest.TestCase):
                           role_placement_verified=True)
             for name, usage in (('resource_profile', 10), ('resource_profile_after', 20)):
                 report[name] = dict(scope='robot-supervisor-and-two-actuators', cpu_max='50000 100000',
+                                    cpu_model='test-cpu', guest_vcpus=1,
                                     initial_preparation_limited=False, controller_relay_measurement_limited=False,
                                     cpu_pressure='some avg10=0.0 total=0',
                                     cpu_stat=f'usage_usec {usage}\nnr_periods 5\nnr_throttled 0\nthrottled_usec 0')
@@ -415,6 +416,9 @@ class ApplicationRobotCapacityEvidenceTests(unittest.TestCase):
                    lambda r: r['resource_profile'].update(cpu_max='max 100000'),
                    lambda r: r['resource_profile_after'].update(cpu_max='100000 100000'),
                    lambda r: r['resource_profile'].update(scope='whole-vm'),
+                   lambda r: r['resource_profile'].pop('cpu_model'),
+                   lambda r: r['resource_profile_after'].update(cpu_model='different'),
+                   lambda r: r['resource_profile'].update(guest_vcpus=2),
                    lambda r: r['resource_profile'].update(initial_preparation_limited=True),
                    lambda r: r['resource_profile'].update(controller_relay_measurement_limited=True),
                    lambda r: r['resource_profile_after'].update(cpu_stat='usage_usec 20'),

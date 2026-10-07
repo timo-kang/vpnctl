@@ -227,3 +227,81 @@ back. Persisted approval changes still precede a longer grant. Failure still
 blocks independently. No lease lifetime, wave budget, freshness, confirmation,
 FIFO or container resource bound changes. Final exact-commit CI and raw artifact
 review must pass before this recurrence can be considered resolved.
+
+## Separate robot CPU accounting (#185 / #186)
+
+The earlier 0.5 CPU limit covered an entire one-vCPU guest: controller, relays,
+robot workers and the measuring process. That profile reproduced observation
+gaps over 10s and real independent-app interruption, but cannot establish a
+robot-only minimum CPU requirement. The failures remain preserved. The
+`c826d34` public-view copy optimization reduced the local race eight-path
+`Status` benchmark from 1.460ms to 1.007–1.015ms (500 iterations, twice), with
+all clock checkpoint writes/fsyncs and structural validation intact. Its
+whole-VM 0.5 CPU mixed test still failed at healthy positions 0/3/7. A faster
+microbenchmark is not a resolution of #186.
+
+A separate profile places only the live robot supervisor and both target
+actuators in a new guest cgroup. `clone3(CLONE_INTO_CGROUP)` applies the limit
+before the processes execute, and command children inherit it. The controller,
+relay supervisors and measurement process are explicitly checked to be outside
+this cgroup. Initial enrollment and candidate preparation are also outside;
+this profile does **not** qualify resource-constrained bootstrap or rebuilding.
+The one-CPU, 2GiB outer container still limits the entire VM, with 768MiB of guest
+RAM. The guest's CPU model and the outer quota remain relevant to interpretation.
+
+Only the identity-guarded QEMU guest may create this role cgroup. No host
+network, cgroup, kernel, clock or power configuration is changed. Cleanup kills
+and removes only this invocation's newly created guest cgroup. Existing long
+experiments remain untouched.
+
+```sh
+VPNCTL_VM_RACE=1 VPNCTL_VM_CPUS=1 \
+  VPNCTL_ARTIFACT_DIR=/tmp/robot-half-new-run \
+  scripts/test-vm.sh --case application-capacity-4 application-capacity-8 \
+  --robot-cpus 0.5
+```
+
+The robot limit accepts `1`, `0.5` or `0.25`; use a new empty artifact directory
+for each run. `VPNCTL_TEST_BINARY` can supply a deployment binary; record its
+origin and digest separately from the integration suite. `VPNCTL_VM_IMAGE` may
+reuse a compatible image built from the current `tests/vm` sources, not an old
+agent that lacks this profile. `VPNCTL_VM_RACE=0|1` identifies the checkout build
+and suite; it cannot prove how an externally supplied binary was built.
+
+Each 4/8-path matrix positions the sole healthy target path first, middle and
+last, while the other 3/7 paths time out for 2s. Both automatic actuators remain
+active, and the independent target must keep passing real TCP payloads. Every
+candidate's live kernel gate is sampled. Qualification requires at least 15s
+and three additional applied cycles per app, with every successful observation
+gap within 10s. The original wave, freshness, authority and fixture deadlines
+remain unchanged. The resource evidence includes the guest CPU model/vCPU count and before/after
+`cpu.max`, `cpu.stat`, pressure and verified role placement; missing, changed, regressed
+or nonadvancing counters fail validation. This is a short capacity regression,
+not p95, no-uplink, long-term availability or hardware qualification.
+
+Local race result at `6079b01`, outer VM 1 CPU, robot-only 0.5 CPU:
+
+| Candidates | Healthy positions | Result | First payload | Largest fresh observation gap |
+| --- | --- | --- | --- | --- |
+| 4 | 0 / 1 / 3 | 3/3 passed | 5.953–6.228s | 3.710s |
+| 8 | 0 / 3 / 7 | 3/3 passed | 7.889–8.269s | 5.347s |
+
+Both matrices measured actual robot cgroup throttling. Evidence is retained in
+`/tmp/vpnctl-capacity-robot-half`, with the original failed whole-VM profile in
+`/tmp/vpnctl-capacity-clone-half`. These are local artifacts; the CI jobs upload
+`m3-robot-capacity-4` and `m3-robot-capacity-8` as shareable independent results.
+A local pass does not predict a slower remote runner's result.
+
+Candidate `confirmation_gap_ns` now distinguishes a fresh successful probe whose
+previous success arrived more than the policy's freshness interval earlier.
+Eligibility still resets to one success and must be reconfirmed. The field is
+absent on a new sequence, after normal recovery, or when a previous unknown or
+failure had already broken continuity. It diagnoses the observed gap without
+attributing it to CPU, the network, or a particular lock by inference alone.
+
+#185 still needs deployment-representative CPU/storage, startup/rebuild and
+longer load profiles. #186 retains the original CI failure with incomplete
+terminal diagnostics: a newer pass cannot retroactively prove its root cause.
+Whole-VM low-budget failure, role-limited success and original CI failure must
+remain separate evidence. M2's successful 24h baseline and M3's other release
+gates are not changed by these short runs.

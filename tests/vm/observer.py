@@ -286,14 +286,18 @@ def validate_robot_capacity(row, paths, cpu):
     if not quota or row.get('paths') != paths or row.get('role_placement_verified') is not True:
         raise RuntimeError('missing role capacity configuration or placement')
     stats = []
+    models = set()
     for name in ('resource_profile', 'resource_profile_after'):
         profile = row.get(name, {})
         if (profile.get('scope') != 'robot-supervisor-and-two-actuators'
                 or profile.get('cpu_max') != quota
                 or profile.get('initial_preparation_limited') is not False
                 or profile.get('controller_relay_measurement_limited') is not False
+                or not isinstance(profile.get('cpu_model'), str) or not profile['cpu_model'].strip()
+                or type(profile.get('guest_vcpus')) is not int or profile['guest_vcpus'] != 1
                 or not profile.get('cpu_pressure', '').startswith('some ')):
             raise RuntimeError('incorrect robot-only resource profile')
+        models.add(profile['cpu_model'])
         try:
             values = dict(line.split() for line in profile['cpu_stat'].splitlines())
             values = {k: int(values[k]) for k in ('usage_usec', 'nr_periods', 'nr_throttled', 'throttled_usec')}
@@ -302,7 +306,7 @@ def validate_robot_capacity(row, paths, cpu):
         if any(v < 0 for v in values.values()):
             raise RuntimeError('invalid robot CPU accounting')
         stats.append(values)
-    if (stats[1]['usage_usec'] <= stats[0]['usage_usec']
+    if (len(models) != 1 or stats[1]['usage_usec'] <= stats[0]['usage_usec']
             or any(stats[1][k] < stats[0][k] for k in stats[0])):
         raise RuntimeError('robot CPU accounting did not advance')
 

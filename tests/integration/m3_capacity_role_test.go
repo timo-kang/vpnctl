@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -38,6 +39,7 @@ type capacityGroup struct {
 	file  *os.File
 	path  string
 	quota string
+	model string
 }
 
 func capacityQuota(cpu string) string {
@@ -101,6 +103,20 @@ func newCapacityGroup(t *testing.T, cpu string) *capacityGroup {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cpuInfo, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		t.Fatal("guest CPU identity", err)
+	}
+	for _, line := range strings.Split(string(cpuInfo), "\n") {
+		key, value, _ := strings.Cut(line, ":")
+		if strings.TrimSpace(key) == "model name" {
+			g.model = strings.TrimSpace(value)
+			break
+		}
+	}
+	if g.model == "" {
+		t.Fatal("guest CPU model unavailable")
+	}
 	return g
 }
 
@@ -126,6 +142,7 @@ func (g *capacityGroup) evidence(t *testing.T) map[string]any {
 		t.Fatal("CPU profile changed", got)
 	}
 	return map[string]any{"scope": "robot-supervisor-and-two-actuators", "cpu_max": g.quota,
+		"cpu_model": g.model, "guest_vcpus": runtime.NumCPU(),
 		"cpu_stat": read("cpu.stat"), "cpu_pressure": read("cpu.pressure"),
 		"initial_preparation_limited": false, "controller_relay_measurement_limited": false}
 }

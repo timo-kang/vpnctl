@@ -101,6 +101,11 @@ These are test profiles, not minimum hardware or failover-SLO guarantees.
 fresh evidence. It must not trigger accepting stale observations, extending lease
 lifetimes, or removing the target reservation. A partial observation may select
 only a candidate with new valid confirmations and the usual apply-time checks.
+When a fresh reachable candidate loses its confirmation sequence because the
+previous success is too old, `confirmation_gap_ns` reports that interval. It
+does not mean the network failed, nor does it prove CPU starvation as the cause.
+The candidate still needs the normal new confirmations; this diagnostic grants
+no eligibility or extension of the 10s freshness bound.
 
 Use `diagnostics` on reconcile results and `observation_diagnostics` on selections
 for monotonic/BOOTTIME elapsed time, phase calls and external kernel/inventory
@@ -112,12 +117,16 @@ The original 2 CPU race capacity failure and 4 CPU interim validation remain in
 [issue #162](https://github.com/timo-kang/vpnctl/issues/162). Reproduction, mixed
 healthy/slow paths, CPU profiles and remaining qualification limits are described
 in [observation capacity validation](../validation/m3-observation-capacity.md).
+That document also distinguishes whole-VM CPU limits from the robot-only
+supervisor/actuator profile. Neither profile is a minimum robot hardware specification.
 
 ### 물리 경로 변경 이벤트
 
 선택/reconcile 명령은 전체 실행 동안 설정 underlay의 커널 이벤트를 관측한다.
 주소·link·route가 잠시 바뀌었다가 복원돼도 `underlay_generation`이 달라져 이전의
 연속 성공을 재사용하지 않는다. 새로운 2회 확인과 앱 경로 검증을 거친다.
-수집 유실은 unknown이며 물리 경로 부재 판정이 아니다. source/gateway/장치가 실제로
-바뀐 경우 소유 후보의 자동 재구성은 아직 #22/#23 후속 범위다.
+수집 유실은 unknown이며 물리 경로 부재 판정이 아니다. 명시적 설치 의도를 등록한
+소유 후보는 supervisor가 현재 승인·설정·inventory에 맞춰 재구성한다.
+고정한 source 조건을 임의로 바꾸거나 외부 소유 자원을 채택하지 않는다.
+[후보 재구성 계약](../architecture/node-candidate-preparation.md)을 참조한다.
 [이벤트 계약과 검증 범위](../architecture/underlay-events.md)를 참조한다.
