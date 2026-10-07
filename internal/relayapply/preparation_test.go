@@ -532,6 +532,10 @@ func TestPreparationFastUnitsShareOneBudgetAndKeepFairness(t *testing.T) {
 					t.Fatal("second path starved", p)
 				}
 			}
+			// Isolate scheduling from fsync latency. Durable writes and crashes
+			// are covered by the fault matrix; a slow disk legitimately yields
+			// before the maximum count and must not fail this fast-work case.
+			e.save = func([]byte) error { return nil }
 			start := *now
 			e.rebuildClock = func() (time.Duration, error) {
 				if k.steps > 0 {
@@ -539,17 +543,19 @@ func TestPreparationFastUnitsShareOneBudgetAndKeepFairness(t *testing.T) {
 				}
 				return start, nil
 			}
+			wallStart := time.Now()
 			_, err := e.RebuildCandidates(context.Background())
+			wallElapsed := time.Since(wallStart)
 			want := nodeRebuildMaxUnits
 			if elapsed > 250*time.Millisecond {
 				want = 1
 			}
-			if k.steps != want {
+			if k.steps < 1 || k.steps > want || wallElapsed < NodeRebuildDuration-500*time.Millisecond && k.steps != want {
 				t.Fatal("wrong bounded units", k.steps, want)
 			}
 			if elapsed == 0 {
-				for _, p := range e.journal.Preparations {
-					if p.Step != nodeRebuildMaxUnits/2 {
+				for i, p := range e.journal.Preparations {
+					if p.Step != (k.steps+1-i)/2 {
 						t.Fatal("fast work starved a candidate", p)
 					}
 				}
@@ -577,6 +583,7 @@ func TestPreparationFastUnitsDoNotResetCumulativeBudget(t *testing.T) {
 	if _, err := e.rebuildCandidates(context.Background(), 2); err != nil {
 		t.Fatal(err)
 	}
+	e.save = func([]byte) error { return nil }
 	start := *now
 	e.rebuildClock = func() (time.Duration, error) {
 		return start + time.Duration(k.steps)*100*time.Millisecond, nil
@@ -591,6 +598,34 @@ func TestPreparationFastUnitsDoNotResetCumulativeBudget(t *testing.T) {
 	}
 	if e.journal.Preparations[0].Step != 2 || e.journal.Preparations[1].Step != 1 {
 		t.Fatal("cumulative budget lost round-robin progress", e.preparationStatus())
+	}
+}
+
+func TestPreparationSlowJournalYieldsBeforeNextUnit(t *testing.T) {
+	e, k, _, _ := preparationFixture(t)
+	for _, path := range []string{"p0", "p1"} {
+		if _, err := e.RequestPreparation(context.Background(), path, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.rebuildCandidates(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	delayed := false
+	e.save = func([]byte) error {
+		if !delayed {
+			delayed = true
+			time.Sleep(300 * time.Millisecond)
+		}
+		return nil
+	}
+	if _, err := e.RebuildCandidates(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// BOOTTIME is deliberately frozen in this fixture. Wall time consumed by
+	// a slow journal still prevents a second unit from taking a fresh budget.
+	if k.steps != 1 || k.active["p0"] || k.active["p1"] {
+		t.Fatal("slow persistence did not yield or opened lease", k.steps, k.active)
 	}
 }
 
