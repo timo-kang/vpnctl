@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -56,6 +57,31 @@ func BenchmarkNodeStatusEightPaths(b *testing.B) {
 		if r, err := s.Status(); err != nil || !r.UsableCache {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestStatusCatalogCopiesAllNestedSlices(t *testing.T) {
+	s, _, _ := statusCheckpointFixture(t)
+	first, err := s.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := cloneState(s.state) // Independent serialization oracle.
+	v := first.Catalog
+	v.Spec.ReservedIPs = append(v.Spec.ReservedIPs, "203.0.113.255")
+	v.Spec.Relays[0].Endpoints[0].Address = "203.0.113.254:9"
+	v.Spec.Relays[0].ID = "edited"
+	v.Spec.Targets[0].Prefixes[0] = "203.0.113.0/24"
+	v.Spec.Targets[0].ID = "edited"
+	v.Spec.Paths[0].TargetIDs[0] = "edited"
+	v.Spec.Paths[0].Disabled = true
+	v.Bindings[0].PublicKey = testPublic("report mutation")
+	second, err := s.Status()
+	if err != nil || !second.UsableCache || !reflect.DeepEqual(second.Catalog, before.Catalog) {
+		t.Fatal("public mutation changed subsequent authority", err)
+	}
+	if !same(s.state.Catalog, before.Catalog) {
+		t.Fatal("public mutation reached stored authority")
 	}
 }
 
