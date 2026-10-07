@@ -31,6 +31,11 @@ func (b *outputBuffer) Write(p []byte) (int, error) {
 // Configuration may contain a private key; neither command input nor stderr is
 // included in errors. Children inherit only a pipe, not a secret argv/file.
 func command(ctx context.Context, input, name string, args ...string) ([]byte, error) {
+	// These tiny, read-only procfs settings need fresh evidence at every check,
+	// but do not need a child process. Keep all other command semantics intact.
+	if input == "" && name == "cat" && len(args) == 1 && rpFilterPath(args[0]) {
+		return readProcSetting(ctx, args[0])
+	}
 	done := relayobserve.Command(ctx, false)
 	defer done()
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)

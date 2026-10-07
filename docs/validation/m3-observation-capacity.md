@@ -364,3 +364,55 @@ was 5.906s, below the unchanged 10s boundary. Both applications and all leases
 passed through at least 15s and three further applied cycles. These values are
 rounded upward where used as bounds. The run's separate candidate lifecycle
 unit-test failure is retained; a passing CPU job does not make the entire run pass.
+
+
+## Recurrent CPU8 freshness failure (2026-10-07)
+
+[CI 37604001478, CPU8](https://github.com/timo-kang/vpnctl/actions/runs/37604001478/job/112740060969)
+at `b119603` failed healthy positions 0 and 7. The runtime was unchanged from
+`b4a95c7`; this newer failure supersedes any assumption that the earlier CPU8
+pass established capacity. Fresh successful proofs were 10.662s apart at
+position 0 and 10.727s / 10.685s apart at position 7, resetting confirmation and
+quarantining the application. Position 3 passed with a largest gap of 9.988s.
+The unchanged 10s policy correctly rejected stale continuity.
+
+The failed guest reported EPYC 7763 versus EPYC 9V45 in the earlier passing run.
+Both used one guest vCPU and a robot-only 0.5 CPU quota. Approximate CPU rates,
+using cgroup bandwidth periods corroborated by worker timestamps, were 0.98 CPU
+for the whole guest, 0.48 for the robot and 0.50 elsewhere. Robot throttling was
+nearly absent. Whole-guest saturation is supported; CPU model alone is not a
+proved cause. Controller, relay and measurement costs are not individually
+separated in these artifacts, and host-QEMU pressure was not recorded.
+
+Median supervisor maintenance grew from 0.621s to 1.395s, app work excluding
+admission from 2.414s to 3.948s, and app2 from 1.819s to 3.918s. FIFO order stayed
+intact; its participants held ownership longer. Concurrent phase sums cannot be
+added as wall time. A stable supervisor/app/app2 cohort executes about 767 child
+processes, including roughly 120 fresh `cat` reads of `rp_filter`.
+
+Optimization ledger (all checks and freshness limits retained):
+
+| Candidate | Measurement | Decision |
+| --- | --- | --- |
+| Fresh bounded native `rp_filter` reads | 1,000 reads × 3, race, Ryzen 9800X3D: original command 260.659–267.245µs/read; native command path 4.222–4.721µs/read | Kept: roughly 120 fewer children per cohort in the VM; no cached settings or skipped checks |
+| FIFO polling | Two 25ms waiters: 0.0119–0.0136 CPU production, 0.0315–0.0318 race on the same local CPU | Measured secondary cost; no production change |
+| Repeated public inventory decoding | Not yet isolated in a representative profile | No speculative cache added |
+
+A separate, stricter diagnostic limits the whole local VM to 0.5 CPU while
+retaining the robot's 0.5 quota. The original clean `b119603` passed positions
+0 and 3 (maximum gaps 8.798s and 9.103s) but failed position 7 with
+`application lost fresh continuous eligibility`. Its evidence is retained at
+`/tmp/vpnctl-cpu-baseline-half-v1`; this is distinct from the remote qualification
+profile and does not replace it. The native-read comparison in `/tmp/vpnctl-cpu-native-half-v1` passed all three
+positions and reduced the measured child-process work (supervisor 76 to 60
+kernel commands; complete app cycles roughly 52–54 fewer). Related five-package
+race tests, full vet and independent boundary review passed. Missing, oversized,
+symlink, FIFO and cancelled reads fail closed. Every pre/post check still reads
+both current settings; nonzero or malformed values remain conflicts.
+
+End-to-end headroom remains insufficient: the largest steady eligible gap was
+9.706s, and app2 recorded 10.157–10.295s confirmation gaps during initial
+activation. A pass in this short fixture is not a claim that all gaps disappeared
+or that the slower remote profile is resolved. The original failures remain
+retained. Measured FIFO polling cost is the next bounded improvement; final
+same-profile comparison and exact-head CI remain required before merging.
