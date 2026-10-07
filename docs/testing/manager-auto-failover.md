@@ -116,8 +116,14 @@ conversion from wall expiry to monotonic is explicitly an estimate.
   reply within the recorded observation window. Different relay SNAT identities
   can break an existing TCP session even when new connections recover.
 
-Individual failovers and all-unavailable detection are compared with the existing
-10-second budgets. SLO misses and missing timing are recorded as `fail` and
+Individual failovers and conclusive all-candidate failure for the server target
+are compared with the existing 10-second budgets. `no_verified_path` is the
+required no-uplink proxy, not a diagnosis of physical links. A guarded `unknown`
+or `blocked` state proves safe quarantine only: `no_uplink_timeline` leaves its
+conclusive decision absent and that SLO is `unmeasured`. In this mixed matrix,
+wan0 candidate rebuilding can leave unknown entries while both relay uplinks
+are down; that must not be published as a successful no-uplink deadline. The
+earlier empty-selection timing remains in `timeline` for quarantine diagnostics. SLO misses and missing timing are recorded as `fail` and
 `unmeasured`; functional completion does not relabel them as SLO success.
 `p95_status=unqualified_insufficient_samples` is mandatory for this small matrix.
 A p95 study needs at least 20 measured transitions per event class and profile,

@@ -169,3 +169,16 @@ func TestManagerTimelineFirstAlternativePrecedesPreferredRecovery(t *testing.T) 
 		t.Fatal("wrong relay source qualified", path, got)
 	}
 }
+
+func TestManagerTimelineQuarantineDoesNotProveAllCandidatesFailed(t *testing.T) {
+	cycles := []managerAutoCycle{{Target: "app", Guarded: true, SelectionState: "unknown", Diagnostics: &relayobserve.Diagnostics{StartedMono: 50, FinishedMono: 125, Checkpoints: []relayobserve.Checkpoint{{Name: "decision_complete", At: 110}, {Name: "target_routes_blocked", At: 120}}}}}
+	got := managerNoPathTimeline(nil, cycles, "p11", 90)
+	if got["decision_complete"] != 0 || got["routes_completed"] != 120 {
+		t.Fatal("unknown quarantine mislabeled as no-uplink", got)
+	}
+	cycles = append(cycles, managerAutoCycle{Target: "app", Guarded: true, SelectionState: "no_verified_path", Diagnostics: &relayobserve.Diagnostics{StartedMono: 130, FinishedMono: 145, Checkpoints: []relayobserve.Checkpoint{{Name: "decision_complete", At: 140}}}})
+	got = managerNoPathTimeline(nil, cycles, "p11", 90)
+	if got["decision_complete"] != 140 || got["routes_completed"] != 120 {
+		t.Fatal("all-candidate failure or earlier quarantine lost", got)
+	}
+}

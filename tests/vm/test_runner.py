@@ -193,6 +193,8 @@ class AutoManagerEvidenceTests(unittest.TestCase):
                 timeline = dict(decision_complete=3, routes_completed=3, first_success=3)
                 row['timeline'] = timeline.copy()
                 row['failover_timeline'] = timeline.copy()
+                row['no_uplink_timeline'] = timeline.copy()
+                row['no_uplink_evidence_state'] = 'no_verified_path'
                 row['previous_path'], row['failover_path'] = 'p00', 'p02'
             steps.append(row)
         report = dict(schema_version=2, completed=True, paths=4, mode='automatic', trace_error='', steps=steps,
@@ -234,7 +236,7 @@ class AutoManagerEvidenceTests(unittest.TestCase):
         row = next(s for s in status['report']['steps'] if 'slo' in s)
         row['slo'].update(status='fail', elapsed_ms=51000)
         finish = row['begin_monotonic_ns'] + 51_000_000_000
-        key = 'failover_timeline' if row['metric'] == 'failover' else 'timeline'
+        key = 'failover_timeline' if row['metric'] == 'failover' else 'no_uplink_timeline'
         row[key]['first_success' if row['metric'] == 'failover' else 'decision_complete'] = finish
         row['ready_observed_monotonic_ns'], row['end_monotonic_ns'] = finish, finish + 1
         status['report']['slo_summary']['misses'] = 1
@@ -262,6 +264,16 @@ class AutoManagerEvidenceTests(unittest.TestCase):
             change(row)
             with self.assertRaisesRegex(RuntimeError, 'restoration timeline'):
                 observer.validate_manager_auto_result(status, 4)
+
+    def test_unknown_quarantine_is_not_confirmed_no_uplink(self):
+        status = self.valid()
+        row = next(s for s in status['report']['steps'] if s['metric'] == 'no-uplink')
+        row['no_uplink_evidence_state'] = 'unknown'
+        with self.assertRaisesRegex(RuntimeError, 'restoration timeline'):
+            observer.validate_manager_auto_result(status, 4)
+        row['slo']['status'] = 'unmeasured'
+        status['report']['slo_summary']['unmeasured'] = 1
+        observer.validate_manager_auto_result(status, 4)
 
 if __name__ == '__main__':
     unittest.main()

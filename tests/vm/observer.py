@@ -336,7 +336,7 @@ def validate_manager_auto_result(status, paths):
             raise RuntimeError('false SLO classification')
         if state != 'unmeasured':
             failover = step['metric'] == 'failover'
-            timeline = step.get('failover_timeline' if failover else 'timeline', {})
+            timeline = step.get('failover_timeline' if failover else 'no_uplink_timeline', {})
             begin = step['begin_monotonic_ns']
             finish = timeline.get('first_success' if failover else 'decision_complete', 0)
             if (not begin < finish <= step['end_monotonic_ns']
@@ -344,6 +344,7 @@ def validate_manager_auto_result(status, paths):
                     or (failover and (timeline.get('routes_completed', 0) < begin
                                       or not step.get('failover_path')
                                       or step['failover_path'] == step.get('previous_path')))
+                    or (not failover and step.get('no_uplink_evidence_state') != 'no_verified_path')
                     or abs(slo['elapsed_ms'] - (finish - begin) / 1e6) > 1e-6):
                 raise RuntimeError('SLO does not match measured restoration timeline')
         samples.append(slo)

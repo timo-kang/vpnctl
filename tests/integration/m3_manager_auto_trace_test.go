@@ -53,6 +53,7 @@ type managerAutoCycle struct {
 	Guarded           bool                      `json:"guarded"`
 	Path              string                    `json:"path,omitempty"`
 	Reason            string                    `json:"reason"`
+	SelectionState    string                    `json:"selection_state"`
 	ApplicationReason string                    `json:"application_reason"`
 	Generation        uint64                    `json:"generation"`
 	Candidates        []relayselect.Candidate   `json:"candidates"`
@@ -365,7 +366,7 @@ func startManagerAutoTrace(logs map[string]string) *managerAutoTrace {
 						r.fail("missing monotonic application evidence")
 						return
 					}
-					row := managerAutoCycle{Observed: managerMono(), Target: target, Applied: v.Applied, Guarded: v.Application.Guarded, Path: v.Selection.DesiredPathID, Reason: v.Selection.Reason, ApplicationReason: v.Application.Reason, Generation: v.Selection.Generation, Candidates: v.Selection.Candidates, Diagnostics: v.Diagnostics}
+					row := managerAutoCycle{Observed: managerMono(), Target: target, Applied: v.Applied, Guarded: v.Application.Guarded, Path: v.Selection.DesiredPathID, Reason: v.Selection.Reason, SelectionState: v.Selection.State, ApplicationReason: v.Application.Reason, Generation: v.Selection.Generation, Candidates: v.Selection.Candidates, Diagnostics: v.Diagnostics}
 					r.mu.Lock()
 					if len(r.cycles) >= 3000 {
 						r.failure = "cycle trace capacity exceeded"
@@ -513,4 +514,24 @@ func managerFailoverTimeline(packets []managerAutoEvent, cycles []managerAutoCyc
 		}
 	}
 	return path, out
+}
+
+// A guarded unknown/blocked decision is successful quarantine, not evidence
+// that every permitted candidate has failed for this server target. Preserve
+// its earlier safety markers without calling it a measured no-path decision.
+func managerNoPathTimeline(packets []managerAutoEvent, cycles []managerAutoCycle, previous string, begin int64) map[string]int64 {
+	out := managerTimeline(packets, cycles, previous, "", "", begin)
+	out["decision_complete"] = 0
+	for _, c := range cycles {
+		if c.Target != "app" || c.Path != "" || c.Applied || !c.Guarded || c.SelectionState != "no_verified_path" || c.Diagnostics == nil {
+			continue
+		}
+		for _, m := range c.Diagnostics.Checkpoints {
+			at := int64(m.At)
+			if m.Name == "decision_complete" && at >= begin && (out["decision_complete"] == 0 || at < out["decision_complete"]) {
+				out["decision_complete"] = at
+			}
+		}
+	}
+	return out
 }

@@ -23,6 +23,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	report["policy"] = map[string]any{"successes": 2, "hold_down_ms": 10000, "minimum_dwell_ms": 15000, "interval_ms": 500, "probe_timeout_ms": 1000}
 	report["existing_tcp_contract"] = "fresh socket before each applicable fault, no reconnect within that phase; explicit session IDs; nonce framing survives partial reads/timeouts; server idle limit 30 minutes"
 	report["slo_contract"] = "individual failover/no-uplink limit 10s; nearest-rank p95 requires at least 20 measured transitions per class/profile; incomplete samples never qualify"
+	report["no_uplink_scope"] = "all permitted candidates failed for this server target (no_verified_path); guarded unknown/blocked state is not conclusive no-uplink evidence or physical-link diagnosis"
 	// Below all owned application guards, above main. Preserve the VM's
 	// management default route; a foreign specific route is rightly a conflict.
 	applicationFallbackRoute(t, f, "table", "65002")
@@ -276,6 +277,13 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			path, restored := managerFailoverTimeline(packets, cycles, before.Selection.DesiredPathID, pathSources, begin)
 			row["failover_path"], row["failover_timeline"] = path, restored
 			timeline = restored
+		} else if metric == "no-uplink" {
+			timeline = managerNoPathTimeline(packets, cycles, before.Selection.DesiredPathID, begin)
+			row["no_uplink_timeline"] = timeline
+			row["no_uplink_evidence_state"] = out.Selection.State
+			if timeline["decision_complete"] > 0 {
+				row["no_uplink_evidence_state"] = "no_verified_path"
+			}
 		}
 		firstSuccess, decided, applied := timeline["first_success"], timeline["decision_complete"], timeline["routes_completed"]
 		if metric == "failover" || metric == "no-uplink" {
@@ -291,7 +299,15 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 					status = "fail"
 				}
 			}
-			row["slo"] = map[string]any{"status": status, "limit_ms": 10000, "elapsed_ms": float64(max(0, finish-begin)) / 1e6, "metric": metric}
+			slo := map[string]any{"status": status, "limit_ms": 10000, "metric": metric}
+			if measured {
+				slo["elapsed_ms"] = float64(finish-begin) / 1e6
+			} else if metric == "no-uplink" {
+				slo["reason"] = "no_confirmed_all_candidate_failure"
+			} else {
+				slo["reason"] = "incomplete_restoration_timeline"
+			}
+			row["slo"] = slo
 		}
 		integrity()
 		row["end_monotonic_ns"] = managerMono()
