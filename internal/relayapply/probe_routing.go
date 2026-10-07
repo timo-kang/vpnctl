@@ -61,14 +61,7 @@ func probeSourceMayMatch(o object, e Entry) bool {
 	if inverted, _ := o["not"].(bool); inverted {
 		return true
 	}
-	source := str(o, "src")
-	if source == "" || source == "all" {
-		return true
-	}
-	if !strings.Contains(source, "/") {
-		source += "/32"
-	}
-	p, err := netip.ParsePrefix(source)
+	p, err := kernelPrefix(o, "src")
 	if err != nil {
 		return true
 	}

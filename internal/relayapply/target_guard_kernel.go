@@ -41,20 +41,11 @@ func guardRouteArgs(e TargetGuard, verb string) []string {
 func guardRuleArgs(e TargetGuard, verb, prefix string) []string {
 	return []string{"-4", "rule", verb, "priority", decimal(e.Priority), "from", "all", "to", prefix, "iif", "lo", "fwmark", "0/0xffffffff", "lookup", decimal(e.Table), "protocol", protocol}
 }
-func routePrefix(raw string) (netip.Prefix, error) {
-	if raw == "default" || raw == "all" || raw == "" {
-		return netip.MustParsePrefix("0.0.0.0/0"), nil
-	}
-	if !strings.Contains(raw, "/") {
-		raw += "/32"
-	}
-	return netip.ParsePrefix(raw)
-}
 func targetDestinationOverlaps(o object, e TargetGuard) bool {
 	if inverted, _ := o["not"].(bool); inverted {
 		return true
 	}
-	p, err := routePrefix(str(o, "dst"))
+	p, err := kernelPrefix(o, "dst")
 	if err != nil {
 		return true
 	}
