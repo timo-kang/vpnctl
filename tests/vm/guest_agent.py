@@ -185,9 +185,12 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     if WORKER is not None:
                         raise RuntimeError('only one fixture per VM')
+                    # Go appends the long subtest name to TMPDIR. Keep the
+                    # guest-only path short enough for Linux's Unix socket
+                    # address limit (the controller admin socket lives below it).
                     env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
-                               TMPDIR=str(ROOT / 'work'), GORACE='atexit_sleep_ms=0')
+                               TMPDIR='/tmp', GORACE='atexit_sleep_ms=0')
                     with (ROOT / 'worker.log').open('wb') as log:
                         WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test',
                             '-test.run=^TestNetns_M3TargetApplicationMixedCandidates$', '-test.v', '-test.timeout=15m'],
