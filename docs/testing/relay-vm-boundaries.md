@@ -271,3 +271,8 @@ logs; private configuration and keys remain in the private guest disk.
 On failure the test captures public route/nft state and allows up to 10 seconds
 for the pending application cycles to write their diagnostics before automatic
 fixture cleanup. The original failure remains failed even if traffic recovers.
+
+`--case application-approval`은 같은 격리 VM에서 실제 60초 승인 만료와 인증서 철회를
+검증한다. expiry 전 supervised FIFO 갱신 후 앱 적용 세대가 새 grant와 같아야 하며,
+기존/새 unbound TCP 차단과 독립 relay 승인 유지를 확인한다. 두 fault의 완전한 결과와
+generation 일치 증거가 없으면 합격시키지 않는다. `VPNCTL_VM_RACE=1`도 지원한다.
