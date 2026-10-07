@@ -17,12 +17,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relayplan"
 )
 
@@ -173,15 +173,32 @@ func managerTrafficStart(t *testing.T) map[string]*managerTraffic {
 	return result
 }
 
-func TestVMNetworkManagers(t *testing.T) {
+func TestVMNetworkManagers(t *testing.T) { runManagerVM(t, 4, false) }
+func TestVMNetworkManagerAuto(t *testing.T) {
+	if os.Getenv("VPNCTL_VM_MANAGER_AUTO") != "1" {
+		t.Skip("requires automatic manager VM runner")
+	}
+	size, err := strconv.Atoi(os.Getenv("VPNCTL_VM_MANAGER_PATHS"))
+	if err != nil || size != 4 && size != 8 {
+		t.Fatal("manager path count must be 4 or 8")
+	}
+	runManagerVM(t, size, true)
+}
+func runManagerVM(t *testing.T, size int, automatic bool) {
 	if os.Getenv("VPNCTL_VM_MANAGERS") != "1" {
 		t.Skip("requires manager VM runner")
 	}
 	requireManagerGuest(t)
 	report := map[string]any{"schema_version": 1, "completed": false, "steps": []map[string]any{}, "scope": "virtual Ethernet; Netplan renderer networkd; no Wi-Fi RF or EtherCAT real-time qualification"}
+	reportPath := "/var/lib/vpnctl-vm/managers.json"
+	if automatic {
+		reportPath = "/var/lib/vpnctl-vm/manager-auto.json"
+		report["schema_version"] = 2
+		report["paths"] = size
+	}
 	t.Cleanup(func() {
 		report["completed"] = !t.Failed()
-		writeM3Report(t, "/var/lib/vpnctl-vm/managers.json", report)
+		writeM3Report(t, reportPath, report)
 	})
 	report["versions"] = managerCommand(t, "dpkg-query", "-W", "network-manager", "netplan.io", "systemd", "udev", "dnsmasq-base", "iptables")
 	// Both manager services are masked in the image. Explicitly permit only
@@ -192,7 +209,7 @@ func TestVMNetworkManagers(t *testing.T) {
 	managerWrite(t, "/etc/systemd/networkd.conf.d/90-vpnctl-test.conf", "[Network]\nManageForeignRoutes=no\nManageForeignRoutingPolicyRules=no\n")
 	managerWrite(t, "/etc/systemd/network/99-vpnctl-unmanaged.network", "[Match]\nName=*\n[Link]\nUnmanaged=yes\n")
 	t.Log("creating authenticated topology")
-	f := applicationFixtureWithGuestRobot(t, true, 4, true)
+	f := applicationFixtureWithGuestRobot(t, true, size, true)
 	t.Log("topology ready; provisioning manager profiles")
 	t.Cleanup(func() {
 		diagnostic := map[string]string{}
@@ -219,19 +236,68 @@ func TestVMNetworkManagers(t *testing.T) {
 			}
 			diagnostic[name] = string(b)
 		}
+		// Keep complete public preparation records even when large candidate
+		// reports exceed the diagnostic text tail. This also runs on bootstrap
+		// failure, before the packet/selection trace has been started.
+		b, _ := os.ReadFile(filepath.Join(f.results, "application-node-supervisor.jsonl"))
+		var preparation []json.RawMessage
+		lines := bytes.Split(b, []byte("\n"))
+		for _, line := range lines[:len(lines)-1] {
+			var r struct {
+				ObservedAt  string          `json:"observed_at"`
+				CycleMS     int64           `json:"cycle_ms"`
+				State       string          `json:"state"`
+				Reason      string          `json:"reason,omitempty"`
+				Refresh     string          `json:"refresh"`
+				Preparation json.RawMessage `json:"preparation,omitempty"`
+			}
+			if json.Unmarshal(line, &r) != nil {
+				continue
+			}
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preparation = append(preparation, raw)
+			if len(preparation) > 32 {
+				preparation = preparation[1:]
+			}
+		}
+		report["preparation_tail"] = preparation
 		report["diagnostic"] = diagnostic
 	})
 	startNetworkProcess(t, f.robot, filepath.Join(f.results, "kernel-events.log"), nil, "ip", "-ts", "monitor", "all")
 
-	report["roles"] = map[string]any{"uplinks": []string{"wan0", "wan1"}, "networkmanager": []string{"wan0", "shared0"}, "netplan_renderer": "networkd", "netplan_lan": []string{"rf0", "gimbal0"}, "udev_excluded": "ecat0", "robot_namespace": f.robot, "controller_separate": true, "relays": 2}
+	uplinks := []string{}
+	for i := 0; i < size/2; i++ {
+		uplinks = append(uplinks, fmt.Sprint("wan", i))
+	}
+	report["roles"] = map[string]any{"uplinks": uplinks, "networkmanager": []string{"wan0", "shared0"}, "netplan_renderer": "networkd", "netplan_lan": []string{"rf0", "gimbal0"}, "udev_excluded": "ecat0", "robot_namespace": f.robot, "controller_separate": true, "relays": 2}
 	for _, p := range f.plan.Paths {
 		enablePreparation(t, f, p.PathID)
 	}
 	logs := map[string]string{}
-	for target, path := range map[string]string{"app": "p00", "app2": "p01"} {
+	watchers := map[string]*networkProcess{}
+	pins := map[string]string{"app": "p00", "app2": "p01"}
+	app2Source := "198.18.0.11"
+	if automatic {
+		pins["app"] = ""
+		pins["app2"] = "p11"
+		app2Source = "198.18.0.12"
+	}
+	startWatch := func(target string) *networkProcess {
+		args := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", target, "--watch", "--interval", "500ms"}
+		if pins[target] != "" {
+			args = append(args, "--mode", "manual", "--path-id", pins[target])
+		}
+		if automatic {
+			args = append(args, "--probe-timeout", "1s", "--hold-down", "10s", "--minimum-dwell", "15s")
+		}
+		return startNetworkProcess(t, f.robot, logs[target], nil, args...)
+	}
+	for target := range pins {
 		log := filepath.Join(f.results, "manager-"+target+".jsonl")
 		logs[target] = log
-		startNetworkProcess(t, f.robot, log, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", target, "--watch", "--interval", "500ms", "--mode", "manual", "--path-id", path)
 	}
 	lanNS := map[string]string{}
 	for i, iface := range []string{"rf0", "gimbal0", "shared0"} {
@@ -281,13 +347,30 @@ func TestVMNetworkManagers(t *testing.T) {
 		configDigests[path] = managerDigest(t, path)
 	}
 	report["configuration_sha256"] = configDigests
+	// Profile activation is fixture bootstrap, before applications start. It
+	// can invalidate the earlier static underlay generation. Let the real node
+	// supervisor finish that rebuild, then contend with both app watchers in
+	// every measured fault phase. Never manually repair the owned candidates.
+	report["manager_bootstrap_started_monotonic_ns"] = managerMono()
+	eventually(t, 120*time.Second, "manager bootstrap candidate readiness", func() error {
+		for _, p := range f.plan.Paths {
+			if !applicationCandidate(t, f, p).OK {
+				return fmt.Errorf("%s awaiting supervisor rebuild", p.PathID)
+			}
+		}
+		return nil
+	})
+	report["manager_bootstrap_ready_monotonic_ns"] = managerMono()
+	for target := range pins {
+		watchers[target] = startWatch(target)
+	}
 	ready := func() error {
 		for _, log := range logs {
 			if !latestApplicationResult(log).Applied {
 				return fmt.Errorf("target not applied: %+v", latestApplicationResult(log).Application)
 			}
 		}
-		for target, source := range map[string]string{m3Target: "198.18.0.11", "198.18.0.3": "198.18.0.11", "172.20.10.2": "172.20.10.1", "172.20.20.2": "172.20.20.1"} {
+		for target, source := range map[string]string{m3Target: "198.18.0.11", "198.18.0.3": app2Source, "172.20.10.2": "172.20.10.1", "172.20.20.2": "172.20.20.1"} {
 			if e := managerPayload(target, source); e != nil {
 				return fmt.Errorf("payload %s: %w", target, e)
 			}
@@ -296,7 +379,10 @@ func TestVMNetworkManagers(t *testing.T) {
 	}
 	t.Log("manager profiles applied; waiting for baseline")
 	eventually(t, 120*time.Second, "manager baseline", ready)
-	traffic := managerTrafficStart(t)
+	traffic := map[string]*managerTraffic{}
+	if !automatic {
+		traffic = managerTrafficStart(t)
+	}
 	t.Cleanup(func() {
 		snap := map[string]any{}
 		for name, s := range traffic {
@@ -309,6 +395,10 @@ func TestVMNetworkManagers(t *testing.T) {
 	}
 	// Raw inventories contain public kernel metadata only, never WG private keys.
 	report["baseline"] = snapshot()
+	if automatic {
+		runManagerAutoScenarios(t, f, report, logs, watchers, startWatch, configDigests, snapshot, size, lanNS)
+		return
+	}
 	steps := []struct {
 		name   string
 		action func()
@@ -336,44 +426,7 @@ func TestVMNetworkManagers(t *testing.T) {
 		{"netplan-apply", func() { managerCommand(t, "netplan", "apply") }},
 		{"networkd-reload", func() { managerCommand(t, "networkctl", "reload") }},
 		{"networkd-restart", func() { managerCommand(t, "systemctl", "restart", "systemd-networkd.service") }},
-		{"nm-shared-up", func() {
-			managerCommand(t, "nmcli", "connection", "add", "type", "ethernet", "ifname", "shared0", "con-name", "vpnctl-shared", "ipv4.method", "shared", "ipv4.addresses", "10.42.0.1/24", "ipv6.method", "disabled", "connection.autoconnect", "no")
-			managerCommand(t, "nmcli", "--wait", "15", "connection", "up", "vpnctl-shared")
-			ns := lanNS["shared0"]
-			netOutput(t, ns, "ip", "addr", "add", "10.42.0.2/24", "dev", "lan0")
-			var lease struct {
-				Address string `json:"address"`
-			}
-			leaseJSON := netOutput(t, ns, "python3", "/opt/vpnctl-vm/manager_dhcp.py")
-			if e := json.Unmarshal([]byte(leaseJSON), &lease); e != nil || net.ParseIP(lease.Address) == nil {
-				t.Fatal("invalid DHCP proof", e, leaseJSON)
-			}
-			report["shared_dhcp"] = json.RawMessage(leaseJSON)
-			netOutput(t, ns, "ip", "addr", "del", "10.42.0.2/24", "dev", "lan0")
-			netOutput(t, ns, "ip", "addr", "add", lease.Address+"/24", "dev", "lan0")
-			netOutput(t, ns, "ip", "route", "add", "default", "via", "10.42.0.1")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			cmd := netCommand(ctx, ns, f.worker, "-test.run=^TestNetworkWorker$")
-			cmd.Env = append(os.Environ(), "VPNCTL_WORKER=m3-probe", "VPNCTL_PROBE_TARGET=172.20.10.2")
-			b, e := cmd.CombinedOutput()
-			if e != nil {
-				t.Fatal(e, string(b))
-			}
-			var probe m3Probe
-			for _, line := range strings.Split(string(b), "\n") {
-				if strings.Contains(line, `"ok"`) {
-					if e := json.Unmarshal([]byte(line), &probe); e != nil {
-						t.Fatal(e)
-					}
-				}
-			}
-			if !probe.OK || probe.Source != "172.20.10.1" {
-				t.Fatal("NM shared NAT did not carry payload", probe)
-			}
-			report["shared"] = snapshot()
-			report["shared_services"] = managerCommand(t, "ss", "-lunp")
-		}},
+		{"nm-shared-up", func() { managerSharedUp(t, f, lanNS["shared0"], report, snapshot) }},
 		{"nm-shared-down", func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "down", "vpnctl-shared") }},
 		{"udev-recreate", func() {
 			managerCommand(t, "ip", "link", "del", "ecat0")
@@ -458,34 +511,71 @@ func TestVMNetworkManagers(t *testing.T) {
 		row["passed"] = true
 	}
 	report["final"] = snapshot()
+	managerFinalInventory(t, f, report, size)
+}
+
+func managerSharedUp(t *testing.T, f *m3AuthorityFixture, ns string, report map[string]any, snapshot func() map[string]any) {
+	t.Helper()
+	managerCommand(t, "nmcli", "connection", "add", "type", "ethernet", "ifname", "shared0", "con-name", "vpnctl-shared", "ipv4.method", "shared", "ipv4.addresses", "10.42.0.1/24", "ipv6.method", "disabled", "connection.autoconnect", "no")
+	managerCommand(t, "nmcli", "--wait", "15", "connection", "up", "vpnctl-shared")
+	netOutput(t, ns, "ip", "addr", "add", "10.42.0.2/24", "dev", "lan0")
+	var lease struct {
+		Address string `json:"address"`
+	}
+	leaseJSON := netOutput(t, ns, "python3", "/opt/vpnctl-vm/manager_dhcp.py")
+	if e := json.Unmarshal([]byte(leaseJSON), &lease); e != nil || net.ParseIP(lease.Address) == nil {
+		t.Fatal("invalid DHCP proof", e, leaseJSON)
+	}
+	report["shared_dhcp"] = json.RawMessage(leaseJSON)
+	netOutput(t, ns, "ip", "addr", "del", "10.42.0.2/24", "dev", "lan0")
+	netOutput(t, ns, "ip", "addr", "add", lease.Address+"/24", "dev", "lan0")
+	netOutput(t, ns, "ip", "route", "add", "default", "via", "10.42.0.1")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := netCommand(ctx, ns, f.worker, "-test.run=^TestNetworkWorker$")
+	cmd.Env = append(os.Environ(), "VPNCTL_WORKER=m3-probe", "VPNCTL_PROBE_TARGET=172.20.10.2")
+	b, e := cmd.CombinedOutput()
+	if e != nil {
+		t.Fatal(e, string(b))
+	}
+	var probe m3Probe
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.Contains(line, `"ok"`) {
+			if e := json.Unmarshal([]byte(line), &probe); e != nil {
+				t.Fatal(e)
+			}
+		}
+	}
+	if !probe.OK || probe.Source != "172.20.10.1" {
+		t.Fatal("NM shared NAT did not carry payload", probe)
+	}
+	report["shared"] = snapshot()
+	report["shared_services"] = managerCommand(t, "ss", "-lunp")
+}
+
+func managerFinalInventory(t *testing.T, f *m3AuthorityFixture, report map[string]any, size int) {
+	t.Helper()
 	var finalPlan relayplan.Plan
-	planReads := 0
-	eventually(t, 10*time.Second, "read final plan while supervisors retain ownership", func() error {
-		planReads++
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		b, e := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "plan", "--config", f.node).CombinedOutput()
-		// This is a read-only CLI. Its initial cache Open is intentionally
-		// nonblocking; unlike mutations, retrying this precise busy rejection
-		// neither adopts ownership nor replays a partially completed change.
-		if e != nil && strings.Contains(string(b), relaycache.ErrBusy.Error()) {
-			return fmt.Errorf("read admission busy")
-		}
-		if e != nil {
-			t.Fatal("final plan read", e, string(b))
-		}
-		if e := json.Unmarshal(b, &finalPlan); e != nil {
-			t.Fatal(e, string(b))
-		}
-		return nil
-	})
-	report["final_plan_read_attempts"] = planReads
-	if len(finalPlan.Paths) != 4 {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	b, e := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "plan", "--config", f.node, "--timeout", "10s").CombinedOutput()
+	if e != nil {
+		t.Fatal("final plan read while supervisors retain ownership", e, string(b))
+	}
+	if e := json.Unmarshal(b, &finalPlan); e != nil {
+		t.Fatal(e, string(b))
+	}
+	report["final_plan_read_attempts"] = 1
+	if len(finalPlan.Paths) != size {
 		t.Fatal("unexpected candidate inventory", len(finalPlan.Paths))
 	}
 	report["final_plan"] = finalPlan
+	approved := map[string]bool{}
+	for i := 0; i < size/2; i++ {
+		approved[fmt.Sprint("wan", i)] = true
+	}
 	for _, p := range finalPlan.Paths {
-		if p.Pin == nil || p.Pin.Interface != "wan0" && p.Pin.Interface != "wan1" {
+		if p.Pin == nil || !approved[p.Pin.Interface] {
 			t.Fatal("unapproved underlay adopted", p)
 		}
 	}

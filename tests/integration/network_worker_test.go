@@ -61,6 +61,8 @@ func TestNetworkWorker(t *testing.T) {
 		err = serveLeaseIssuer()
 	case "lease-stream":
 		err = runLeaseStream()
+	case "manager-udp-echo":
+		err = serveManagerUDPEcho()
 	case "m3-echo":
 		err = serveM3Echo()
 	case "m3-probe":

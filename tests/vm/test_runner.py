@@ -179,5 +179,101 @@ class ManagerEvidenceTests(unittest.TestCase):
     def test_complete_exact_matrix_passes(self):
         observer.validate_manager_result(self.valid())
 
+class AutoManagerEvidenceTests(unittest.TestCase):
+    def valid(self):
+        metrics = {'nm-down': 'failover', 'relay0-down': 'failover', 'flap-down-0': 'failover',
+                   'flap-down-1': 'failover', 'all-relays-down': 'no-uplink'}
+        steps = []
+        for name in observer.AUTO_MANAGER_STEPS:
+            row = dict(name=name, passed=True, begin_monotonic_ns=1, action_completed_monotonic_ns=2,
+                       ready_observed_monotonic_ns=3, end_monotonic_ns=4,
+                       traffic={k: {'ok': 1} for k in observer.AUTO_PACKET_KINDS}, metric=metrics.get(name, 'other'))
+            if name in metrics:
+                row['slo'] = dict(status='pass', elapsed_ms=0.000002, limit_ms=10000)
+                timeline = dict(decision_complete=3, routes_completed=3, first_success=3)
+                row['timeline'] = timeline.copy()
+                row['failover_timeline'] = timeline.copy()
+                row['no_uplink_timeline'] = timeline.copy()
+                row['no_uplink_evidence_state'] = 'no_verified_path'
+                row['previous_path'], row['failover_path'] = 'p00', 'p02'
+            steps.append(row)
+        report = dict(schema_version=2, completed=True, paths=4, mode='automatic', trace_error='', steps=steps,
+                      fresh_generation_confirmed=True, recovery_hysteresis_observed=True, foreign_policy_preserved=True,
+                      foreign_peer_preserved=True, fallback_positive_control=True,
+                      committed_dwell_monotonic_ns=15_000_000_000, health_hold_down_monotonic_ns=10_000_000_000,
+                      packets=[dict(sequence=i, kind=k, begin_monotonic_ns=1, end_monotonic_ns=2)
+                               for i, k in enumerate(observer.AUTO_PACKET_KINDS, 1)],
+                      cycles=[dict(observed_monotonic_ns=3, diagnostics=dict(monotonic_available=True,
+                              started_monotonic_ns=1, finished_monotonic_ns=2,
+                              checkpoints=[dict(name='decision_complete', monotonic_ns=2)]))],
+                      slo_summary=dict(samples=5, misses=0, unmeasured=0, p95_status='unqualified_insufficient_samples', required_samples_per_class=20))
+        return dict(exit=0, report=report)
+
+    def test_complete_functional_matrix_does_not_claim_p95(self):
+        observer.validate_manager_auto_result(self.valid(), 4)
+
+    def test_partial_evidence_is_rejected(self):
+        mutations = [lambda r: r.update(completed=False), lambda r: r.update(paths=8),
+                     lambda r: r.update(trace_error='capacity exceeded'), lambda r: r['steps'].pop(),
+                     lambda r: r['packets'].pop(), lambda r: r.update(cycles=[]),
+                     lambda r: r['packets'][0].update(sequence=0),
+                     lambda r: r['cycles'][0]['diagnostics'].update(checkpoints_dropped=True),
+                     lambda r: r['cycles'][0]['diagnostics'].update(monotonic_available=False),
+                     lambda r: r['cycles'][0]['diagnostics']['checkpoints'][0].update(monotonic_ns=4),
+                     lambda r: r['steps'][0].update(action_completed_monotonic_ns=5),
+                     lambda r: r['slo_summary'].update(p95_status='pass'),
+                     lambda r: r['steps'][0].update(traffic={}),
+                     lambda r: r.update(committed_dwell_monotonic_ns=1),
+                     lambda r: r.update(health_hold_down_monotonic_ns=1)]
+        for i, mutation in enumerate(mutations):
+            status = self.valid()
+            mutation(status['report'])
+            with self.subTest(i=i), self.assertRaises(RuntimeError):
+                observer.validate_manager_auto_result(status, 4)
+
+    def test_miss_is_recorded_but_never_disguised_as_slo_pass(self):
+        status = self.valid()
+        row = next(s for s in status['report']['steps'] if 'slo' in s)
+        row['slo'].update(status='fail', elapsed_ms=51000)
+        finish = row['begin_monotonic_ns'] + 51_000_000_000
+        key = 'failover_timeline' if row['metric'] == 'failover' else 'no_uplink_timeline'
+        row[key]['first_success' if row['metric'] == 'failover' else 'decision_complete'] = finish
+        row['ready_observed_monotonic_ns'], row['end_monotonic_ns'] = finish, finish + 1
+        status['report']['slo_summary']['misses'] = 1
+        observer.validate_manager_auto_result(status, 4)
+        row['slo']['status'] = 'pass'
+        with self.assertRaisesRegex(RuntimeError, 'false SLO'):
+            observer.validate_manager_auto_result(status, 4)
+
+    def test_unmeasured_is_counted_and_never_qualifies_p95(self):
+        status = self.valid()
+        next(s for s in status['report']['steps'] if 'slo' in s)['slo'].update(status='unmeasured')
+        status['report']['slo_summary']['unmeasured'] = 1
+        observer.validate_manager_auto_result(status, 4)
+        status['report']['slo_summary']['unmeasured'] = 0
+        with self.assertRaisesRegex(RuntimeError, 'SLO summary'):
+            observer.validate_manager_auto_result(status, 4)
+
+    def test_slo_uses_restoration_instead_of_preferred_convergence(self):
+        for change in (lambda s: s.pop('failover_timeline'),
+                       lambda s: s.update(failover_path='p00'),
+                       lambda s: s['slo'].update(elapsed_ms=1),
+                       lambda s: s['failover_timeline'].update(routes_completed=0)):
+            status = self.valid()
+            row = next(s for s in status['report']['steps'] if s['metric'] == 'failover')
+            change(row)
+            with self.assertRaisesRegex(RuntimeError, 'restoration timeline'):
+                observer.validate_manager_auto_result(status, 4)
+
+    def test_unknown_quarantine_is_not_confirmed_no_uplink(self):
+        status = self.valid()
+        row = next(s for s in status['report']['steps'] if s['metric'] == 'no-uplink')
+        row['no_uplink_evidence_state'] = 'unknown'
+        with self.assertRaisesRegex(RuntimeError, 'restoration timeline'):
+            observer.validate_manager_auto_result(status, 4)
+        row['slo']['status'] = 'unmeasured'
+        status['report']['slo_summary']['unmeasured'] = 1
+        observer.validate_manager_auto_result(status, 4)
+
 if __name__ == '__main__':
     unittest.main()

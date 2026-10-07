@@ -131,7 +131,7 @@ behind two app waves, costing roughly 5–6s per transition. Both apps remained
 live. The failed race artifact remains at
 `/tmp/vpnctl-preparation-ci-37433716347-race`.
 
-Supervision now permits at most two durable work units in the same original
+That correction permitted at most two durable work units in the same original
 750ms wall/BOOTTIME budget, after all lease maintenance. It attempts the second
 only with at least 500ms remaining. Round-robin selection still advances for
 each unit, and every mutation retains its own durable boundary and fresh checks.
@@ -148,6 +148,26 @@ cases 100.42s / 102.76s; and all ten foreign-state cases 106.74s / 115.08s.
 Full apply/CLI race also passed (203.044s / 44.855s), and the additional shared
 BOOTTIME / parent-deadline headroom regressions passed independently. These are
 local results; the revised full CI verdict is recorded in #171 / its PR.
+
+## Multiple manager watchers
+
+The #175 eight-candidate manager matrix subsequently exposed longer FIFO turns:
+two application watchers kept traffic on a healthy alternative, but each node
+supervisor turn took about 8–9 seconds. Rebuilding both wan0 candidates after an
+NM down/up needed more than the unchanged 120-second convergence watchdog when
+each turn advanced only two durable units. The failed CI 37556814583 preserves
+the per-unit progress and continued p01 traffic; this is preferred-path recovery
+latency, not the earlier first-alternative failover latency.
+
+Fast reconstruction now admits at most eight units in the same 750ms budget.
+Every additional unit still requires 500ms of both wall and BOOTTIME headroom;
+the outer maintenance deadline and lease-first ordering are unchanged. Each
+unit advances the durable round-robin cursor and repeats authority/ownership
+checks. Slow operations yield rather than reset the budget, and no reconstruction
+unit opens a lease. Tests cover the count cap, equal progress for competing
+candidates, cumulative elapsed time, parent deadlines, crashes and revocation.
+Manager convergence remains 120 seconds and individual failover SLO remains
+10 seconds; this change does not qualify a fleet p95.
 
 ## Approval-time fixture correction
 

@@ -15,9 +15,11 @@ import (
 	"vpnctl/internal/relayplan"
 )
 
-// Rebuilding gets at most two work units AFTER all candidate leases have been
-// serviced. Both share one budget and the existing maintenance deadline.
+// Rebuilding runs AFTER all candidate leases have been serviced. Fast durable
+// units share one budget and the existing maintenance deadline; the count cap
+// prevents an unbounded loop even when a clock or test backend does not advance.
 const NodeRebuildDuration = 750 * time.Millisecond
+const nodeRebuildMaxUnits = 8
 
 var preparationID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 var preparationSteps = []string{"link", "tag", "guard", "endpoint", "rule", "address", "wg", "up", "probe-targets", "probe-source"}
@@ -229,16 +231,16 @@ func (e *Engine) startPreparationRemoval(i, entryIndex int, reason string) error
 	return e.persist()
 }
 
-// RebuildCandidates advances at most two durable work units. Both share one
-// 750ms BOOTTIME/wall budget; the second needs at least 500ms remaining. The
+// RebuildCandidates advances at most eight durable work units. All share one
+// 750ms BOOTTIME/wall budget; each additional unit needs 500ms remaining. The
 // durable round-robin cursor and backoff survive one-shot supervisors/crashes.
 // This method never opens leases or application routes.
 func (e *Engine) RebuildCandidates(parent context.Context) (Result, error) {
-	return e.rebuildCandidates(parent, 2)
+	return e.rebuildCandidates(parent, nodeRebuildMaxUnits)
 }
 
 // A one-unit call lets fault tests stop at every persisted boundary; production
-// always uses the bounded two-unit entry point above.
+// always uses the bounded entry point above.
 func (e *Engine) rebuildCandidates(parent context.Context, units int) (out Result, err error) {
 	out = result("idle", "", "")
 	defer func() {

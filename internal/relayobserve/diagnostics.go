@@ -20,24 +20,71 @@ type PhaseCost struct {
 	InventoryCommands int           `json:"inventory_commands"`
 	CommandDuration   time.Duration `json:"summed_command_duration_ns"`
 }
+
+// Checkpoint records an observed execution boundary in the current boot's
+// CLOCK_MONOTONIC domain. It is diagnostic evidence, never lease authority.
+type Checkpoint struct {
+	Name string        `json:"name"`
+	At   time.Duration `json:"monotonic_ns"`
+}
+
+const MaxCheckpoints = 32
+
 type Diagnostics struct {
-	Elapsed       time.Duration        `json:"monotonic_elapsed_ns"`
-	BootElapsed   time.Duration        `json:"boottime_elapsed_ns"`
-	BootAvailable bool                 `json:"boottime_available"`
-	Phases        map[string]PhaseCost `json:"phases"`
+	MonotonicAvailable bool                 `json:"monotonic_available"`
+	StartedMono        time.Duration        `json:"started_monotonic_ns"`
+	FinishedMono       time.Duration        `json:"finished_monotonic_ns"`
+	Checkpoints        []Checkpoint         `json:"checkpoints,omitempty"`
+	CheckpointsDropped bool                 `json:"checkpoints_dropped,omitempty"`
+	Elapsed            time.Duration        `json:"monotonic_elapsed_ns"`
+	BootElapsed        time.Duration        `json:"boottime_elapsed_ns"`
+	BootAvailable      bool                 `json:"boottime_available"`
+	Phases             map[string]PhaseCost `json:"phases"`
 }
 type Recorder struct {
-	mu      sync.Mutex
-	started time.Time
-	boot    time.Duration
-	bootOK  bool
-	phases  map[string]PhaseCost
+	mu                 sync.Mutex
+	started            time.Time
+	mono               time.Duration
+	monoOK             bool
+	checkpoints        []Checkpoint
+	checkpointsDropped bool
+	boot               time.Duration
+	bootOK             bool
+	phases             map[string]PhaseCost
 }
 type scope struct {
 	recorder *Recorder
 	phase    string
 }
 type scopeKey struct{}
+
+func monotonicTime() (time.Duration, bool) {
+	var ts unix.Timespec
+	err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
+	return time.Duration(ts.Nano()), err == nil
+}
+
+// Mark keeps a bounded sequence of completed boundaries. Missing clocks and
+// overflow are explicit so consumers cannot turn incomplete timing into an SLO.
+func Mark(ctx context.Context, name string) {
+	s, ok := ctx.Value(scopeKey{}).(scope)
+	if !ok {
+		return
+	}
+	r := s.recorder
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	at, valid := monotonicTime()
+	if !valid || at < r.mono {
+		r.monoOK = false
+		return
+	}
+	if len(r.checkpoints) == MaxCheckpoints {
+		r.checkpointsDropped = true
+		return
+	}
+	r.checkpoints = append(r.checkpoints, Checkpoint{Name: name, At: at})
+}
 
 func bootTime() (time.Duration, bool) {
 	var ts unix.Timespec
@@ -49,14 +96,21 @@ func Start(ctx context.Context) (context.Context, *Recorder) {
 		return ctx, s.recorder
 	}
 	boot, ok := bootTime()
-	r := &Recorder{started: time.Now(), boot: boot, bootOK: ok, phases: map[string]PhaseCost{}}
+	mono, monoOK := monotonicTime()
+	r := &Recorder{started: time.Now(), mono: mono, monoOK: monoOK, boot: boot, bootOK: ok, phases: map[string]PhaseCost{}}
 	return context.WithValue(ctx, scopeKey{}, scope{r, "other"}), r
 }
 func (r *Recorder) Snapshot() *Diagnostics {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	boot, ok := bootTime()
-	d := &Diagnostics{Elapsed: time.Since(r.started), BootAvailable: ok && r.bootOK && boot >= r.boot, Phases: map[string]PhaseCost{}}
+	mono, monoOK := monotonicTime()
+	d := &Diagnostics{Elapsed: time.Since(r.started), BootAvailable: ok && r.bootOK && boot >= r.boot, Phases: map[string]PhaseCost{},
+		MonotonicAvailable: monoOK && r.monoOK && mono >= r.mono, CheckpointsDropped: r.checkpointsDropped,
+		Checkpoints: append([]Checkpoint(nil), r.checkpoints...)}
+	if d.MonotonicAvailable {
+		d.StartedMono, d.FinishedMono = r.mono, mono
+	}
 	if d.BootAvailable {
 		d.BootElapsed = boot - r.boot
 	}

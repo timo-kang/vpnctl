@@ -276,20 +276,106 @@ def validate_manager_result(status):
     if len(steps) != len(expected) or {s.get('name') for s in steps} != expected or any(s.get('passed') is not True for s in steps):
         raise RuntimeError('missing or failed manager scenarios')
 
+AUTO_MANAGER_STEPS = {
+    'baseline', 'nm-down', 'relay0-down', 'all-relays-down', 'alternate-recovery',
+    'preferred-recovery', 'nm-restart', 'netplan-apply', 'networkd-restart',
+    'foreign-firewall-reload', 'flap-down-0', 'flap-up-0', 'flap-down-1', 'flap-up-1',
+    'nm-shared-up', 'nm-shared-down', 'foreign-peer-conflict', 'foreign-peer-removed',
+    'watch-restart', 'controller-offline-valid',
+    'approval-expired-offline', 'fresh-approval-awaiting-relay-apply', 'fresh-approval-recovery',
+}
+AUTO_PACKET_KINDS = {'tcp-new', 'tcp-existing', 'udp', 'independent-app', 'rf-lan', 'gimbal-lan'}
+
+def validate_manager_auto_result(status, paths):
+    report = status.get('report', {})
+    if (status.get('exit') != 0 or report.get('completed') is not True
+            or report.get('schema_version') != 2 or report.get('paths') != paths
+            or report.get('mode') != 'automatic' or report.get('trace_error') != ''):
+        raise RuntimeError('automatic manager test failed or omitted complete evidence')
+    steps = report.get('steps', [])
+    if (len(steps) != len(AUTO_MANAGER_STEPS) or {s.get('name') for s in steps} != AUTO_MANAGER_STEPS
+            or any(s.get('passed') is not True for s in steps)):
+        raise RuntimeError('missing or failed automatic manager scenarios')
+    for key in ('fresh_generation_confirmed', 'recovery_hysteresis_observed', 'foreign_policy_preserved', 'foreign_peer_preserved', 'fallback_positive_control'):
+        if report.get(key) is not True:
+            raise RuntimeError('missing automatic manager invariant: ' + key)
+    if (report.get('committed_dwell_monotonic_ns', 0) < 15_000_000_000
+            or report.get('health_hold_down_monotonic_ns', 0) < 10_000_000_000):
+        raise RuntimeError('missing monotonic recovery policy evidence')
+    packets, cycles = report.get('packets', []), report.get('cycles', [])
+    if not cycles or {p.get('kind') for p in packets} != AUTO_PACKET_KINDS:
+        raise RuntimeError('missing automatic manager packet/cycle evidence')
+    for i, p in enumerate(packets, 1):
+        if p.get('sequence') != i or not 0 < p.get('begin_monotonic_ns', 0) <= p.get('end_monotonic_ns', 0):
+            raise RuntimeError('invalid packet sequence/clock')
+    for c in cycles:
+        d = c.get('diagnostics') or {}
+        start, end = d.get('started_monotonic_ns', 0), d.get('finished_monotonic_ns', 0)
+        if (d.get('monotonic_available') is not True or d.get('checkpoints_dropped', False)
+                or not 0 < start <= end <= c.get('observed_monotonic_ns', 0)):
+            raise RuntimeError('incomplete cycle clock evidence')
+        last = start
+        for m in d.get('checkpoints', []):
+            at = m.get('monotonic_ns', 0)
+            if not last <= at <= end:
+                raise RuntimeError('unordered execution checkpoint')
+            last = at
+    samples = []
+    for step in steps:
+        if not 0 < step.get('begin_monotonic_ns', 0) <= step.get('action_completed_monotonic_ns', 0) <= step.get('ready_observed_monotonic_ns', 0) <= step.get('end_monotonic_ns', 0):
+            raise RuntimeError('invalid scenario clock evidence')
+        if set(step.get('traffic', {})) != AUTO_PACKET_KINDS:
+            raise RuntimeError('missing per-scenario packet evidence')
+        if step.get('metric') not in ('failover', 'no-uplink'):
+            continue
+        slo = step.get('slo', {})
+        state = slo.get('status')
+        if state not in ('pass', 'fail', 'unmeasured') or slo.get('limit_ms') != 10000:
+            raise RuntimeError('missing SLO classification')
+        if state != 'unmeasured' and (state == 'pass') != (0 <= slo.get('elapsed_ms', -1) <= 10000):
+            raise RuntimeError('false SLO classification')
+        if state != 'unmeasured':
+            failover = step['metric'] == 'failover'
+            timeline = step.get('failover_timeline' if failover else 'no_uplink_timeline', {})
+            begin = step['begin_monotonic_ns']
+            finish = timeline.get('first_success' if failover else 'decision_complete', 0)
+            if (not begin < finish <= step['end_monotonic_ns']
+                    or timeline.get('decision_complete', 0) < begin
+                    or (failover and (timeline.get('routes_completed', 0) < begin
+                                      or not step.get('failover_path')
+                                      or step['failover_path'] == step.get('previous_path')))
+                    or (not failover and step.get('no_uplink_evidence_state') != 'no_verified_path')
+                    or abs(slo['elapsed_ms'] - (finish - begin) / 1e6) > 1e-6):
+                raise RuntimeError('SLO does not match measured restoration timeline')
+        samples.append(slo)
+    summary = report.get('slo_summary', {})
+    if (len(samples) != 5 or summary.get('samples') != len(samples)
+            or summary.get('misses') != sum(s['status'] == 'fail' for s in samples)
+            or summary.get('unmeasured') != sum(s['status'] == 'unmeasured' for s in samples)
+            or summary.get('p95_status') != 'unqualified_insufficient_samples'
+            or summary.get('required_samples_per_class') != 20):
+        raise RuntimeError('incomplete or misleading SLO summary')
+
 def exercise(vm, case, mode, delta, result):
     vm.launch()
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
         return result
-    if case == 'managers':
-        vm.call('managers-start')
-        until = time.monotonic() + 13 * 60
+    if case == 'managers' or case.startswith('manager-auto-'):
+        automatic = case != 'managers'
+        paths = int(case.rsplit('-', 1)[1]) if automatic else 4
+        action = 'manager-auto' if automatic else 'managers'
+        vm.call(action + '-start', {'paths': paths} if automatic else {})
+        until = time.monotonic() + (21 if automatic else 13) * 60
         while time.monotonic() < until:
-            status = vm.call('managers-result')
+            status = vm.call(action + '-result')
             if status['exit'] is not None:
-                result['managers'] = status
-                vm.record('managers-result', status)
-                validate_manager_result(status)
+                result[action] = status
+                vm.record(action + '-result', status)
+                if automatic:
+                    validate_manager_auto_result(status, paths)
+                else:
+                    validate_manager_result(status)
                 return result
             time.sleep(2)
         raise RuntimeError('manager fixture timed out')
@@ -498,7 +584,7 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
