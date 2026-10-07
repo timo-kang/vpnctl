@@ -397,6 +397,44 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  robot-capacity:
+    name: M3 robot CPU isolation (${{ matrix.paths }} candidates)
+    strategy:
+      fail-fast: false
+      matrix:
+        paths: [4, 8]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: KVM access on this disposable GitHub-hosted runner only
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test -c /dev/kvm
+          if ! test -r /dev/kvm || ! test -w /dev/kvm; then
+            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          fi
+      - name: Reject incomplete and incorrectly scoped resource evidence
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p test_runner.py
+      - name: Two robot actuators and supervisor with an independent CPU budget
+        env:
+          VPNCTL_VM_RACE: '1'
+          VPNCTL_VM_CPUS: '1'
+          VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-robot-capacity
+        run: ./scripts/test-vm.sh --case application-capacity-${{ matrix.paths }} --robot-cpus 0.5
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: m3-robot-capacity-${{ matrix.paths }}
+          path: ${{ runner.temp }}/vpnctl-robot-capacity
+          if-no-files-found: warn
+          retention-days: 14
+
   manager-auto:
     name: M3 actual managers automatic switching (${{ matrix.paths }} candidates)
     strategy:
