@@ -265,6 +265,23 @@ def host_clock():
             'wall_ns': time.time_ns(), 'monotonic_ns': time.monotonic_ns(),
             'boottime_ns': time.clock_gettime_ns(time.CLOCK_BOOTTIME)}
 
+def validate_lan_reconfiguration(step):
+    lan = step.get('lan_reconfiguration', {})
+    done, recovered = (lan.get(key, 0) for key in ('action_completed_monotonic_ns', 'recovered_monotonic_ns'))
+    proof = lan.get('payload_verified_monotonic_ns', {})
+    if (not 0 < step.get('begin_monotonic_ns', 0) <= done <= recovered
+            or recovered - done > 5_000_000_000 or lan.get('watchdog_ms') != 5000
+            or type(lan.get('failed_samples')) is not int or lan['failed_samples'] < 0
+            or set(proof) != {'172.20.10.2', '172.20.20.2'}
+            or any(not done <= at <= recovered for at in proof.values())):
+        raise RuntimeError('missing bounded LAN reconfiguration recovery evidence')
+    for key, device, source in [('rf_route', 'rf0', '172.20.10.1'), ('gimbal_route', 'gimbal0', '172.20.20.1')]:
+        routes = lan.get(key, [])
+        if len(routes) != 1 or routes[0].get('dev') != device or routes[0].get('prefsrc') != source:
+            raise RuntimeError('LAN route/source not restored')
+    return lan
+
+
 def validate_manager_result(status):
     report = status.get('report', {})
     if status.get('exit') != 0 or report.get('completed') is not True or report.get('schema_version') != 1:
@@ -275,6 +292,19 @@ def validate_manager_result(status):
     steps = report.get('steps', [])
     if len(steps) != len(expected) or {s.get('name') for s in steps} != expected or any(s.get('passed') is not True for s in steps):
         raise RuntimeError('missing or failed manager scenarios')
+    step = next(s for s in steps if s['name'] == 'netplan-apply')
+    lan = validate_lan_reconfiguration(step)
+    failures = 0
+    for target in ('172.20.10.2', '172.20.20.2'):
+        before = step.get('traffic_before', {}).get(target, {})
+        recovered = step.get('traffic_after_lan_recovery', {}).get(target, {})
+        after = step.get('traffic_after', {}).get(target, {})
+        if (not all(type(r.get('failed')) is int for r in (before, recovered, after))
+                or not before['failed'] <= recovered['failed'] == after['failed']):
+            raise RuntimeError('LAN failures continued after manager recovery')
+        failures += after['failed'] - before['failed']
+    if failures != lan['failed_samples']:
+        raise RuntimeError('LAN interruption count mismatch')
 
 AUTO_MANAGER_STEPS = {
     'baseline', 'nm-down', 'relay0-down', 'all-relays-down', 'alternate-recovery',
@@ -326,6 +356,24 @@ def validate_manager_auto_result(status, paths):
             raise RuntimeError('invalid scenario clock evidence')
         if set(step.get('traffic', {})) != AUTO_PACKET_KINDS:
             raise RuntimeError('missing per-scenario packet evidence')
+        if step['name'] == 'netplan-apply':
+            lan = validate_lan_reconfiguration(step)
+            recovered = lan['recovered_monotonic_ns']
+            if (lan['action_completed_monotonic_ns'] != step['action_completed_monotonic_ns']
+                    or recovered > step['ready_observed_monotonic_ns']):
+                raise RuntimeError('LAN recovery clock mismatch')
+            failures = 0
+            for packet in packets:
+                if (packet.get('kind') not in ('rf-lan', 'gimbal-lan')
+                        or not step['begin_monotonic_ns'] <= packet['begin_monotonic_ns'] <= step['end_monotonic_ns']):
+                    continue
+                if packet.get('ok') is False:
+                    failures += 1
+                    if packet['end_monotonic_ns'] > recovered:
+                        raise RuntimeError('LAN failure outside direct reconfiguration window')
+            if (failures != lan['failed_samples']
+                    or failures != sum(step['traffic'][kind].get('failed', 0) for kind in ('rf-lan', 'gimbal-lan'))):
+                raise RuntimeError('LAN interruption count mismatch')
         if step.get('metric') not in ('failover', 'no-uplink'):
             continue
         slo = step.get('slo', {})

@@ -58,7 +58,16 @@ Each converged route requires ordinary TCP and UDP nonce payloads with the
 server-observed relay source, an actual unbound route lookup, and nonzero WG
 handshake/RX/TX. RF/gimbal LAN traffic and the independent application are sampled
 concurrently. LAN failures, or independent-app failures during an unaffected
-phase, fail the test. NM shared DHCP uses real DORA and its allocated address,
+phase, fail the test. The explicit `netplan-apply` phase directly reconfigures
+RF/gimbal LANs: only LAN failures bracketed by that command's start and verified
+LAN recovery are reported separately. Recovery requires real nonce replies with
+the original sources and original LAN route/device readback within a five-second
+fixture watchdog after command completion. Failure counts and monotonic proof
+times remain in `lan_reconfiguration`; later LAN failures and independent-app
+failures still fail the scenario. A pass does not mean Netplan apply is lossless.
+This distinction follows [systemd v255 forced reconfiguration](https://github.com/systemd/systemd/blob/v255/src/network/networkd-link.c#L1134),
+which drops managed configuration before restoring it. VPN switching phases have
+no such exception (#184). NM shared DHCP uses real DORA and its allocated address,
 then verifies shared NAT using an independent LAN payload. Manager configuration
 hashes, foreign policy routes/rules and foreign peers must be preserved.
 
