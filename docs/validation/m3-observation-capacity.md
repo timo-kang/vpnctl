@@ -576,3 +576,42 @@ The position-3 startup is slower than its single baseline sample; these samples
 show functional success and preserved freshness under this local profile, not a
 statistically established performance gain. Final uninstrumented source and
 remote CI evidence are required separately before merging.
+
+
+## Candidate-local endpoint collection and manager recovery follow-up (#195)
+
+The manual CI run [37642463237, manager-install-8](https://github.com/timo-kang/vpnctl/actions/runs/37642463237/job/112864710186)
+failed at `flap-up-0` on `9d11887`. The alternate `p01` remained applied while
+`p00` spent about 100 seconds rebuilding. Its first healthy proof arrived at
+109.247 seconds and the next at 116.406 seconds; the default recovery hold-down
+had not elapsed at the fixture's 120-second limit. The independent PR run
+[37642751898](https://github.com/timo-kang/vpnctl/actions/runs/37642751898) on the
+same commit passed all checks; its first `flap-up-0` proof was at 20.383 seconds
+and convergence at 33.241 seconds. One passing run does not resolve the failed
+run. Both records are retained. No budget or hold-down was increased.
+
+A separate deterministic reproduction found that each preparation unit, already
+limited to one underlay, still collected other approved relay endpoints on that
+underlay. With the real `LinuxCollector` and only its process boundary replaced,
+an unrelated route query exhausted the existing 750ms rebuild deadline. This
+blocked both the first and last candidate in the eight-path catalog, even when
+the requested route was healthy. The observed CI inventory cost was only about
+40–100ms per turn, so this injected stall is not a retrospective diagnosis of
+that CI incident.
+
+Preparation now narrows the collector input to the requested endpoint from the
+current catalog, and only when `Build` has included it in the approved inputs.
+The complete catalog, authority/binding validation, original slot allocation,
+current route and before/after link checks remain. Each work unit recollects its
+inventory. Previous removal identity does not authorize an endpoint. Disabled
+and draining candidates remain ineligible. Kernel ownership,
+collision checks and all creation/cleanup budgets remain unchanged.
+
+Regression evidence: normal and race RED reproduced the unrelated-endpoint
+stall; GREEN performs one requested route read plus both link snapshots, with
+zero unrelated reads. Current route failure and link replacement still reject
+approval, and source changes are collected afresh. The endpoint guard mutation
+is checked separately using a Go overlay without altering the product source.
+The manager comparison results are tracked separately; no general CPU
+capacity improvement or resolution of the 120-second failure is inferred from
+this isolation fix alone.
