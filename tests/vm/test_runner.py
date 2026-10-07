@@ -390,6 +390,30 @@ class ApplicationMixedEvidenceTests(unittest.TestCase):
                 observer.validate_application_mixed_result(status)
 
 
+class ApplicationPreparationEvidenceTests(ApplicationMixedEvidenceTests):
+    def valid(self):
+        status = super().valid()
+        paths = ('p00', 'p01', 'p02', 'p03', 'p10', 'p11', 'p12', 'p13')
+        for row in status['reports']:
+            report = row['report']
+            report.update(automatic_rebuild=True, rebuild_completed=True,
+                          rebuilt_path=paths[(report['healthy_index'] + 1) % 8])
+        return status
+
+    def test_rebuild_complete_matrix(self):
+        observer.validate_application_mixed_result(self.valid(), preparation=True)
+
+    def test_rebuild_missing_wrong_path_or_manual_fails(self):
+        for change in (lambda r: r.pop('rebuilt_path'),
+                       lambda r: r.update(rebuilt_path='p00'),
+                       lambda r: r.update(automatic_rebuild=False),
+                       lambda r: r.update(rebuild_completed=False)):
+            status = self.valid()
+            change(status['reports'][0]['report'])
+            with self.assertRaisesRegex(RuntimeError, 'rebuild evidence'):
+                observer.validate_application_mixed_result(status, preparation=True)
+
+
 class ApplicationApprovalEvidenceTests(unittest.TestCase):
     def valid(self):
         return dict(exit=0, reports=[dict(report=dict(fault=fault, completed=True,

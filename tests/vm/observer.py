@@ -281,7 +281,7 @@ def validate_application_approval_result(status):
                 raise RuntimeError('application expiry did not isolate the intended grant')
 
 
-def validate_application_mixed_result(status):
+def validate_application_mixed_result(status, preparation=False):
     reports = [row.get('report', {}) for row in status.get('reports', [])]
     if (status.get('exit') != 0 or len(reports) != 3
             or {row.get('healthy_index') for row in reports} != {0, 3, 7}):
@@ -295,6 +295,12 @@ def validate_application_mixed_result(status):
                 or set(gaps) != {'app', 'app2'} or any(not 0 < n <= 10 for n in gaps.values())
                 or row.get('steady_seconds', 0) < 15):
             raise RuntimeError('mixed application continuity evidence incomplete')
+        if preparation:
+            paths = ('p00', 'p01', 'p02', 'p03', 'p10', 'p11', 'p12', 'p13')
+            if (row.get('automatic_rebuild') is not True or row.get('rebuild_completed') is not True
+                    or row.get('rebuilt_path') != paths[(row['healthy_index'] + 1) % 8]):
+                raise RuntimeError('mixed application rebuild evidence incomplete')
+
 
 
 def validate_lan_reconfiguration(step):
@@ -476,7 +482,7 @@ def exercise(vm, case, mode, delta, result):
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
         return result
-    if case in ('application-mixed', 'application-approval'):
+    if case in ('application-mixed', 'application-preparation', 'application-approval'):
         vm.call(case + '-start')
         until = time.monotonic() + 16 * 60
         while time.monotonic() < until:
@@ -484,8 +490,8 @@ def exercise(vm, case, mode, delta, result):
             if status['exit'] is not None:
                 result[case] = status
                 vm.record(case + '-result', status)
-                if case == 'application-mixed':
-                    validate_application_mixed_result(status)
+                if case in ('application-mixed', 'application-preparation'):
+                    validate_application_mixed_result(status, preparation=case == 'application-preparation')
                 else:
                     validate_application_approval_result(status)
                 return result
@@ -715,7 +721,7 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
