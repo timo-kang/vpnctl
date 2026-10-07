@@ -309,15 +309,24 @@ def validate_manager_auto_result(status, paths, installation=False):
         for relay in before:
             old, new = before[relay].get('installations', []), after[relay].get('installations', [])
             stopped = offline[relay]
+            retained = stopped.get('kernel', {}).get('installations', [])
             if (not old or len(old) != paths // 2 or len(new) != len(old)
+                    or before[relay].get('kernel_ready') is not True
                     or stopped.get('approval_valid') is not False
                     or stopped.get('kernel', {}).get('endpoints') != []
                     or stopped.get('kernel', {}).get('kernel_ready') is not False
-                    or len(stopped.get('kernel', {}).get('installations', [])) != len(old)
+                    or len(retained) != len(old)
+                    or len({p.get('endpoint_id') for p in old}) != len(old)
                     or after[relay].get('kernel_ready') is not True):
                 raise RuntimeError('incomplete installation expiry/recovery proof')
-            for previous, current in zip(old, new):
-                if (current.get('endpoint_id') != previous.get('endpoint_id')
+            for previous, blocked, current in zip(old, retained, new):
+                if (not previous.get('endpoint_id') or previous.get('enabled') is not True
+                        or previous.get('phase') != 'applied' or previous.get('attempts') != 1
+                        or blocked.get('endpoint_id') != previous['endpoint_id']
+                        or blocked.get('revision') != previous.get('revision')
+                        or blocked.get('enabled') is not True or blocked.get('phase') != 'waiting'
+                        or blocked.get('attempts') != previous['attempts']
+                        or current.get('endpoint_id') != previous['endpoint_id']
                         or not previous.get('revision') or current.get('revision') != previous['revision']
                         or current.get('enabled') is not True or current.get('phase') != 'applied'
                         or current.get('attempts') != previous.get('attempts', 0) + 1):

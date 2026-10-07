@@ -286,9 +286,9 @@ class InstallationEvidenceTests(unittest.TestCase):
                             for name in observer.INSTALL_MANAGER_STEPS]
         old = [dict(endpoint_id='ep'+str(i), revision='revision'+str(i), enabled=True, phase='applied', attempts=1)
                for i in range(2)]
-        report['installation_before_expiry'] = {r: dict(installations=[p.copy() for p in old]) for r in ('r0', 'r1')}
+        report['installation_before_expiry'] = {r: dict(kernel_ready=True, installations=[p.copy() for p in old]) for r in ('r0', 'r1')}
         report['installation_offline_restart'] = {r: dict(approval_valid=False,
-                    kernel=dict(endpoints=[], kernel_ready=False, installations=[p.copy() for p in old])) for r in ('r0', 'r1')}
+                    kernel=dict(endpoints=[], kernel_ready=False, installations=[dict(p, phase='waiting') for p in old])) for r in ('r0', 'r1')}
         report['installation_after_recovery'] = {r: dict(kernel_ready=True,
                     installations=[dict(p, attempts=2) for p in old]) for r in ('r0', 'r1')}
         return status
@@ -298,6 +298,12 @@ class InstallationEvidenceTests(unittest.TestCase):
 
     def test_manual_or_incomplete_evidence_does_not_qualify(self):
         mutations = [lambda r: r.pop('installation_mode'), lambda r: r['steps'].pop(),
+                     lambda r: r['installation_before_expiry']['r0'].update(kernel_ready=False),
+                     lambda r: r['installation_before_expiry']['r0']['installations'][0].update(attempts=0),
+                     lambda r: r['installation_offline_restart']['r0']['kernel']['installations'][0].update(revision='new'),
+                     lambda r: r['installation_offline_restart']['r0']['kernel']['installations'][0].update(attempts=2),
+                     lambda r: r['installation_offline_restart']['r0']['kernel']['installations'][0].update(enabled=False),
+                     lambda r: r['installation_offline_restart']['r0']['kernel']['installations'][0].update(phase='applied'),
                      lambda r: r['installation_offline_restart']['r0']['kernel'].update(endpoints=[{}]),
                      lambda r: r['installation_offline_restart']['r0'].update(approval_valid=True),
                      lambda r: r['installation_after_recovery']['r0']['installations'][0].update(revision='new'),
