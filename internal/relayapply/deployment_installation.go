@@ -23,35 +23,35 @@ var deploymentInstallSteps = []string{"guard", "link", "tag", "wg", "up", "route
 // or proof of kernel ownership. KeyFile is only a reference to an external key;
 // it is never included in public reports. Version 2 refuses old-binary adoption.
 type deploymentInstallation struct {
-	Endpoint          string `json:"endpoint_id"`
-	Controller        string `json:"controller_id"`
-	PublicKey         string `json:"public_key"`
-	KeyGeneration     uint64 `json:"key_generation"`
-	ListenPort        int    `json:"listen_port"`
-	KeyFile           string `json:"key_file"`
-	Revision          string `json:"revision"`
-	Step              int    `json:"step"`
-	InFlight          bool   `json:"in_flight,omitempty"`
-	Failures          int    `json:"failures,omitempty"`
-	RetryBootNS       uint64 `json:"retry_boot_ns,omitempty"`
-	Attempts          uint64 `json:"attempts,omitempty"`
-	Reason            string `json:"reason,omitempty"`
-	LastAttemptReason string `json:"last_attempt_reason,omitempty"`
+	Endpoint      string `json:"endpoint_id"`
+	Controller    string `json:"controller_id"`
+	PublicKey     string `json:"public_key"`
+	KeyGeneration uint64 `json:"key_generation"`
+	ListenPort    int    `json:"listen_port"`
+	KeyFile       string `json:"key_file"`
+	Revision      string `json:"revision"`
+	Step          int    `json:"step"`
+	InFlight      bool   `json:"in_flight,omitempty"`
+	Failures      int    `json:"failures,omitempty"`
+	RetryBootNS   uint64 `json:"retry_boot_ns,omitempty"`
+	Attempts      uint64 `json:"attempts,omitempty"`
+	Reason        string `json:"reason,omitempty"`
 }
 
 type DeploymentInstallationStatus struct {
-	EndpointID    string `json:"endpoint_id"`
-	Revision      string `json:"revision"`
-	ControllerID  string `json:"controller_id"`
-	KeyGeneration uint64 `json:"key_generation"`
-	ListenPort    int    `json:"listen_port"`
-	Enabled       bool   `json:"enabled"`
-	Phase         string `json:"phase"`
-	Step          int    `json:"step"`
-	InFlight      bool   `json:"in_flight,omitempty"`
-	Attempts      uint64 `json:"attempts"`
-	RetryBootNS   uint64 `json:"retry_boot_ns,omitempty"`
-	Reason        string `json:"reason,omitempty"`
+	EndpointID        string `json:"endpoint_id"`
+	Revision          string `json:"revision"`
+	ControllerID      string `json:"controller_id"`
+	KeyGeneration     uint64 `json:"key_generation"`
+	ListenPort        int    `json:"listen_port"`
+	Enabled           bool   `json:"enabled"`
+	Phase             string `json:"phase"`
+	Step              int    `json:"step"`
+	InFlight          bool   `json:"in_flight,omitempty"`
+	Attempts          uint64 `json:"attempts"`
+	RetryBootNS       uint64 `json:"retry_boot_ns,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	LastAttemptReason string `json:"last_attempt_reason,omitempty"`
 }
 
 func validInstallKeyReference(path string) bool {
