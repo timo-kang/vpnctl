@@ -250,6 +250,7 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 				Reason      string          `json:"reason,omitempty"`
 				Refresh     string          `json:"refresh"`
 				Preparation json.RawMessage `json:"preparation,omitempty"`
+				Diagnostics json.RawMessage `json:"diagnostics,omitempty"`
 			}
 			if json.Unmarshal(line, &r) != nil {
 				continue
