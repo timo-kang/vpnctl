@@ -7,6 +7,7 @@ import (
 	"errors"
 	"maps"
 	"net/netip"
+	"time"
 )
 
 // Version 2 distinguishes peers that have no application prefix from peers in
@@ -103,4 +104,69 @@ func (e *Engine) promote(ctx context.Context, candidates []Candidate) error {
 		e.trialStarted[c.Key] = started
 	}
 	return nil
+}
+
+// Recreate only prefix-free, unconfirmed transports. Native WG retry timers can
+// finish without a usable session (including after the staged queue is purged).
+// Different endpoint cadences avoid repeatedly restarting both sides together.
+func handshakeRestartDelay(local, peer string) time.Duration {
+	if local < peer {
+		return 6 * time.Second
+	}
+	return 8 * time.Second
+}
+
+func (e *Engine) restartStalled(ctx context.Context, candidates []Candidate) (map[string]bool, error) {
+	restarted := map[string]bool{}
+	if len(candidates) == 0 {
+		return restarted, nil
+	}
+	s, err := e.inspect(ctx)
+	if err != nil {
+		return restarted, err
+	}
+	if !e.relayOK(s) {
+		return restarted, errors.New("relay baseline changed before transport retry")
+	}
+	var keys []string
+	var retry []Candidate
+	for _, c := range candidates {
+		p := s.Peers[c.Key]
+		if e.j.Peers[c.Key] != c || e.j.Phases[c.Key] != "handshake" || !staged(p, c) || p.Endpoint != c.Endpoint {
+			return restarted, errors.New("stalled transport ownership changed")
+		}
+		// A handshake can complete between the first inspection and this retry.
+		// Never deliberately reset transport that this fresh read has proven ready.
+		if p.Handshake > 0 && p.RX > 0 && p.TX > 0 {
+			continue
+		}
+		keys = append(keys, c.Key)
+		retry = append(retry, c)
+	}
+	// Reuse the ordinary ownership/readback and durable removal/creation protocol.
+	// A partial failure remains recoverable; no application prefix is installed.
+	removed, err := e.removeWhere(ctx, keys, func(p kernelPeer, c Candidate) bool {
+		return p.Endpoint == c.Endpoint && (p.Handshake <= 0 || p.RX == 0 || p.TX == 0)
+	})
+	if err != nil {
+		return restarted, err
+	}
+	selected := make(map[string]bool, len(removed))
+	for _, key := range removed {
+		selected[key] = true
+	}
+	kept := retry[:0]
+	for _, c := range retry {
+		if selected[c.Key] {
+			kept = append(kept, c)
+		}
+	}
+	retry = kept
+	if err := e.add(ctx, retry); err != nil {
+		return restarted, err
+	}
+	for _, c := range retry {
+		restarted[c.ID] = true
+	}
+	return restarted, nil
 }

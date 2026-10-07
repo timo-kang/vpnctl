@@ -17,16 +17,17 @@ import (
 // duration, worker overruns and journal latency all consume virtual time.
 // Route occupancy is measured at Add/Remove, not when Step finishes logging.
 type retryPhaseModel struct {
-	mu                sync.Mutex
-	base              time.Time
-	nodes             [2]*retryPhaseNode
-	restoreAt         time.Duration
-	handshakeDelay    time.Duration
-	innerBlackhole    bool
-	activeDuringFault bool
-	maxGap            time.Duration
-	activeAt          time.Duration
-	transitions       []string
+	mu                     sync.Mutex
+	base                   time.Time
+	nodes                  [2]*retryPhaseNode
+	restoreAt              time.Duration
+	handshakeReplyDelay    time.Duration
+	handshakeRetryInterval time.Duration
+	innerBlackhole         bool
+	activeDuringFault      bool
+	maxGap                 time.Duration
+	activeAt               time.Duration
+	transitions            []string
 }
 
 type retryPhaseNode struct {
@@ -46,7 +47,7 @@ type retryPhaseNode struct {
 
 func newRetryPhaseModel(t *testing.T, phase, removeA, removeB time.Duration) *retryPhaseModel {
 	t.Helper()
-	m := &retryPhaseModel{base: time.Now(), restoreAt: -1, activeAt: -1, handshakeDelay: 500 * time.Millisecond}
+	m := &retryPhaseModel{base: time.Now(), restoreAt: -1, activeAt: -1, handshakeReplyDelay: 500 * time.Millisecond}
 	for i := range m.nodes {
 		e, k, c := fixture(t)
 		e.cfg.WGPublicKey, c.Key = key(3), key(4)
@@ -178,7 +179,15 @@ func (n *retryPhaseNode) Probe(ctx context.Context, c Candidate) error {
 
 // Call with m.mu held. WireGuard handshakes are independent of AllowedIPs and
 // inner nonce reachability. They need both peer entries and a transport-ready
-// interval, including after the underlay fault itself clears.
+// interval, including after the underlay fault itself clears. The slower mode
+// represents WireGuard's five-second native initiation retry, not a requirement
+// for five uninterrupted seconds since BOTH peers were most recently created.
+// A Stage sends an initial keepalive immediately; a later peer creation cannot
+// reschedule the opposite peer's timer. Each peer owns its initiation times.
+// Sources (guest v6.1 and v6.8 have the same relevant control flow):
+// https://github.com/torvalds/linux/blob/v6.1/drivers/net/wireguard/netlink.c
+// https://github.com/torvalds/linux/blob/v6.1/drivers/net/wireguard/timers.c
+// Exact collision/rate-limit/jitter behavior has its own handshake timer model.
 func (m *retryPhaseModel) transportReady() bool {
 	readySince := m.base
 	if !m.innerBlackhole {
@@ -195,7 +204,24 @@ func (m *retryPhaseModel) transportReady() bool {
 			readySince = n.staged
 		}
 	}
-	return time.Since(readySince) >= m.handshakeDelay
+	if m.handshakeRetryInterval > 0 {
+		var firstAttempt time.Time
+		for _, n := range m.nodes {
+			attempt := n.staged
+			if elapsed := readySince.Sub(attempt); elapsed > 0 {
+				periods := elapsed / m.handshakeRetryInterval
+				if elapsed%m.handshakeRetryInterval != 0 {
+					periods++
+				}
+				attempt = attempt.Add(periods * m.handshakeRetryInterval)
+			}
+			if firstAttempt.IsZero() || attempt.Before(firstAttempt) {
+				firstAttempt = attempt
+			}
+		}
+		readySince = firstAttempt
+	}
+	return time.Since(readySince) >= m.handshakeReplyDelay
 }
 
 func (m *retryPhaseModel) updateHandshakes() {
@@ -332,14 +358,21 @@ func TestRetryApplicationGapIncludesIndependentWorkerPhase(t *testing.T) {
 }
 
 func TestRetryWorkerPhasesStillReconnectAfterBlackhole(t *testing.T) {
-	for _, handshakeDelay := range []time.Duration{500 * time.Millisecond, 5 * time.Second} {
+	for _, transport := range []struct {
+		name                      string
+		replyDelay, retryInterval time.Duration
+	}{
+		{"reply_500ms", 500 * time.Millisecond, 0},
+		{"retry_5s_reply_500ms", 500 * time.Millisecond, 5 * time.Second},
+	} {
 		for _, inner := range []bool{false, true} {
 			for phase := time.Duration(0); phase <= 3*time.Second; phase += 250 * time.Millisecond {
 				for _, restoreAt := range []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, time.Minute} {
-					t.Run(fmt.Sprintf("handshake_%s_inner_%t_phase_%s_restore_%s", handshakeDelay, inner, phase, restoreAt), func(t *testing.T) {
+					t.Run(fmt.Sprintf("%s_inner_%t_phase_%s_restore_%s", transport.name, inner, phase, restoreAt), func(t *testing.T) {
 						synctest.Test(t, func(t *testing.T) {
 							m := newRetryPhaseModel(t, phase, 20*time.Millisecond, 100*time.Millisecond)
-							m.handshakeDelay = handshakeDelay
+							m.handshakeReplyDelay = transport.replyDelay
+							m.handshakeRetryInterval = transport.retryInterval
 							m.innerBlackhole = inner
 							m.restoreAt = restoreAt
 							m.run(t, m.restoreAt+15*time.Second)
@@ -710,6 +743,40 @@ func TestInitialRetryRequiresFreshWireGuardCounters(t *testing.T) {
 			if status.ID == target.ID && (status.State != "probing" || status.Reason != "direct_traffic_not_observed") {
 				t.Fatalf("one counter increase counted as two proofs: status=%+v successes=%d", status, e.successes[target.Key])
 			}
+		}
+	})
+}
+
+// A five-second native retry belongs to its own peer. Recreating the opposite
+// peer during a blackhole cannot postpone that already-scheduled attempt.
+func TestNativeHandshakeRetrySurvivesRemoteRestaging(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := &retryPhaseModel{base: time.Now(), restoreAt: 10 * time.Second, handshakeReplyDelay: 500 * time.Millisecond, handshakeRetryInterval: 5 * time.Second}
+		m.nodes[0] = &retryPhaseNode{staged: m.base.Add(time.Second)}             // attempts at 1,6,11...
+		m.nodes[1] = &retryPhaseNode{staged: m.base.Add(9900 * time.Millisecond)} // 9.9s attempt is lost; next 14.9s.
+		time.Sleep(11499 * time.Millisecond)
+		if m.transportReady() {
+			t.Fatal("transport became ready before the independent retry and its response")
+		}
+		time.Sleep(time.Millisecond)
+		if !m.transportReady() {
+			t.Fatal("remote recreation postponed the other peer's 11s retry beyond its 11.5s response")
+		}
+	})
+}
+
+func TestFreshHandshakeAttemptCanReachAlreadyStagedPeer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := &retryPhaseModel{base: time.Now(), restoreAt: 5 * time.Second, handshakeReplyDelay: 500 * time.Millisecond, handshakeRetryInterval: 5 * time.Second}
+		m.nodes[0] = &retryPhaseNode{staged: m.base.Add(time.Second)}
+		m.nodes[1] = &retryPhaseNode{staged: m.base.Add(9900 * time.Millisecond)}
+		time.Sleep(10399 * time.Millisecond)
+		if m.transportReady() {
+			t.Fatal("fresh initiation completed without response time")
+		}
+		time.Sleep(time.Millisecond)
+		if !m.transportReady() {
+			t.Fatal("fresh Stage initiation incorrectly waited for the first native retransmit")
 		}
 	})
 }

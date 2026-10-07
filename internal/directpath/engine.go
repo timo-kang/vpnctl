@@ -74,18 +74,19 @@ type envelope struct {
 	Digest  string  `json:"sha256"`
 }
 type Engine struct {
-	relayVerified time.Time
-	poisoned      bool
-	j             journal
-	cfg           config.NodeConfig
-	backend       backend
-	save          func(journal) error
-	unlock        func()
-	retrySequence uint64
-	trialStarted  map[string]time.Time
-	successes     map[string]int
-	cooldown      map[string]time.Time
-	now           func() time.Time
+	relayVerified    time.Time
+	poisoned         bool
+	j                journal
+	cfg              config.NodeConfig
+	backend          backend
+	save             func(journal) error
+	unlock           func()
+	retrySequence    uint64
+	trialStarted     map[string]time.Time
+	handshakeStarted map[string]time.Time
+	successes        map[string]int
+	cooldown         map[string]time.Time
+	now              func() time.Time
 }
 
 func statePath(cfg config.NodeConfig) string { return cfg.WGConfigPath + ".direct.json" }
@@ -278,7 +279,7 @@ func RecoverExisting(ctx context.Context, cfg config.NodeConfig) (bool, error) {
 }
 
 func newEngine(cfg config.NodeConfig, j journal, b backend, save func(journal) error) *Engine {
-	return &Engine{j: j, cfg: cfg, backend: b, save: save, successes: map[string]int{}, trialStarted: map[string]time.Time{}, cooldown: map[string]time.Time{}, now: time.Now}
+	return &Engine{j: j, cfg: cfg, backend: b, save: save, successes: map[string]int{}, trialStarted: map[string]time.Time{}, handshakeStarted: map[string]time.Time{}, cooldown: map[string]time.Time{}, now: time.Now}
 }
 func (e *Engine) persist(next journal) error {
 	next.Version = 2
@@ -388,12 +389,19 @@ func (e *Engine) relayOK(s snapshot) bool {
 	return reflect.DeepEqual(a, b)
 }
 func (e *Engine) remove(ctx context.Context, keys []string) error {
+	_, err := e.removeWhere(ctx, keys, nil)
+	return err
+}
+
+// The optional filter consumes the last ownership readback before removal.
+// General withdrawal/recovery remains unconditional for proven owned peers.
+func (e *Engine) removeWhere(ctx context.Context, keys []string, allow func(kernelPeer, Candidate) bool) ([]string, error) {
 	if len(keys) == 0 {
-		return nil
+		return nil, nil
 	}
 	s, err := e.inspect(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var safe, installed []string
 	var errs []error
@@ -407,35 +415,39 @@ func (e *Engine) remove(ctx context.Context, keys []string) error {
 				errs = append(errs, errors.New("direct peer ownership conflict"))
 				continue
 			}
+			if allow != nil && !allow(p, c) {
+				continue
+			}
 			installed = append(installed, key)
 		}
 		safe = append(safe, key)
 	}
 	if len(installed) != 0 {
 		if err = e.backend.Remove(ctx, installed); err != nil {
-			return errors.Join(append(errs, err)...)
+			return nil, errors.Join(append(errs, err)...)
 		}
 		s, err = e.inspect(ctx)
 		if err != nil {
-			return errors.Join(append(errs, err)...)
+			return nil, errors.Join(append(errs, err)...)
 		}
 		for _, key := range installed {
 			if _, exists := s.Peers[key]; exists {
-				return errors.Join(append(errs, errors.New("direct removal readback failed"))...)
+				return nil, errors.Join(append(errs, errors.New("direct removal readback failed"))...)
 			}
 		}
 	}
 	if len(safe) == 0 {
-		return errors.Join(errs...)
+		return nil, errors.Join(errs...)
 	}
 	for _, key := range safe {
 		delete(e.successes, key)
 		delete(e.trialStarted, key)
+		delete(e.handshakeStarted, key)
 	}
 	if e.poisoned {
 		// Kernel quiescence remains possible with a failed journal. Retain all
 		// durable intents for idempotent recovery after storage is repaired.
-		return errors.Join(append(errs, errors.New("direct peers quiesced; journal repair/reopen required"))...)
+		return nil, errors.Join(append(errs, errors.New("direct peers quiesced; journal repair/reopen required"))...)
 	}
 	next := e.j
 	next.Peers = clone(e.j.Peers)
@@ -444,7 +456,10 @@ func (e *Engine) remove(ctx context.Context, keys []string) error {
 		delete(next.Peers, key)
 		delete(next.Phases, key)
 	}
-	return errors.Join(append(errs, e.persist(next))...)
+	if err := e.persist(next); err != nil {
+		return nil, errors.Join(append(errs, err)...)
+	}
+	return safe, errors.Join(errs...)
 }
 func clone(p map[string]Candidate) map[string]Candidate {
 	out := make(map[string]Candidate, len(p))
@@ -527,7 +542,13 @@ func (e *Engine) add(ctx context.Context, candidates []Candidate) error {
 	for _, c := range candidates {
 		next.Phases[c.Key] = "handshake"
 	}
-	return e.persist(next)
+	if err := e.persist(next); err != nil {
+		return err
+	}
+	for _, c := range candidates {
+		e.handshakeStarted[c.Key] = e.now()
+	}
+	return nil
 }
 
 // verifyRelay initializes the standby WG transport before a direct trial.
@@ -671,7 +692,7 @@ func (e *Engine) Step(ctx context.Context, candidates []Candidate) ([]Status, er
 	if err != nil {
 		return statuses, err
 	}
-	var promote []Candidate
+	var promote, stalled []Candidate
 	for _, key := range sortedKeys(trials) {
 		c := trials[key]
 		switch e.j.Phases[key] {
@@ -683,11 +704,23 @@ func (e *Engine) Step(ctx context.Context, candidates []Candidate) ([]Status, er
 			if p.Handshake <= 0 || p.RX == 0 || p.TX == 0 {
 				statuses = append(statuses, Status{c.ID, "handshaking", "relay_route_preserved", c.Generation})
 				delete(trials, key)
+				if since := e.handshakeStarted[key]; !since.IsZero() && e.now().Sub(since) >= handshakeRestartDelay(e.cfg.WGPublicKey, c.Key) {
+					stalled = append(stalled, c)
+				}
 			} else {
 				promote = append(promote, c)
 			}
 		case "staging", "activating":
 			return statuses, errors.New("interrupted direct mutation; reset required")
+		}
+	}
+	restarted, err := e.restartStalled(ctx, stalled)
+	if err != nil {
+		return statuses, err
+	}
+	for i := range statuses {
+		if restarted[statuses[i].ID] {
+			statuses[i].Reason = "transport_restarted"
 		}
 	}
 	refreshBefore := len(promote) != 0

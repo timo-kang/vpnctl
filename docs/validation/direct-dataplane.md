@@ -229,6 +229,51 @@ handshake와 빈 authenticated keepalive는 통과하며, post-fault handshake·
 `wmem_max` 진단 파일 부재로 종료 코드 1이었다. 이 실패 원본은
 `/tmp/vpnctl-fix191-direct-prod-v1`에 보존하며 합격 근거로 사용하지 않는다.
 
+## 미완료 transport 재시도와 검증 모델 교정
+
+production V3의 outer/inner 2·3·8·32 노드 8개 시험은 통과했으나,
+race V3의 outer 8노드는 장애 해제 후 15초 내 복구하지 못했다. 원본
+`/tmp/vpnctl-fix191-direct-race-v3`를 실패 그대로 유지한다. 실패 시 두 peer는
+application prefix가 없고 handshake가 0이었다. RX 296/TX 776바이트는
+handshake 메시지 교환만으로도 증가할 수 있어 활성 경로의 증거가 아니다.
+
+커널의 교차 initiation, 응답에 따른 rate-limit 갱신, 재전송 one-shot timer가
+겹치면 미완료 상태에 정체될 수 있다는 실행 모델을 추가했다. 이는 가능한
+정체 경로의 재현이며 해당 VM 실패의 커널 내부 원인을 확정한 것은 아니다.
+근거는 Linux [noise.c](https://github.com/torvalds/linux/blob/v6.1/drivers/net/wireguard/noise.c),
+[send.c](https://github.com/torvalds/linux/blob/v6.1/drivers/net/wireguard/send.c),
+[timers.c](https://github.com/torvalds/linux/blob/v6.1/drivers/net/wireguard/timers.c)다.
+
+현재 수정은 소유권이 일치하고 prefix가 없는 미완료 peer만 6/8초 간격으로
+제거·재생성한다. 공개 키 순서에 따라 양 끝의 간격을 달리하며 relay의
+application 경로를 유지한다. 제거 직전 최종 snapshot에서도 handshake·RX·TX가
+완성되었으면 보존한다. 일반 철회·복구 제거에는 이 예외를 적용하지 않는다.
+기존 durable 제거·staging 절차를 사용하고 저장 실패 후 재시작에서도 소유권을
+추측하지 않는다. 정상·활성 peer의 주기적 재생성은 하지 않는다.
+
+기존 Engine 시간 모델의 느린 모드는 한쪽을 재생성하면 상대의 5초 재전송
+시각도 뒤로 밀리는 것으로 잘못 가정했다. 상대 재생성이 로컬 native timer를
+연기하지 않는 회귀 검사를 먼저 실패시키고, peer별 독립 재전송 시각과 500ms
+응답 지연으로 교정했다. 208개 장애/worker 위상 조합과 6개 응답 공백 조합,
+두 nonce 증명, 5초 공백 및 15초 복구 기준은 유지한다. 종전의 "5초 handshake
+준비 지연"은 이 모델로 보장한 RTT가 아니며, 현재는 native 5초 재전송 주기와
+응답 지연을 구분한다. 기본 검사에는 대표 경계를, 전체 설계 검토에는 401,024개
+교차 timer 조합을 사용한다:
+
+```sh
+VPNCTL_FULL_HANDSHAKE_MODEL=1 go test ./internal/directpath \
+  -run '^TestStagedPeerRecreationPhaseSearch$' -count=1 -v
+```
+
+6/8초 설계의 전체 모델은 최악 handshake 10.95초에 다음 worker와 두 요청 예산
+3초를 더해 13.95초였다. 8/10초와 9/11초 대안은 각각 16.45/17.95초로 탈락했다.
+이는 유한한 모델 탐색의 결과이며 모든 네트워크 지연을 보장하는 증명은 아니다.
+실제 race 8노드 진단 실행 `/tmp/vpnctl-staged-restart-race8-v1`은 fallback 1.971초,
+12.021초 장애 구간 239/239 요청 성공, 최대 간격 52.521ms와 15초 내 복구를
+통과했다. 해당 실행은 개발 중 소스였으며 최종 소스의 전체 행렬과 CI를 별도로
+확인한다. 경고 폭주에 lifecycle 전이가 묻히지 않도록 공개 필드만 제한된
+첫/마지막 이벤트로 내보내고, 누락·절단 수를 명시한다.
+
 ## 판정 범위
 
 5초는 이 격리된 node-to-node 시험의 assertion이다. 앱 서버 uplink, 실제 RF/LTE 지연,
