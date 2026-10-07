@@ -448,3 +448,23 @@ The same two-waiter, 25ms, 5s × 3 benchmark reduced CPU from 0.0119–0.0136 to
 with race instrumentation. Tight per-poll CPU fell from 106–108µs to
 6.71–6.73µs production, and from 294–297µs to 17.68–18.12µs race. These are
 local Ryzen 9800X3D measurements; the end-to-end VM qualification is separate.
+
+
+The combined implementation at clean `137fafd` passed the same stricter local
+race VM comparison (whole VM 0.5 CPU, robot quota 0.5 CPU). All three healthy
+positions retained both actual payloads and all eight candidate leases through
+at least 21s and three further applied cycles per application:
+
+| Healthy position | First payload | Steady observation window | Largest fresh eligible gap |
+| --- | --- | --- | --- |
+| 0 | 12.203s | 21.791s | 7.812s |
+| 3 | 11.311s | 22.086s | 8.200s |
+| 7 | 13.796s | 24.225s | 8.907s |
+
+Evidence: `/tmp/vpnctl-cpu-native-hint-half-v1`. The recorded rows contain no
+confirmation-gap reset; the original failed position 7 had a 10.892s
+confirmation gap. The intermediate native-read-only result and its marginal
+9.706s bound remain recorded above. This is a finite diagnostic on the same
+local hardware, not a guaranteed minimum CPU specification or p95 estimate.
+Final remote CI uses its original whole-VM 1 CPU / robot 0.5 CPU profile, including
+separate four- and eight-candidate cases. Its pass is required independently.
