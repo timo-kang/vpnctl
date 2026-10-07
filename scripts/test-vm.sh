@@ -7,6 +7,13 @@ case "$vm_cpus" in
     1|0.5|0.25) ;;
     *) echo 'VPNCTL_VM_CPUS must be 1, 0.5 or 0.25 (container quota only)' >&2; exit 2 ;;
 esac
+vm_race=${VPNCTL_VM_RACE:-0}
+build_flags=()
+case "$vm_race" in
+    0) ;;
+    1) build_flags=(-race) ;;
+    *) echo 'VPNCTL_VM_RACE must be 0 or 1' >&2; exit 2 ;;
+esac
 external_binary=${VPNCTL_TEST_BINARY:-}
 if [[ -n "$external_binary" ]]; then
     external_binary=$(realpath -- "$external_binary")
@@ -58,9 +65,9 @@ if [[ -n "$external_binary" ]]; then
     cp -- "$external_binary" "$work/input/vpnctl"
     binary_origin=external
 else
-    GOMAXPROCS=2 go build -p=2 -o "$work/input/vpnctl" ./cmd/vpnctl
+    GOMAXPROCS=2 go build -p=2 "${build_flags[@]}" -o "$work/input/vpnctl" ./cmd/vpnctl
 fi
-GOMAXPROCS=2 go test -p=2 -tags=integration -c -o "$work/input/integration.test" ./tests/integration
+GOMAXPROCS=2 go test -p=2 "${build_flags[@]}" -tags=integration -c -o "$work/input/integration.test" ./tests/integration
 # Last peer-apply implementation before kernel leases, for real downgrade and
 # upgrade rejection tests. The historical source is a fixture, never main.
 legacy_commit=6e2da45c89de2d3ad2e4c930f1037472e6440692
@@ -95,7 +102,7 @@ manifest="$results/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
         "suite_dirty=$(test -z "$(git status --porcelain)" && echo false || echo true)" \
         'runner=qemu-in-container' "cpus=$vm_cpus" 'memory=2g' 'guest_memory=768M' \
         'container_network=none' 'container_capabilities=none' "image_id=$image" \
-        "host_boot_id=$boot_before" "binary_origin=$binary_origin" "legacy_commit=$legacy_commit" "lease_v1_commit=$v1_commit" "lease_v2_commit=$v2_commit" 'suite_race=0'
+        "host_boot_id=$boot_before" "binary_origin=$binary_origin" "legacy_commit=$legacy_commit" "lease_v1_commit=$v1_commit" "lease_v2_commit=$v2_commit" "suite_race=$vm_race"
     sha256sum "$work/input/vpnctl" "$work/input/integration.test" "$work/input/vpnctl-legacy" "$work/input/vpnctl-lease-v1" "$work/input/vpnctl-lease-v2"
     printf 'test_argument=%s\n' "$@"
     cat "$work/image/image.json"

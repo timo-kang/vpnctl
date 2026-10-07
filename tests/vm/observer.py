@@ -265,6 +265,22 @@ def host_clock():
             'wall_ns': time.time_ns(), 'monotonic_ns': time.monotonic_ns(),
             'boottime_ns': time.clock_gettime_ns(time.CLOCK_BOOTTIME)}
 
+def validate_application_mixed_result(status):
+    reports = [row.get('report', {}) for row in status.get('reports', [])]
+    if (status.get('exit') != 0 or len(reports) != 3
+            or {row.get('healthy_index') for row in reports} != {0, 3, 7}):
+        raise RuntimeError('mixed application matrix failed or omitted cases')
+    for row in reports:
+        cycles = row.get('steady_applied_cycles', {})
+        gaps = row.get('maximum_fresh_observation_gap_seconds', {})
+        if (row.get('completed') is not True or row.get('all_eight_leases_active') is not True
+                or row.get('two_actuators_and_payloads_verified') is not True
+                or set(cycles) != {'app', 'app2'} or any(type(n) is not int or n < 3 for n in cycles.values())
+                or set(gaps) != {'app', 'app2'} or any(not 0 < n <= 10 for n in gaps.values())
+                or row.get('steady_seconds', 0) < 15):
+            raise RuntimeError('mixed application continuity evidence incomplete')
+
+
 def validate_lan_reconfiguration(step):
     lan = step.get('lan_reconfiguration', {})
     done, recovered = (lan.get(key, 0) for key in ('action_completed_monotonic_ns', 'recovered_monotonic_ns'))
@@ -444,6 +460,18 @@ def exercise(vm, case, mode, delta, result):
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
         return result
+    if case == 'application-mixed':
+        vm.call('application-mixed-start')
+        until = time.monotonic() + 16 * 60
+        while time.monotonic() < until:
+            status = vm.call('application-mixed-result')
+            if status['exit'] is not None:
+                result['application-mixed'] = status
+                vm.record('application-mixed-result', status)
+                validate_application_mixed_result(status)
+                return result
+            time.sleep(2)
+        raise RuntimeError('mixed application fixture timed out')
     if case == 'managers' or case.startswith(('manager-auto-', 'manager-install-')):
         automatic = case != 'managers'
         paths = int(case.rsplit('-', 1)[1]) if automatic else 4
@@ -668,7 +696,7 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])

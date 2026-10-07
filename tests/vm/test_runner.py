@@ -366,5 +366,29 @@ class InstallationEvidenceTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             observer.validate_manager_auto_result(self.valid(), 4)
 
+class ApplicationMixedEvidenceTests(unittest.TestCase):
+    def valid(self):
+        return dict(exit=0, reports=[dict(report=dict(healthy_index=i, completed=True,
+                    all_eight_leases_active=True, two_actuators_and_payloads_verified=True,
+                    steady_seconds=15, steady_applied_cycles=dict(app=3, app2=3),
+                    maximum_fresh_observation_gap_seconds=dict(app=2, app2=2))) for i in (0, 3, 7)])
+
+    def test_complete_matrix(self):
+        observer.validate_application_mixed_result(self.valid())
+
+    def test_failure_partial_and_stale_cannot_pass(self):
+        for change in (lambda s: s.update(exit=1), lambda s: s['reports'].pop(),
+                       lambda s: s['reports'][2]['report'].update(healthy_index=0),
+                       lambda s: s['reports'][0]['report'].update(completed=False),
+                       lambda s: s['reports'][0]['report'].update(all_eight_leases_active=False),
+                       lambda s: s['reports'][0]['report'].update(steady_seconds=14),
+                       lambda s: s['reports'][0]['report'].update(steady_applied_cycles=dict(app=2, app2=3)),
+                       lambda s: s['reports'][0]['report'].update(maximum_fresh_observation_gap_seconds=dict(app=10.01, app2=2))):
+            status = self.valid()
+            change(status)
+            with self.assertRaises(RuntimeError):
+                observer.validate_application_mixed_result(status)
+
+
 if __name__ == '__main__':
     unittest.main()
