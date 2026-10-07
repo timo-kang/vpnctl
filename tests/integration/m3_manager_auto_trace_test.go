@@ -412,7 +412,7 @@ func managerTimeline(packets []managerAutoEvent, cycles []managerAutoCycle, prev
 				}
 			}
 		}
-		if c.Path != desired || c.Applied != (desired != "") {
+		if c.Path != desired {
 			continue
 		}
 		for _, m := range c.Diagnostics.Checkpoints {
@@ -422,7 +422,7 @@ func managerTimeline(packets []managerAutoEvent, cycles []managerAutoCycle, prev
 			if m.Name == "decision_complete" && decided == 0 {
 				decided = int64(m.At)
 			}
-			if (m.Name == "target_routes_applied" || desired == "" && m.Name == "target_routes_blocked") && applied == 0 {
+			if ((desired != "" && c.Applied && m.Name == "target_routes_applied") || (desired == "" && c.Guarded && m.Name == "target_routes_blocked")) && applied == 0 {
 				applied = int64(m.At)
 			}
 		}

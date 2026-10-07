@@ -98,8 +98,15 @@ func TestManagerTimelineKeepsPostFaultCheckpointsFromInflightCycle(t *testing.T)
 	for _, mutate := range []func(){func() { cycles[0].Applied = false }, func() { cycles[0].Applied = true; cycles[0].Target = "app2" }} {
 		mutate()
 		v = managerTimeline(packets, cycles, "p00", "p01", "198.18.0.11", 90)
-		if v["routes_completed"] != 0 || v["decision_complete"] != 0 {
-			t.Fatal("unrelated/failed cycle qualified", v)
+		if v["routes_completed"] != 0 {
+			t.Fatal("unrelated/failed application qualified", v)
+		}
+		wantDecision := int64(110)
+		if cycles[0].Target != "app" {
+			wantDecision = 0
+		}
+		if v["decision_complete"] != wantDecision {
+			t.Fatal("decision confused with application", v)
 		}
 	}
 }
