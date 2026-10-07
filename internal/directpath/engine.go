@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -21,7 +22,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -35,10 +35,13 @@ const MaxPeers = 32
 const Cooldown = 5 * time.Second
 const MaxCooldown = Cooldown + 2*time.Second
 
-// Initial peers need overlapping installation windows despite worker skew.
-// Include one further probe cycle when the first WG handshake completes at a
-// nonce deadline. This never delays removal after a path has reached active.
-const InitialTrialWindow = 3 * time.Second
+// Two independently scheduled endpoints can hold adjacent failed host routes.
+// Bound each unverified installation to two seconds, leaving time for cleanup
+// and an observed relay reply within the five-second fallback test contract.
+// Prefix-free transport staging and prompt verification retries preserve
+// rendezvous; merely shortening the old polling window did not.
+const InitialTrialWindow = 2 * time.Second
+const VerificationInterval = 250 * time.Millisecond
 const CandidateMaxAge = 2 * time.Minute
 
 type Candidate struct {
@@ -64,24 +67,26 @@ type journal struct {
 	Relay     string               `json:"relay"`
 	Config    string               `json:"baseline_config_sha256"`
 	Peers     map[string]Candidate `json:"peers"`
+	Phases    map[string]string    `json:"phases,omitempty"`
 }
 type envelope struct {
 	Journal journal `json:"journal"`
 	Digest  string  `json:"sha256"`
 }
 type Engine struct {
-	relayVerified time.Time
-	poisoned      bool
-	j             journal
-	cfg           config.NodeConfig
-	backend       backend
-	save          func(journal) error
-	unlock        func()
-	retrySequence uint64
-	trialStarted  map[string]time.Time
-	successes     map[string]int
-	cooldown      map[string]time.Time
-	now           func() time.Time
+	relayVerified    time.Time
+	poisoned         bool
+	j                journal
+	cfg              config.NodeConfig
+	backend          backend
+	save             func(journal) error
+	unlock           func()
+	retrySequence    uint64
+	trialStarted     map[string]time.Time
+	handshakeStarted map[string]time.Time
+	successes        map[string]int
+	cooldown         map[string]time.Time
+	now              func() time.Time
 }
 
 func statePath(cfg config.NodeConfig) string { return cfg.WGConfigPath + ".direct.json" }
@@ -153,7 +158,7 @@ func Open(ctx context.Context, cfg config.NodeConfig) (*Engine, error) {
 	if s.Identity.PublicKey != cfg.WGPublicKey {
 		return fail(errors.New("interface public key conflict"))
 	}
-	j := journal{Version: 1, Domain: d, Interface: cfg.WGInterface, Identity: s.Identity, Relay: cfg.ServerPublicKey, Config: baselineConfig(cfg), Peers: map[string]Candidate{}}
+	j := journal{Version: 2, Domain: d, Interface: cfg.WGInterface, Identity: s.Identity, Relay: cfg.ServerPublicKey, Config: baselineConfig(cfg), Peers: map[string]Candidate{}}
 	path := statePath(cfg)
 	if st, err := os.Lstat(path); err == nil {
 		if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 || st.Size() > 128<<10 {
@@ -166,7 +171,7 @@ func Open(ctx context.Context, cfg config.NodeConfig) (*Engine, error) {
 		var v envelope
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.DisallowUnknownFields()
-		if dec.Decode(&v) != nil || dec.Decode(new(any)) != io.EOF || v.Digest != digest(v.Journal) || v.Journal.Version != 1 || v.Journal.Interface != cfg.WGInterface || v.Journal.Peers == nil || len(v.Journal.Peers) > MaxPeers {
+		if dec.Decode(&v) != nil || dec.Decode(new(any)) != io.EOF || v.Digest != digest(v.Journal) || (v.Journal.Version != 1 && v.Journal.Version != 2) || v.Journal.Interface != cfg.WGInterface || v.Journal.Peers == nil || len(v.Journal.Peers) > MaxPeers {
 			return fail(errors.New("invalid direct journal"))
 		}
 		j, err = recoverJournal(cfg, j, v.Journal, s)
@@ -186,6 +191,7 @@ func Open(ctx context.Context, cfg config.NodeConfig) (*Engine, error) {
 		}
 		return atomicfile.Write(path, b, 0600)
 	}
+	j.Version = 2 // Old journals are recovered before the first staged mutation.
 	e := newEngine(cfg, j, k, save)
 	e.unlock = unlock
 	if err = save(j); err != nil {
@@ -199,6 +205,9 @@ func Open(ctx context.Context, cfg config.NodeConfig) (*Engine, error) {
 // recovering the same baseline: changed prefixes/relay must allow explicit
 // dedicated-interface recreation, without adopting peers on that new device.
 func recoverJournal(cfg config.NodeConfig, current, prior journal, s snapshot) (journal, error) {
+	if err := validatePhases(prior); err != nil {
+		return current, err
+	}
 	if relaycatalog.ValidatePublicKey(prior.Relay) != nil {
 		return current, errors.New("invalid journal relay")
 	}
@@ -270,9 +279,10 @@ func RecoverExisting(ctx context.Context, cfg config.NodeConfig) (bool, error) {
 }
 
 func newEngine(cfg config.NodeConfig, j journal, b backend, save func(journal) error) *Engine {
-	return &Engine{j: j, cfg: cfg, backend: b, save: save, successes: map[string]int{}, trialStarted: map[string]time.Time{}, cooldown: map[string]time.Time{}, now: time.Now}
+	return &Engine{j: j, cfg: cfg, backend: b, save: save, successes: map[string]int{}, trialStarted: map[string]time.Time{}, handshakeStarted: map[string]time.Time{}, cooldown: map[string]time.Time{}, now: time.Now}
 }
 func (e *Engine) persist(next journal) error {
+	next.Version = 2
 	err := e.save(next)
 	if err == nil || atomicfile.Replaced(err) {
 		e.j = next
@@ -379,12 +389,19 @@ func (e *Engine) relayOK(s snapshot) bool {
 	return reflect.DeepEqual(a, b)
 }
 func (e *Engine) remove(ctx context.Context, keys []string) error {
+	_, err := e.removeWhere(ctx, keys, nil)
+	return err
+}
+
+// The optional filter consumes the last ownership readback before removal.
+// General withdrawal/recovery remains unconditional for proven owned peers.
+func (e *Engine) removeWhere(ctx context.Context, keys []string, allow func(kernelPeer, Candidate) bool) ([]string, error) {
 	if len(keys) == 0 {
-		return nil
+		return nil, nil
 	}
 	s, err := e.inspect(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var safe, installed []string
 	var errs []error
@@ -394,8 +411,11 @@ func (e *Engine) remove(ctx context.Context, keys []string) error {
 			continue
 		}
 		if p, exists := s.Peers[key]; exists {
-			if !owned(p, c) {
+			if !e.owned(p, c) {
 				errs = append(errs, errors.New("direct peer ownership conflict"))
+				continue
+			}
+			if allow != nil && !allow(p, c) {
 				continue
 			}
 			installed = append(installed, key)
@@ -404,36 +424,42 @@ func (e *Engine) remove(ctx context.Context, keys []string) error {
 	}
 	if len(installed) != 0 {
 		if err = e.backend.Remove(ctx, installed); err != nil {
-			return errors.Join(append(errs, err)...)
+			return nil, errors.Join(append(errs, err)...)
 		}
 		s, err = e.inspect(ctx)
 		if err != nil {
-			return errors.Join(append(errs, err)...)
+			return nil, errors.Join(append(errs, err)...)
 		}
 		for _, key := range installed {
 			if _, exists := s.Peers[key]; exists {
-				return errors.Join(append(errs, errors.New("direct removal readback failed"))...)
+				return nil, errors.Join(append(errs, errors.New("direct removal readback failed"))...)
 			}
 		}
 	}
 	if len(safe) == 0 {
-		return errors.Join(errs...)
+		return nil, errors.Join(errs...)
 	}
 	for _, key := range safe {
 		delete(e.successes, key)
 		delete(e.trialStarted, key)
+		delete(e.handshakeStarted, key)
 	}
 	if e.poisoned {
 		// Kernel quiescence remains possible with a failed journal. Retain all
 		// durable intents for idempotent recovery after storage is repaired.
-		return errors.Join(append(errs, errors.New("direct peers quiesced; journal repair/reopen required"))...)
+		return nil, errors.Join(append(errs, errors.New("direct peers quiesced; journal repair/reopen required"))...)
 	}
 	next := e.j
 	next.Peers = clone(e.j.Peers)
+	next.Phases = maps.Clone(e.j.Phases)
 	for _, key := range safe {
 		delete(next.Peers, key)
+		delete(next.Phases, key)
 	}
-	return errors.Join(append(errs, e.persist(next))...)
+	if err := e.persist(next); err != nil {
+		return nil, errors.Join(append(errs, err)...)
+	}
+	return safe, errors.Join(errs...)
 }
 func clone(p map[string]Candidate) map[string]Candidate {
 	out := make(map[string]Candidate, len(p))
@@ -486,16 +512,20 @@ func (e *Engine) add(ctx context.Context, candidates []Candidate) error {
 	}
 	next := e.j
 	next.Peers = clone(e.j.Peers)
+	next.Phases = maps.Clone(e.j.Phases)
+	if next.Phases == nil {
+		next.Phases = map[string]string{}
+	}
 	for _, c := range candidates {
 		next.Peers[c.Key] = c
+		next.Phases[c.Key] = "staging"
 	}
 	if err = e.persist(next); err != nil {
 		return err
 	}
 	// One durable batch intent precedes all mutations. A partial command result
 	// remains recoverable; no per-peer subprocess/readback/fsync storm at N² scale.
-	started := e.now()
-	if err = e.backend.Add(ctx, candidates); err != nil {
+	if err = e.backend.Stage(ctx, candidates); err != nil {
 		return err
 	}
 	s, err = e.inspect(ctx)
@@ -503,10 +533,20 @@ func (e *Engine) add(ctx context.Context, candidates []Candidate) error {
 		return err
 	}
 	for _, c := range candidates {
-		if !matches(s.Peers[c.Key], c) {
-			return errors.New("direct installation readback failed")
+		if !staged(s.Peers[c.Key], c) || s.Peers[c.Key].Endpoint != c.Endpoint {
+			return errors.New("direct staging readback failed")
 		}
-		e.trialStarted[c.Key] = started
+	}
+	next = e.j
+	next.Phases = maps.Clone(e.j.Phases)
+	for _, c := range candidates {
+		next.Phases[c.Key] = "handshake"
+	}
+	if err := e.persist(next); err != nil {
+		return err
+	}
+	for _, c := range candidates {
+		e.handshakeStarted[c.Key] = e.now()
 	}
 	return nil
 }
@@ -648,37 +688,73 @@ func (e *Engine) Step(ctx context.Context, candidates []Candidate) ([]Status, er
 	if err := e.add(ctx, additions); err != nil {
 		return statuses, err
 	}
-	before, err := e.inspect(ctx)
+	staging, err := e.inspect(ctx)
 	if err != nil {
 		return statuses, err
+	}
+	var promote, stalled []Candidate
+	for _, key := range sortedKeys(trials) {
+		c := trials[key]
+		switch e.j.Phases[key] {
+		case "handshake":
+			p := staging.Peers[key]
+			if !staged(p, c) || p.Endpoint != c.Endpoint {
+				return statuses, errors.New("staged direct peer changed")
+			}
+			if p.Handshake <= 0 || p.RX == 0 || p.TX == 0 {
+				statuses = append(statuses, Status{c.ID, "handshaking", "relay_route_preserved", c.Generation})
+				delete(trials, key)
+				if since := e.handshakeStarted[key]; !since.IsZero() && e.now().Sub(since) >= handshakeRestartDelay(e.cfg.WGPublicKey, c.Key) {
+					stalled = append(stalled, c)
+				}
+			} else {
+				promote = append(promote, c)
+			}
+		case "staging", "activating":
+			return statuses, errors.New("interrupted direct mutation; reset required")
+		}
+	}
+	restarted, err := e.restartStalled(ctx, stalled)
+	if err != nil {
+		return statuses, err
+	}
+	for i := range statuses {
+		if restarted[statuses[i].ID] {
+			statuses[i].Reason = "transport_restarted"
+		}
+	}
+	refreshBefore := len(promote) != 0
+	// Staging can outlive the relay proof cache. Refresh the fallback before
+	// assigning any application prefix, while keeping existing active peers.
+	if len(promote) > 0 && e.verifyRelay(ctx) != nil {
+		for _, c := range promote {
+			statuses = append(statuses, Status{c.ID, "relay_unverified", "relay_baseline_unverified", c.Generation})
+			delete(trials, c.Key)
+		}
+		promote = nil
+	}
+	if err := e.promote(ctx, promote); err != nil {
+		return statuses, err
+	}
+	// With no promotion attempt, this snapshot already precedes all nonce
+	// requests. Stable active peers need only the usual before/after readbacks.
+	before := staging
+	if refreshBefore {
+		before, err = e.inspect(ctx)
+		if err != nil {
+			return statuses, err
+		}
 	}
 	for key, c := range trials {
 		if !matches(before.Peers[key], c) {
 			return statuses, errors.New("direct peer changed before verification")
 		}
 	}
-	results := make(map[string]error, len(trials))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for key, c := range trials {
-		probeCtx := ctx
-		cancel := func() {}
-		if started, initial := e.trialStarted[key]; initial && e.successes[key] == 0 {
-			// A nearly expired trial must not start another full one-second
-			// request. Bound unverified occupancy from before kernel install.
-			probeCtx, cancel = context.WithTimeout(ctx, InitialTrialWindow-e.now().Sub(started))
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer cancel()
-			err := e.backend.Probe(probeCtx, c)
-			mu.Lock()
-			results[key] = err
-			mu.Unlock()
-		}()
+	results, expiredStatuses, err := e.probeTrials(ctx, trials, before)
+	statuses = append(statuses, expiredStatuses...)
+	if err != nil {
+		return statuses, err
 	}
-	wg.Wait()
 	if ctx.Err() != nil {
 		return statuses, ctx.Err()
 	}
@@ -690,26 +766,15 @@ func (e *Engine) Step(ctx context.Context, candidates []Candidate) ([]Status, er
 	for _, key := range sortedKeys(trials) {
 		c := trials[key]
 		p := after.Peers[key]
-		old := before.Peers[key]
+		result := results[key]
+		old := result.before
 		if !matches(p, c) {
 			return statuses, errors.New("direct peer changed during verification")
 		}
-		if results[key] != nil || p.Handshake <= 0 || p.RX <= old.RX || p.TX <= old.TX {
-			reason := "direct_traffic_not_observed"
-			if p.Handshake <= 0 {
-				reason = "direct_handshake_missing"
-			}
-			if results[key] != nil {
-				reason = "overlay_probe_failed"
-				var netErr net.Error
-				if errors.As(results[key], &netErr) && netErr.Timeout() {
-					reason = "overlay_probe_timeout"
-				}
-				if p.Handshake <= 0 {
-					reason += "_no_handshake"
-				}
-			}
-			started, initial := e.trialStarted[key]
+		started, initial := e.trialStarted[key]
+		trialExpired := initial && e.successes[key] < 2 && (e.now().Before(started) || e.now().Sub(started) >= InitialTrialWindow)
+		if trialExpired || result.err != nil || p.Handshake <= 0 || p.RX <= old.RX || p.TX <= old.TX {
+			reason := probeFailureReason(p, result.err)
 			age := e.now().Sub(started)
 			if initial && e.successes[key] < 2 && age >= 0 && age < InitialTrialWindow {
 				e.successes[key] = 0
@@ -720,7 +785,9 @@ func (e *Engine) Step(ctx context.Context, candidates []Candidate) ([]Status, er
 			e.cooldown[c.ID] = e.now().Add(e.retryDelay(c))
 			statuses = append(statuses, Status{c.ID, "relay_unverified", reason, c.Generation})
 		} else {
-			e.successes[key] = min(2, e.successes[key]+1)
+			if !result.counted {
+				e.successes[key] = min(2, e.successes[key]+1)
+			}
 			state := "probing"
 			if e.successes[key] >= 2 {
 				state = "active"

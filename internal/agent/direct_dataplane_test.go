@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
@@ -136,4 +137,53 @@ func TestCandidateBootAgeIncludesSuspendEvenWithWallRollback(t *testing.T) {
 	if !freshDirectBoot(received, received+uint64(time.Second)) {
 		t.Fatal("fresh boot age rejected")
 	}
+}
+
+type pacedDataplane struct {
+	calls    chan time.Time
+	attempts int
+}
+
+func (e *pacedDataplane) Step(_ context.Context, c []directpath.Candidate) ([]directpath.Status, error) {
+	if len(c) == 0 {
+		return nil, nil
+	}
+	e.calls <- time.Now()
+	e.attempts++
+	state := "probing"
+	if e.attempts >= 2 {
+		state = "active"
+	}
+	return []directpath.Status{{ID: c[0].ID, State: state, Generation: c[0].Generation}}, nil
+}
+func (*pacedDataplane) Reset(context.Context) error { return nil }
+func (*pacedDataplane) Close()                      {}
+
+func TestDataplaneInitialProofCadenceSurvivesUnchangedUpdates(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg, p := directFixture()
+		updates := make(chan directSnapshot, 2)
+		fresh := func() directSnapshot {
+			return directSnapshot{peers: []api.PeerCandidate{p}, receivedAt: time.Now(), receivedBoot: directBootNow()}
+		}
+		updates <- fresh()
+		e := &pacedDataplane{calls: make(chan time.Time, 8)}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runDataplaneWorker(ctx, cfg, updates, func(context.Context) (dataplaneEngine, error) { return e, nil })
+		}()
+		defer func() { cancel(); <-done }()
+		first := <-e.calls
+		updates <- fresh()
+		second := <-e.calls
+		if gap := second.Sub(first); gap != directpath.VerificationInterval {
+			t.Fatal("initial verification delayed by identical update", gap)
+		}
+		third := <-e.calls
+		if gap := third.Sub(second); gap != time.Second {
+			t.Fatal("active peer retained fast trial polling", gap)
+		}
+	})
 }

@@ -27,6 +27,7 @@ type m3AuthorityFixture struct {
 	robot, target, private, results, node, worker string
 	recipients                                    []*m3Recipient
 	nodeSupervisor                                *networkProcess
+	nodeGroup                                     *os.File
 	plan                                          relayplan.Plan
 	spec                                          relaycatalog.Spec
 }

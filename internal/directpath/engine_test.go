@@ -38,6 +38,21 @@ func (k *fakeKernel) Snapshot(context.Context) (snapshot, error) {
 	}
 	return s, nil
 }
+func (k *fakeKernel) Stage(_ context.Context, candidates []Candidate) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, c := range candidates {
+		if k.saved == nil || k.saved.Peers[c.Key] != c || k.saved.Phases[c.Key] != "staging" {
+			return errors.New("staging before durable intent")
+		}
+		p := kernelPeer{Key: c.Key, Endpoint: c.Endpoint, Keepalive: 1}
+		if k.mode != "stage-silent" {
+			p.Handshake, p.RX, p.TX = 10, 100, 100
+		}
+		k.s.Peers[c.Key] = p
+	}
+	return nil
+}
 func (k *fakeKernel) Add(_ context.Context, candidates []Candidate) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -46,7 +61,9 @@ func (k *fakeKernel) Add(_ context.Context, candidates []Candidate) error {
 			return errors.New("mutation before durable intent")
 		}
 		k.adds++
-		k.s.Peers[c.Key] = kernelPeer{Key: c.Key, Endpoint: c.Endpoint, Prefixes: []string{c.Address + "/32"}, Keepalive: c.Keepalive}
+		p := k.s.Peers[c.Key]
+		p.Key, p.Endpoint, p.Prefixes, p.Keepalive = c.Key, c.Endpoint, []string{c.Address + "/32"}, c.Keepalive
+		k.s.Peers[c.Key] = p
 		if k.mode == "add-error" {
 			return errors.New("lost command response")
 		}
@@ -86,6 +103,8 @@ func (k *fakeKernel) Probe(ctx context.Context, c Candidate) error {
 	p := k.s.Peers[c.Key]
 	if k.mode != "no-handshake" {
 		p.Handshake = 10
+	} else {
+		p.Handshake = 0
 	}
 	if k.mode != "no-rx" {
 		p.RX += 100
@@ -139,7 +158,11 @@ func TestActiveRequiresOverlayRoundTripAndPeerTraffic(t *testing.T) {
 				if len(r) != 1 || r[0].State != want {
 					t.Fatal(r, want)
 				}
-				now = now.Add(InitialTrialWindow)
+				if mode == "healthy" {
+					now = now.Add(VerificationInterval)
+				} else {
+					now = now.Add(InitialTrialWindow)
+				}
 			}
 			_, exists := k.s.Peers[c.Key]
 			if exists != (mode == "healthy") {
@@ -624,44 +647,6 @@ func TestRetrySchedulesAreBoundedAndVaryAcrossDirectionsAndAttempts(t *testing.T
 			t.Fatal("retry scheduling stayed synchronized", x, y)
 		}
 		previous = x
-	}
-}
-
-// Model the one-second worker's quantization, not just distinct subsecond hash
-// values. Both three-second installation windows must overlap long enough for
-// an actual probe. Equal rounded periods can otherwise stay out of phase.
-func TestRetryWindowsRendezvousAcrossWorkerPhases(t *testing.T) {
-	type window struct{ from, until time.Duration }
-	windows := func(local, remote byte, phase time.Duration) []window {
-		e := &Engine{cfg: config.NodeConfig{WGPublicKey: key(local)}}
-		var out []window
-		for from := phase; from < time.Minute; {
-			out = append(out, window{from, from + InitialTrialWindow})
-			delay := e.retryDelay(Candidate{Key: key(remote)})
-			// A cooldown is inspected once each second; fractional jitter is
-			// rounded up, exactly the information lost by the old unit test.
-			delay = (delay + time.Second - 1) / time.Second * time.Second
-			from += InitialTrialWindow + delay
-		}
-		return out
-	}
-	for local := byte(1); local <= 16; local++ {
-		for remote := byte(17); remote <= 32; remote++ {
-			for skew := time.Duration(0); skew <= 10*time.Second; skew += 250 * time.Millisecond {
-				a, b := windows(local, remote, 0), windows(remote, local, skew)
-				met := false
-				for _, x := range a {
-					for _, y := range b {
-						if min(x.until, y.until)-max(x.from, y.from) >= time.Second {
-							met = true
-						}
-					}
-				}
-				if !met {
-					t.Fatalf("no probe-sized overlap within one minute: keys=%d/%d skew=%s", local, remote, skew)
-				}
-			}
-		}
 	}
 }
 

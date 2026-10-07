@@ -304,6 +304,7 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 	}
 	ctx, cancel := context.WithTimeout(parent, MaxDuration)
 	defer cancel()
+	ctx = context.WithValue(ctx, targetConnectLimitKey{}, selector.MaxConnectTime())
 	report, _ := e.observeTargetFiltered(ctx, id, controller, timeout, e.candidateProbe(), selector.ObservationExclusion)
 	for j := range report.Paths {
 		k := e.index(report.Paths[j].PathID)
@@ -362,6 +363,7 @@ func (e *Engine) verifyTargetChoice(ctx context.Context, g TargetGuard, route *T
 	if entry.Generation != d.Generation || d.ControllerID != entry.Controller || d.NodeID != entry.Node || d.TargetID != g.TargetID || !time.Now().Before(d.ValidUntil) {
 		return entry, ErrLeaseExpired
 	}
+	ctx = context.WithValue(ctx, targetConnectLimitKey{}, d.Policy.MaxConnectTime)
 	proof := e.observePrepared(ctx, entry, target, timeout, TargetObservation{PathID: route.PathID}, e.candidateProbe())
 	if proof.State != "reachable" {
 		return entry, errors.New("candidate revalidation failed: " + proof.Reason)

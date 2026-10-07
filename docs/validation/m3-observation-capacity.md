@@ -227,3 +227,244 @@ back. Persisted approval changes still precede a longer grant. Failure still
 blocks independently. No lease lifetime, wave budget, freshness, confirmation,
 FIFO or container resource bound changes. Final exact-commit CI and raw artifact
 review must pass before this recurrence can be considered resolved.
+
+## Separate robot CPU accounting (#185 / #186)
+
+The earlier 0.5 CPU limit covered an entire one-vCPU guest: controller, relays,
+robot workers and the measuring process. That profile reproduced observation
+gaps over 10s and real independent-app interruption, but cannot establish a
+robot-only minimum CPU requirement. The failures remain preserved. The
+`c826d34` public-view copy optimization reduced the local race eight-path
+`Status` benchmark from 1.460ms to 1.007–1.015ms (500 iterations, twice), with
+all clock checkpoint writes/fsyncs and structural validation intact. Its
+whole-VM 0.5 CPU mixed test still failed at healthy positions 0/3/7. A faster
+microbenchmark is not a resolution of #186.
+
+A separate profile places only the live robot supervisor and both target
+actuators in a new guest cgroup. `clone3(CLONE_INTO_CGROUP)` applies the limit
+before the processes execute, and command children inherit it. The controller,
+relay supervisors and measurement process are explicitly checked to be outside
+this cgroup. Initial enrollment and candidate preparation are also outside;
+this profile does **not** qualify resource-constrained bootstrap or rebuilding.
+The one-CPU, 2GiB outer container still limits the entire VM, with 768MiB of guest
+RAM. The guest's CPU model and the outer quota remain relevant to interpretation.
+
+Only the identity-guarded QEMU guest may create this role cgroup. No host
+network, cgroup, kernel, clock or power configuration is changed. Cleanup kills
+and removes only this invocation's newly created guest cgroup. Existing long
+experiments remain untouched.
+
+```sh
+VPNCTL_VM_RACE=1 VPNCTL_VM_CPUS=1 \
+  VPNCTL_ARTIFACT_DIR=/tmp/robot-half-new-run \
+  scripts/test-vm.sh --case application-capacity-4 application-capacity-8 \
+  --robot-cpus 0.5
+```
+
+The robot limit accepts `1`, `0.5` or `0.25`; use a new empty artifact directory
+for each run. `VPNCTL_TEST_BINARY` can supply a deployment binary; record its
+origin and digest separately from the integration suite. `VPNCTL_VM_IMAGE` may
+reuse a compatible image built from the current `tests/vm` sources, not an old
+agent that lacks this profile. `VPNCTL_VM_RACE=0|1` identifies the checkout build
+and suite; it cannot prove how an externally supplied binary was built.
+
+Each 4/8-path matrix positions the sole healthy target path first, middle and
+last, while the other 3/7 paths remain blackholed. The configured proof budget
+is 2s; an actuator stops TCP establishment at its immutable connection-latency
+ceiling (1s by default) while retaining the proof budget for pre/post evidence.
+Both automatic actuators remain
+active, and the independent target must keep passing real TCP payloads. Every
+candidate's live kernel gate is sampled. Qualification requires at least 15s
+and three additional applied cycles per app, with every successful observation
+gap within 10s. The original wave, freshness, authority and fixture deadlines
+remain unchanged. The resource evidence includes the guest CPU model/vCPU count and before/after
+`cpu.max`, `cpu.stat`, pressure and verified role placement; missing, changed, regressed
+or nonadvancing counters fail validation. This is a short capacity regression,
+not p95, no-uplink, long-term availability or hardware qualification.
+
+Local race result at `6079b01`, outer VM 1 CPU, robot-only 0.5 CPU:
+
+| Candidates | Healthy positions | Result | First payload | Largest fresh observation gap |
+| --- | --- | --- | --- | --- |
+| 4 | 0 / 1 / 3 | 3/3 passed | 5.953–6.228s | 3.710s |
+| 8 | 0 / 3 / 7 | 3/3 passed | 7.889–8.269s | 5.347s |
+
+Both matrices measured actual robot cgroup throttling. Evidence is retained in
+`/tmp/vpnctl-capacity-robot-half`, with the original failed whole-VM profile in
+`/tmp/vpnctl-capacity-clone-half`. These are local artifacts; the CI jobs upload
+`m3-robot-capacity-4` and `m3-robot-capacity-8` as shareable independent results.
+A local pass does not predict a slower remote runner's result.
+
+Candidate `confirmation_gap_ns` now distinguishes a fresh successful probe whose
+previous success arrived more than the policy's freshness interval earlier.
+Eligibility still resets to one success and must be reconfirmed. The field is
+absent on a new sequence, after normal recovery, or when a previous unknown or
+failure had already broken continuity. It diagnoses the observed gap without
+attributing it to CPU, the network, or a particular lock by inference alone.
+
+#185 still needs deployment-representative CPU/storage, startup/rebuild and
+longer load profiles. #186 retains the original CI failure with incomplete
+terminal diagnostics: a newer pass cannot retroactively prove its root cause.
+Whole-VM low-budget failure, role-limited success and original CI failure must
+remain separate evidence. M2's successful 24h baseline and M3's other release
+gates are not changed by these short runs.
+
+## Policy-bounded TCP establishment (2026-10-07, #185)
+
+[CI 37595610104, CPU8](https://github.com/timo-kang/vpnctl/actions/runs/37595610104/job/112707371519)
+failed all three healthy positions despite successful independent-target TCP and
+WireGuard observations. Their 10.07–11.87s gaps broke the unchanged 10s confirmation
+window and caused real application quarantine. The fixture never runs the direct
+engine. This is not a cgroup-evidence parsing failure or proof that CPU throttling
+alone caused the delay. Public diagnostics show maintenance, observation and
+admission costs; the source behavior predates this PR.
+
+A candidate connect taking over the policy's `MaxConnectTime` cannot be selected,
+yet a 2s proof timeout previously kept waiting beyond the default 1s ceiling.
+The actuator now limits only TCP establishment to that immutable policy ceiling.
+Pre-connect route/counter reads and post-connect route/counter/ownership checks
+retain their original parent budgets. Raw `ObserveTarget` has no selector policy
+and keeps its existing timeout. The selector still validates the measured
+connection duration, two consecutive proofs, 10s freshness and all authority.
+The inclusive `<=` boundary is retained; the connection context expires one
+nanosecond beyond it. This is deadline arithmetic, not a nanosecond scheduling SLO.
+
+Deterministic tests reproduce the unnecessary blackhole wait and an initially
+incorrect exclusive deadline. They cover a 900ms connect plus 200ms evidence on
+each side, exact 1s success, a custom 1.5s policy, a shorter parent deadline,
+missing WG counter growth, policy propagation, unrestricted diagnostic calls and
+cancellation that joins every worker. The recorded CPU8 timestamps separately
+reproduce lost eligibility; they are not a performance simulation.
+
+At source `3fa9aa2`, production VM tests with robot-only 0.5 CPU passed all six
+cases (4/8 candidates, healthy first/middle/last). First payload was 3.256–3.285s
+for four candidates and 4.065–4.237s for eight; the largest eligible observation
+gap was 2.056s and 2.758s respectively. Both applications and all kernel leases
+remained valid through at least 15s and three further applied cycles. Evidence:
+`/tmp/vpnctl-fix-cpu-connect-v1`. The prior failed CI stays failed; this local result
+does not replace exact-head remote CI or establish a minimum robot CPU guarantee.
+
+The same production source also passed all six robot-only 0.25 CPU cases in
+`/tmp/vpnctl-fix-cpu-connect-quarter-v1`: four-path first payload 4.590–4.680s,
+maximum gap 3.301s; eight-path first payload 6.307–6.501s, maximum gap 4.499s.
+Race instrumentation has a separate cost profile and requires its own result.
+
+At clean source `896a53b`, the CI-equivalent race build also passed all six
+robot-only 0.5 CPU cases in `/tmp/vpnctl-fix-cpu-connect-race-v1`. Four-path
+first payload was 3.971–4.158s and its largest fresh observation gap was 2.679s;
+eight-path values were 5.987–6.371s and 4.423s. Every position retained both
+application payloads and all candidate leases for at least 15s and four additional
+applied cycles per app. This is separate local evidence; remote CI and the
+deployment/startup/long-duration qualifications above remain required.
+
+Remote [CI 37602539188](https://github.com/timo-kang/vpnctl/actions/runs/37602539188)
+at `b4a95c7` also passed the race robot-only CPU8 profile in all three healthy
+positions. First payload was 8.201–9.026s, and the largest fresh observation gap
+was 5.906s, below the unchanged 10s boundary. Both applications and all leases
+passed through at least 15s and three further applied cycles. These values are
+rounded upward where used as bounds. The run's separate candidate lifecycle
+unit-test failure is retained; a passing CPU job does not make the entire run pass.
+
+
+## Recurrent CPU8 freshness failure (2026-10-07)
+
+[CI 37604001478, CPU8](https://github.com/timo-kang/vpnctl/actions/runs/37604001478/job/112740060969)
+at `b119603` failed healthy positions 0 and 7. The runtime was unchanged from
+`b4a95c7`; this newer failure supersedes any assumption that the earlier CPU8
+pass established capacity. Fresh successful proofs were 10.662s apart at
+position 0 and 10.727s / 10.685s apart at position 7, resetting confirmation and
+quarantining the application. Position 3 passed with a largest gap of 9.988s.
+The unchanged 10s policy correctly rejected stale continuity.
+
+The failed guest reported EPYC 7763 versus EPYC 9V45 in the earlier passing run.
+Both used one guest vCPU and a robot-only 0.5 CPU quota. Approximate CPU rates,
+using cgroup bandwidth periods corroborated by worker timestamps, were 0.98 CPU
+for the whole guest, 0.48 for the robot and 0.50 elsewhere. Robot throttling was
+nearly absent. Whole-guest saturation is supported; CPU model alone is not a
+proved cause. Controller, relay and measurement costs are not individually
+separated in these artifacts, and host-QEMU pressure was not recorded.
+
+Median supervisor maintenance grew from 0.621s to 1.395s, app work excluding
+admission from 2.414s to 3.948s, and app2 from 1.819s to 3.918s. FIFO order stayed
+intact; its participants held ownership longer. Concurrent phase sums cannot be
+added as wall time. A stable supervisor/app/app2 cohort executes about 767 child
+processes, including roughly 120 fresh `cat` reads of `rp_filter`.
+
+Optimization ledger (all checks and freshness limits retained):
+
+| Candidate | Measurement | Decision |
+| --- | --- | --- |
+| Fresh bounded native `rp_filter` reads | 1,000 reads × 3, race, Ryzen 9800X3D: original command 260.659–267.245µs/read; native command path 4.222–4.721µs/read | Kept: roughly 120 fewer children per cohort in the VM; no cached settings or skipped checks |
+| FIFO polling | Two 25ms waiters: 0.0119–0.0136 CPU production, 0.0315–0.0318 race on the same local CPU | Measured wait-only predecessor hint; same cadence, full validation before every admission |
+| Repeated public inventory decoding | Not yet isolated in a representative profile | No speculative cache added |
+
+A separate, stricter diagnostic limits the whole local VM to 0.5 CPU while
+retaining the robot's 0.5 quota. The original clean `b119603` passed positions
+0 and 3 (maximum gaps 8.798s and 9.103s) but failed position 7 with
+`application lost fresh continuous eligibility`. Its evidence is retained at
+`/tmp/vpnctl-cpu-baseline-half-v1`; this is distinct from the remote qualification
+profile and does not replace it. The native-read comparison in `/tmp/vpnctl-cpu-native-half-v1` passed all three
+positions and reduced the measured child-process work (supervisor 76 to 60
+kernel commands; complete app cycles roughly 52–54 fewer). Related five-package
+race tests, full vet and independent boundary review passed. Missing, oversized,
+symlink, FIFO and cancelled reads fail closed. Every pre/post check still reads
+both current settings; nonzero or malformed values remain conflicts.
+
+End-to-end headroom remains insufficient: the largest steady eligible gap was
+9.706s, and app2 recorded 10.157–10.295s confirmation gaps during initial
+activation. A pass in this short fixture is not a claim that all gaps disappeared
+or that the slower remote profile is resolved. The original failures remain
+retained. FIFO polling cost is addressed below; final same-profile comparison and
+exact-head CI remain required before merging.
+
+
+### Bound the cost of waiting without changing admission authority
+
+The FIFO queue now retains the last fully validated predecessor's slot, ticket
+and inode as a waiting hint. Each 25ms poll freshly opens and validates the
+metadata file and that slot. A still-locked matching predecessor can only keep
+the caller waiting. Allocation, admission and every changed or missing hint
+still require the original complete 32-slot scan under the metadata lock.
+Cancelled contexts stop before filesystem work; no cached approval or lease is
+introduced. Other corruption may remain unobserved while blocked, but is always
+checked before any turn can be granted.
+
+Independent review rejected the first hint implementation: an unlocked-slot
+`flock` probe outside the metadata lock could briefly look like a live queue
+member and falsely return `ErrAdmissionFull` with only 31 actual tickets.
+A controlled preemption with real files/locks reproduced it. The final hint
+holds the metadata lock and closes the probed slot before releasing that guard;
+the same reproduction passes. No production test hook was added.
+
+Real inotify regressions require at most two files per blocked poll, forbid
+slot inspection during metadata publication, and require a complete scan after
+an inode change even if its ticket is identical. Tests cover partial publication,
+rename, replacement, symlink, wrong permissions, corruption, same-inode ticket
+reuse, FIFO rejoin, cancelled waits and real process death. The full relaycache
+race suite and independent review passed.
+
+The same two-waiter, 25ms, 5s × 3 benchmark reduced CPU from 0.0119–0.0136 to
+0.00314–0.00320 cores in production and from 0.0315–0.0318 to 0.00512–0.00614
+with race instrumentation. Tight per-poll CPU fell from 106–108µs to
+6.71–6.73µs production, and from 294–297µs to 17.68–18.12µs race. These are
+local Ryzen 9800X3D measurements; the end-to-end VM qualification is separate.
+
+
+The combined implementation at clean `137fafd` passed the same stricter local
+race VM comparison (whole VM 0.5 CPU, robot quota 0.5 CPU). All three healthy
+positions retained both actual payloads and all eight candidate leases through
+at least 21s and three further applied cycles per application:
+
+| Healthy position | First payload | Steady observation window | Largest fresh eligible gap |
+| --- | --- | --- | --- |
+| 0 | 12.203s | 21.791s | 7.812s |
+| 3 | 11.311s | 22.086s | 8.200s |
+| 7 | 13.796s | 24.225s | 8.907s |
+
+Evidence: `/tmp/vpnctl-cpu-native-hint-half-v1`. The recorded rows contain no
+confirmation-gap reset; the original failed position 7 had a 10.892s
+confirmation gap. The intermediate native-read-only result and its marginal
+9.706s bound remain recorded above. This is a finite diagnostic on the same
+local hardware, not a guaranteed minimum CPU specification or p95 estimate.
+Final remote CI uses its original whole-VM 1 CPU / robot 0.5 CPU profile, including
+separate four- and eight-candidate cases. Its pass is required independently.

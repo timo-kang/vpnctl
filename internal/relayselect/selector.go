@@ -39,11 +39,14 @@ func (p Policy) Validate() error {
 
 type Candidate struct {
 	relayobserve.TargetObservation
-	ConsecutiveSuccesses int    `json:"consecutive_successes"`
-	Eligible             bool   `json:"eligible"`
-	Exclusion            string `json:"exclusion,omitempty"`
-	Samples              int    `json:"connect_samples"`
-	Failures             int    `json:"connect_failures"`
+	ConsecutiveSuccesses int `json:"consecutive_successes"`
+	// Diagnostic only: a fresh success arrived too late to continue the prior
+	// confirmation sequence. It does not identify CPU load as the cause.
+	ConfirmationGap time.Duration `json:"confirmation_gap_ns,omitempty"`
+	Eligible        bool          `json:"eligible"`
+	Exclusion       string        `json:"exclusion,omitempty"`
+	Samples         int           `json:"connect_samples"`
+	Failures        int           `json:"connect_failures"`
 	// FailureFraction is a bounded 16-attempt TCP connect window, never packet loss.
 	FailureFraction float64 `json:"connect_failure_fraction"`
 }
@@ -96,6 +99,11 @@ func New(policy Policy) (*Selector, error) {
 	}
 	return &Selector{policy: policy, histories: map[string]*history{}, now: time.Now, boot: bootTime}, nil
 }
+
+// MaxConnectTime is the immutable ceiling used by Decide. Actuators may stop
+// waiting for a TCP connect that could no longer qualify, while retaining their
+// full budgets for the surrounding ownership and transfer evidence.
+func (s *Selector) MaxConnectTime() time.Duration { return s.policy.MaxConnectTime }
 
 // ObservationExclusion identifies candidates that this immutable policy cannot
 // select, even with perfect health. Skipping their socket proofs grants no
@@ -219,6 +227,9 @@ func (s *Selector) Decide(report relayobserve.TargetReport) Decision {
 			h.attempts = appendAttempt(h.attempts, false)
 			// A gap or failed/unknown observation breaks continuous health.
 			if !h.observed.IsZero() && c.ObservedAt.Sub(h.observed) > s.policy.MaxAge {
+				if h.successes > 0 {
+					c.ConfirmationGap = c.ObservedAt.Sub(h.observed)
+				}
 				h.successes = 0
 				h.healthySince = time.Time{}
 			}

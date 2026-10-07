@@ -4,7 +4,9 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
+import re
 import socket
 import subprocess
 import time
@@ -265,6 +267,96 @@ def host_clock():
             'wall_ns': time.time_ns(), 'monotonic_ns': time.monotonic_ns(),
             'boottime_ns': time.clock_gettime_ns(time.CLOCK_BOOTTIME)}
 
+DIRECT_SCOPE = 'actual WG/overlay reachability and local relay fallback; not application target or multi-relay selection SLO'
+DIRECT_FLAGS = ('completed', 'relay_probe_independent_process', 'initial_all_pairs_active',
+                'startup_supervisor_recovered', 'fallback_overlay_ok', 'udp_success_not_dataplane_success',
+                'offline_recovery_verified', 'foreign_routes_preserved', 'concurrent_writer_rejected',
+                'corrupt_journal_preserves_kernel', 'offline_restart_recovers_owned_peers',
+                'serve_restart_preserves_routes', 'foreign_peer_preserved', 'baseline_config_change_rejected')
+
+def validate_direct_result(status, nodes, fault='outer-wg'):
+    fixture_id = f'direct-inner-{nodes}' if fault == 'inner-nonce' else f'direct-{nodes}'
+    fixture_prefix = f'direct-dataplane-inner-nonce-{nodes}-' if fault == 'inner-nonce' else f'direct-dataplane-{nodes}-'
+    if (fault not in ('outer-wg', 'inner-nonce') or type(nodes) is not int or nodes not in (2, 3, 8, 32) or not isinstance(status, dict)
+            or type(status.get('exit')) is not int or status['exit'] != 0
+            or status.get('fixture_id') != fixture_id or status.get('fault_mode') != fault
+            or status.get('test') != 'TestVMDirectDataplane'
+            or type(status.get('nodes')) is not int or status['nodes'] != nodes):
+        raise RuntimeError('direct test failed, skipped, or returned the wrong fixture identity')
+    reports = status.get('reports')
+    if (not isinstance(reports, list) or len(reports) != 1 or not isinstance(reports[0], dict)
+            or not isinstance(reports[0].get('fixture'), str)
+            or not re.fullmatch(re.escape(fixture_prefix) + r'[0-9]+', reports[0]['fixture'])):
+        raise RuntimeError('direct fixture report missing, duplicated, or mismatched')
+    row = reports[0]
+    report = row.get('report')
+    if (not isinstance(report, dict) or type(report.get('nodes')) is not int or report['nodes'] != nodes
+            or report.get('fault_mode') != fault or report.get('scope') != DIRECT_SCOPE
+            or any(report.get(flag) is not True for flag in DIRECT_FLAGS)):
+        raise RuntimeError('direct completion, scope, recovery, or ownership evidence incomplete')
+    if fault == 'inner-nonce':
+        counters, transport = report.get('inner_fault_counters'), report.get('inner_fault_transport')
+        installed = report.get('fault_installed_unix')
+        if (report.get('inner_nonce_blackhole_verified') is not True
+                or type(installed) is not int or installed <= 0
+                or not isinstance(counters, dict) or set(counters) != {'node-0', 'node-1'}
+                or not isinstance(transport, dict) or set(transport) != {'node-0', 'node-1'}):
+            raise RuntimeError('inner nonce fault evidence incomplete')
+        for node in ('node-0', 'node-1'):
+            counts, observed = counters[node], transport[node]
+            if (not isinstance(counts, dict) or set(counts) != {'payload_drop', 'keepalive_tx', 'keepalive_rx', 'handshake_rx'}
+                    or any(type(value) is not int or value <= 0 for value in counts.values())
+                    or not isinstance(observed, dict) or set(observed) != {'handshake_unix', 'rx_bytes', 'tx_bytes'}
+                    or any(type(value) is not int or value <= 0 for value in observed.values())
+                    or observed['handshake_unix'] <= installed):
+                raise RuntimeError('inner nonce fault did not preserve fresh authenticated WG transport')
+    for name, minimum, maximum in (('fallback_seconds', 0, 5), ('retry_max_observed_loss_seconds', 0, 5),
+                                    ('retry_watch_seconds', 12, 15 * 60)):
+        value = report.get(name)
+        if type(value) not in (int, float) or not math.isfinite(value) or not minimum <= value <= maximum:
+            raise RuntimeError('direct timing missing or outside the fixture contract: ' + name)
+    if report['fallback_seconds'] == 0:
+        raise RuntimeError('direct fallback interval was not measured')
+    logs = row.get('logs')
+    text = logs.get('retry-packets.jsonl') if isinstance(logs, dict) else None
+    if not isinstance(text, str) or not text or len(text.encode()) > 512 * 1024:
+        raise RuntimeError('direct retry packet evidence missing or oversized')
+    packets = []
+    for line in text.splitlines():
+        # The unverbose Go worker emits PASS after its JSON samples.
+        if not line.strip() or line == 'PASS':
+            continue
+        try:
+            sample = json.loads(line)
+        except (ValueError, TypeError) as error:
+            raise RuntimeError('invalid direct retry packet evidence') from error
+        if not isinstance(sample, dict):
+            raise RuntimeError('invalid direct retry packet sample')
+        packets.append(sample)
+    if not packets:
+        raise RuntimeError('direct retry packet evidence is empty')
+    last_elapsed, last_good, failures, max_gap = -1, 0, 0, 0
+    for index, sample in enumerate(packets, 1):
+        elapsed, gap = sample.get('elapsed_ns'), sample.get('gap_ns')
+        if (type(sample.get('sequence')) is not int or sample['sequence'] != index
+                or type(elapsed) is not int or elapsed < 0 or elapsed < last_elapsed
+                or type(gap) is not int or not 0 <= gap <= 5_000_000_000
+                or gap != elapsed - last_good or type(sample.get('ok')) is not bool
+                or sample.get('completed') is not (index == len(packets))):
+            raise RuntimeError('direct retry sequence, interval, or completion evidence invalid')
+        last_elapsed, max_gap = elapsed, max(max_gap, gap)
+        if sample['ok']:
+            last_good = elapsed
+        else:
+            failures += 1
+    if not packets[0]['ok'] or not packets[-1]['ok'] or last_elapsed < 12_000_000_000:
+        raise RuntimeError('direct retry fault exposure did not close after twelve seconds')
+    if (type(report.get('retry_samples')) is not int or report['retry_samples'] != len(packets)
+            or type(report.get('retry_failed_probes')) is not int or report['retry_failed_probes'] != failures
+            or not math.isclose(report['retry_max_observed_loss_seconds'], max_gap / 1e9, rel_tol=0, abs_tol=1e-9)
+            or not math.isclose(report['retry_watch_seconds'], last_elapsed / 1e9, rel_tol=0, abs_tol=1e-9)):
+        raise RuntimeError('direct retry summary does not match packet evidence')
+
 def validate_application_approval_result(status):
     reports = [row.get('report', {}) for row in status.get('reports', [])]
     if (status.get('exit') != 0 or len(reports) != 2
@@ -281,24 +373,57 @@ def validate_application_approval_result(status):
                 raise RuntimeError('application expiry did not isolate the intended grant')
 
 
-def validate_application_mixed_result(status, preparation=False):
+def validate_robot_capacity(row, paths, cpu):
+    quota = {'1': '100000 100000', '0.5': '50000 100000', '0.25': '25000 100000'}.get(cpu)
+    if not quota or row.get('paths') != paths or row.get('role_placement_verified') is not True:
+        raise RuntimeError('missing role capacity configuration or placement')
+    stats = []
+    models = set()
+    for name in ('resource_profile', 'resource_profile_after'):
+        profile = row.get(name, {})
+        if (profile.get('scope') != 'robot-supervisor-and-two-actuators'
+                or profile.get('cpu_max') != quota
+                or profile.get('initial_preparation_limited') is not False
+                or profile.get('controller_relay_measurement_limited') is not False
+                or not isinstance(profile.get('cpu_model'), str) or not profile['cpu_model'].strip()
+                or type(profile.get('guest_vcpus')) is not int or profile['guest_vcpus'] != 1
+                or not profile.get('cpu_pressure', '').startswith('some ')):
+            raise RuntimeError('incorrect robot-only resource profile')
+        models.add(profile['cpu_model'])
+        try:
+            values = dict(line.split() for line in profile['cpu_stat'].splitlines())
+            values = {k: int(values[k]) for k in ('usage_usec', 'nr_periods', 'nr_throttled', 'throttled_usec')}
+        except (KeyError, ValueError, AttributeError) as error:
+            raise RuntimeError('incomplete robot CPU accounting') from error
+        if any(v < 0 for v in values.values()):
+            raise RuntimeError('invalid robot CPU accounting')
+        stats.append(values)
+    if (len(models) != 1 or stats[1]['usage_usec'] <= stats[0]['usage_usec']
+            or any(stats[1][k] < stats[0][k] for k in stats[0])):
+        raise RuntimeError('robot CPU accounting did not advance')
+
+
+def validate_application_mixed_result(status, preparation=False, paths=8, robot_cpu=None):
     reports = [row.get('report', {}) for row in status.get('reports', [])]
     if (status.get('exit') != 0 or len(reports) != 3
-            or {row.get('healthy_index') for row in reports} != {0, 3, 7}):
+            or paths not in (4, 8)
+            or {row.get('healthy_index') for row in reports} != {0, paths // 2 - 1, paths - 1}):
         raise RuntimeError('mixed application matrix failed or omitted cases')
     for row in reports:
         cycles = row.get('steady_applied_cycles', {})
         gaps = row.get('maximum_fresh_observation_gap_seconds', {})
-        if (row.get('completed') is not True or row.get('all_eight_leases_active') is not True
+        if (row.get('completed') is not True or row.get('all_candidate_leases_active', row.get('all_eight_leases_active') if paths == 8 else None) is not True
                 or row.get('two_actuators_and_payloads_verified') is not True
                 or set(cycles) != {'app', 'app2'} or any(type(n) is not int or n < 3 for n in cycles.values())
                 or set(gaps) != {'app', 'app2'} or any(not 0 < n <= 10 for n in gaps.values())
                 or row.get('steady_seconds', 0) < 15):
             raise RuntimeError('mixed application continuity evidence incomplete')
+        if robot_cpu is not None:
+            validate_robot_capacity(row, paths, robot_cpu)
         if preparation:
-            paths = ('p00', 'p01', 'p02', 'p03', 'p10', 'p11', 'p12', 'p13')
+            path_ids = ('p00', 'p01', 'p02', 'p03', 'p10', 'p11', 'p12', 'p13')
             if (row.get('automatic_rebuild') is not True or row.get('rebuild_completed') is not True
-                    or row.get('rebuilt_path') != paths[(row['healthy_index'] + 1) % 8]):
+                    or row.get('rebuilt_path') != path_ids[(row['healthy_index'] + 1) % 8]):
                 raise RuntimeError('mixed application rebuild evidence incomplete')
 
 
@@ -477,21 +602,39 @@ def validate_manager_auto_result(status, paths, installation=False):
             or summary.get('required_samples_per_class') != 20):
         raise RuntimeError('incomplete or misleading SLO summary')
 
-def exercise(vm, case, mode, delta, result):
+def exercise(vm, case, mode, delta, result, robot_cpus='0.5'):
     vm.launch()
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
         return result
-    if case in ('application-mixed', 'application-preparation', 'application-approval'):
-        vm.call(case + '-start')
+    if case in ('direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32'):
+        nodes = int(case.rsplit('-', 1)[1])
+        fault = 'inner-nonce' if case.startswith('direct-inner-') else 'outer-wg'
+        request = {'nodes': nodes, 'fault': fault} if fault == 'inner-nonce' else {'nodes': nodes}
+        vm.call('direct-start', request)
         until = time.monotonic() + 16 * 60
         while time.monotonic() < until:
-            status = vm.call(case + '-result')
+            status = vm.call('direct-result', request)
+            if status.get('exit') is not None:
+                result[case] = status
+                vm.record(case + '-result', status)
+                validate_direct_result(status, nodes, fault=fault)
+                return result
+            time.sleep(2)
+        raise RuntimeError('direct fixture timed out')
+    if case in ('application-mixed', 'application-preparation', 'application-approval') or case.startswith('application-capacity-'):
+        capacity = case.startswith('application-capacity-')
+        action = 'application-capacity' if capacity else case
+        paths = int(case.rsplit('-', 1)[1]) if capacity else 8
+        vm.call(action + '-start', {'paths': paths, 'robot_cpus': robot_cpus} if capacity else {})
+        until = time.monotonic() + 16 * 60
+        while time.monotonic() < until:
+            status = vm.call(action + '-result')
             if status['exit'] is not None:
                 result[case] = status
                 vm.record(case + '-result', status)
-                if case in ('application-mixed', 'application-preparation'):
-                    validate_application_mixed_result(status, preparation=case == 'application-preparation')
+                if capacity or case in ('application-mixed', 'application-preparation'):
+                    validate_application_mixed_result(status, preparation=case == 'application-preparation', paths=paths, robot_cpu=robot_cpus if capacity else None)
                 else:
                     validate_application_approval_result(status)
                 return result
@@ -721,10 +864,11 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
+    parser.add_argument('--robot-cpus', default='0.5', choices=['1', '0.5', '0.25'])
     args = parser.parse_args()
     if not Path('/.dockerenv').exists() or set(os.listdir('/sys/class/net')) != {'lo'}:
         raise SystemExit('run only inside the dedicated network-none container')
@@ -765,7 +909,7 @@ def main():
         vm = VM('/work/vm-' + uuid.uuid4().hex[:8], '/results/' + label + '-' + uuid.uuid4().hex[:8], rtc)
         verdict = {'schema_version': 1, 'case': case, 'mode': mode, 'delta': delta, 'rtc': rtc, 'completed': False, 'qualified': False}
         try:
-            exercise(vm, case, mode, delta, verdict)
+            exercise(vm, case, mode, delta, verdict, args.robot_cpus)
             verdict['completed'] = True
             if 'unsupported_reason' not in verdict and 'defect_reason' not in verdict:
                 verdict['qualified'] = True

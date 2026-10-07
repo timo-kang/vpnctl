@@ -119,6 +119,36 @@ func TestManualCostDrainAndFreshEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestFreshSuccessReportsLostConfirmationWithoutGrantingEligibility(t *testing.T) {
+	f := newScenario(t)
+	f.step("reachable")
+	previous := f.step("reachable")
+	wantPath(t, previous, "p0")
+	f.at = f.at.Add(11 * time.Second)
+	f.boot += 11 * time.Second
+	d := f.step("reachable")
+	wantPath(t, d, "")
+	c := d.Candidates[0]
+	if c.State != "reachable" || c.Eligible || c.ConsecutiveSuccesses != 1 || c.Exclusion != "confirming" || c.ConfirmationGap != 12*time.Second {
+		t.Fatal("fresh success hid the broken confirmation sequence", c)
+	}
+	encoded, err := json.Marshal(c)
+	if err != nil || !strings.Contains(string(encoded), `"confirmation_gap_ns":12000000000`) {
+		t.Fatal("missing public gap diagnostic", err)
+	}
+	recovered := f.step("reachable")
+	wantPath(t, recovered, "p0")
+	if recovered.Candidates[0].ConfirmationGap != 0 {
+		t.Fatal("old gap leaked into a new successful sequence")
+	}
+	f.step("unknown")
+	f.at = f.at.Add(11 * time.Second)
+	f.boot += 11 * time.Second
+	if c := f.step("reachable").Candidates[0]; c.ConfirmationGap != 0 || c.Eligible {
+		t.Fatal("prior unknown was misclassified as lost continuous health", c)
+	}
+}
 func TestApprovalClockReplayAndMalformedEvidence(t *testing.T) {
 	for _, mode := range []string{"expired", "suspend-rollback", "wall-rollback", "generation-regression", "identity", "same-generation-expiry", "replay", "duplicate", "zero-counter", "zero-handshake", "missing-fingerprint", "future", "batch-expired", "unavailable"} {
 		t.Run(mode, func(t *testing.T) {

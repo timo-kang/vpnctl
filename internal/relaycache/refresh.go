@@ -272,8 +272,7 @@ func (s *Store) acceptWitness(v relaycatalog.View, start approvalStamp) error {
 	return s.save(next)
 }
 func cloneView(v relaycatalog.View) relaycatalog.View {
-	n := cloneState(diskState{Catalog: &v})
-	return *n.Catalog
+	return v.Clone()
 }
 func (s *Store) reject(e error) (Report, error) {
 	if s.uncertain {

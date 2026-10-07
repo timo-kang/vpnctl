@@ -161,6 +161,129 @@ race 계측과 배포 바이너리의 자원 계약을 분리하고, 이후 repo
 `/tmp/vpnctl-direct-final-rejoin`, `/tmp/vpnctl-direct-approval-barrier`에 있다.
 이전 실패 및 중간 검증 디렉터리도 그대로 보존한다.
 
+## 재시도 중 relay 경로 보존 보강 (2026-10-07, #191)
+
+3초 동안 `/32`를 먼저 설치하던 구현은 양 끝의 독립적인 worker 시각과
+제거·journal 지연이 겹치면 5초 응답 공백을 넘었다. 창을 2초로 줄이고 빠르게
+재검사하는 것만으로는 15초 재연결 조건을 만족하지 못했다. 현재 구현은 다음
+순서로 통신 경로를 준비한다.
+
+1. journal v2에 staging 의도를 저장하고, application AllowedIPs가 **없는** peer와
+   1초 keepalive를 설치한다. 이 상태에서는 송수신 application prefix를 relay가
+   계속 소유한다. WireGuard handshake·RX·TX가 관측될 때까지 `handshaking`이다.
+2. relay의 30초 검증 cache가 오래되었으면 갱신하고, 인터페이스·relay baseline과
+   다른 peer의 prefix 충돌을 다시 확인한다. `activating` 의도를 저장한 뒤에만
+   `/32`와 설정된 keepalive를 부여한다.
+3. kernel 변경 시작부터 최대 2초 안에 별개의 nonce 응답과 RX/TX 증가를 두 번
+   확인해야 `active`다. 요청은 기존처럼 최대 1초이며 남은 초기 창으로 제한하고,
+   worker 재검사 간격은 250ms다. 후보의 초기
+   만료가 이미 active인 다른 peer의 온전한 1초 검증 시간을 줄이지 않는다.
+4. 실패·withdrawal·재시작은 phase별로 확인 가능한 소유 peer만 제거한다. prefix,
+   PSK, keepalive가 외부 설정으로 바뀌었으면 지우지 않는다. 저장 실패를 무시하거나
+   handshake만으로 application 도달을 주장하지 않는다.
+
+빈 AllowedIPs 상태에서도 keepalive로 transport를 준비할 수 있는 근거는
+[WireGuard Linux netlink](https://git.zx2c4.com/wireguard-linux/tree/drivers/net/wireguard/netlink.c),
+[send 구현](https://git.zx2c4.com/wireguard-linux/tree/drivers/net/wireguard/send.c),
+[wg 설정 파서](https://git.zx2c4.com/wireguard-tools/tree/src/config.c)다.
+
+32노드 실제 VM과 CI에서는 다른 후보의 느린 요청 때문에 첫 성공을 받은 후보가
+두 번째 검증 기회를 얻기 전에 만료되는 별도 결함도 재현했다. 단일 쌍의 시간
+모델만으로는 이 공유 대기 문제를 발견하지 못했다. 검증 중인 요청이 남아 있으면
+250ms 간격으로 완료 결과를 함께 조회하고, 초기 후보마다 다음 nonce를 보낸다.
+각 요청 직전의 RX/TX를 별도로 저장하여 이전 요청의 counter 증가를 두 번 세지
+않는다. 이미 active인 후보의 요청 시간과 단독 정상 경로의 두 snapshot 검증은
+그대로 유지한다. 1개 후보 대조군, 2·32개 후보 재현, counter 재사용 거부 검사를
+추가했다. 수정 전 실제 실패는 `/tmp/vpnctl-fix191-direct-prod-v2`와
+[CI 37595610104](https://github.com/timo-kang/vpnctl/actions/runs/37595610104)에 보존한다.
+
+journal v1은 기존 소유권 검증을 거쳐 v2로 승격한다. 구버전 바이너리는 v2를 읽지
+못하므로 단순 실행 파일 교체로 downgrade하지 않는다. 현재 버전으로 서비스를
+종료하고 소유 peer 회수를 확인한 뒤, 전용 baseline과 상태 파일을 명시적으로
+재구성하는 운영 절차가 필요하다. 실패한 저장 파일을 삭제해서 복구 권한을
+추측하지 않는다.
+
+공유 호스트에서의 실제 네트워크 검증은 기존 netns 명령을 직접 실행하지 않고
+격리 VM wrapper를 이용한다. 각 case는 별도 guest이며 기존 5초 fallback/응답 공백,
+12초 이상 장애 관측, 15초 재연결 기준을 그대로 적용한다.
+
+```sh
+VPNCTL_VM_RACE=0 VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-direct-vm-production \
+  scripts/test-vm.sh --case direct-2 direct-3 direct-8 direct-32 \
+    direct-inner-2 direct-inner-3 direct-inner-8 direct-inner-32
+VPNCTL_VM_RACE=1 VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-direct-vm-race \
+  scripts/test-vm.sh --case direct-2 direct-3 direct-8 \
+    direct-inner-2 direct-inner-3 direct-inner-8
+```
+
+`direct-inner-*`는 양 끝의 암호화된 비어 있지 않은 WireGuard data만 차단한다.
+handshake와 빈 authenticated keepalive는 통과하며, post-fault handshake·RX/TX와
+각 방향의 payload drop/keepalive/handshake nft counter를 모두 요구한다. 같은
+`wg0`의 평문 nonce를 차단하면 relay fallback까지 막으므로 그 방식은 사용하지
+않는다. CI에서는 원래 `outer-wg`와 `inner-nonce`를 production/race별 독립 job으로
+실행한다. CI의 netns 명령은 전용 runner용이며 공유 호스트에서는 VM wrapper를 쓴다.
+
+검증기는 worker 종료 코드, 정확한 node 수·fixture·fault mode, 필수 완료 조건과 개별 nonce
+기록을 함께 확인한다. 요약 수치만 양호하거나 `completed=true`인 report만 있어서는
+합격하지 않는다. 최초 VM 실행은 네 크기 모두 기능 조건에 도달했지만 선택적
+`wmem_max` 진단 파일 부재로 종료 코드 1이었다. 이 실패 원본은
+`/tmp/vpnctl-fix191-direct-prod-v1`에 보존하며 합격 근거로 사용하지 않는다.
+
+## 미완료 transport 재시도와 검증 모델 교정
+
+production V3의 outer/inner 2·3·8·32 노드 8개 시험은 통과했으나,
+race V3의 outer 8노드는 장애 해제 후 15초 내 복구하지 못했다. 원본
+`/tmp/vpnctl-fix191-direct-race-v3`를 실패 그대로 유지한다. 실패 시 두 peer는
+application prefix가 없고 handshake가 0이었다. RX 296/TX 776바이트는
+handshake 메시지 교환만으로도 증가할 수 있어 활성 경로의 증거가 아니다.
+
+커널의 교차 initiation, 응답에 따른 rate-limit 갱신, 재전송 one-shot timer가
+겹치면 미완료 상태에 정체될 수 있다는 실행 모델을 추가했다. 이는 가능한
+정체 경로의 재현이며 해당 VM 실패의 커널 내부 원인을 확정한 것은 아니다.
+근거는 Linux [noise.c](https://github.com/torvalds/linux/blob/v6.1/drivers/net/wireguard/noise.c),
+[send.c](https://github.com/torvalds/linux/blob/v6.1/drivers/net/wireguard/send.c),
+[timers.c](https://github.com/torvalds/linux/blob/v6.1/drivers/net/wireguard/timers.c)다.
+
+현재 수정은 소유권이 일치하고 prefix가 없는 미완료 peer만 6/8초 간격으로
+제거·재생성한다. 공개 키 순서에 따라 양 끝의 간격을 달리하며 relay의
+application 경로를 유지한다. 제거 직전 최종 snapshot에서도 handshake·RX·TX가
+완성되었으면 보존한다. 일반 철회·복구 제거에는 이 예외를 적용하지 않는다.
+기존 durable 제거·staging 절차를 사용하고 저장 실패 후 재시작에서도 소유권을
+추측하지 않는다. 정상·활성 peer의 주기적 재생성은 하지 않는다.
+
+기존 Engine 시간 모델의 느린 모드는 한쪽을 재생성하면 상대의 5초 재전송
+시각도 뒤로 밀리는 것으로 잘못 가정했다. 상대 재생성이 로컬 native timer를
+연기하지 않는 회귀 검사를 먼저 실패시키고, peer별 독립 재전송 시각과 500ms
+응답 지연으로 교정했다. 208개 장애/worker 위상 조합과 6개 응답 공백 조합,
+두 nonce 증명, 5초 공백 및 15초 복구 기준은 유지한다. 종전의 "5초 handshake
+준비 지연"은 이 모델로 보장한 RTT가 아니며, 현재는 native 5초 재전송 주기와
+응답 지연을 구분한다. 기본 검사에는 대표 경계를, 전체 설계 검토에는 401,024개
+교차 timer 조합을 사용한다:
+
+```sh
+VPNCTL_FULL_HANDSHAKE_MODEL=1 go test ./internal/directpath \
+  -run '^TestStagedPeerRecreationPhaseSearch$' -count=1 -v
+```
+
+6/8초 설계의 전체 모델은 최악 handshake 10.95초에 다음 worker와 두 요청 예산
+3초를 더해 13.95초였다. 8/10초와 9/11초 대안은 각각 16.45/17.95초로 탈락했다.
+이는 유한한 모델 탐색의 결과이며 모든 네트워크 지연을 보장하는 증명은 아니다.
+실제 race 8노드 진단 실행 `/tmp/vpnctl-staged-restart-race8-v1`은 fallback 1.971초,
+12.021초 장애 구간 239/239 요청 성공, 최대 간격 52.521ms와 15초 내 복구를
+통과했다. 해당 실행은 개발 중 소스였으며 최종 소스의 전체 행렬과 CI를 별도로
+확인한다. 경고 폭주에 lifecycle 전이가 묻히지 않도록 공개 필드만 제한된
+첫/마지막 이벤트로 내보내고, 누락·절단 수를 명시한다.
+
+최종 제품 소스 `b4a95c7`의 깨끗한 checkout으로 실행한 전체 로컬 행렬도 통과했다:
+production outer/inner 2·3·8·32 노드 8/8, race outer/inner 2·3·8 노드 6/6.
+증거는 `/tmp/vpnctl-staged-restart-prod-v2`와
+`/tmp/vpnctl-staged-restart-race-v2`다. 최대 fallback은 2.053초, 장애 중 재시도의
+최대 응답 공백은 3.063초였으며 모든 case가 15초 내 복구했다. inner 장애에는
+실패한 nonce 요청이 있었으므로 무손실 또는 무중단이라고 해석하지 않는다.
+[같은 커밋 CI](https://github.com/timo-kang/vpnctl/actions/runs/37602539188)에서도
+기존에 실패했던 production outer/inner 32노드 job이 통과했다. 별도 저장 오류
+복구 단위 검사의 실패와 전체 CI 판정은 개별 direct job 성공과 구분한다.
+
 ## 판정 범위
 
 5초는 이 격리된 node-to-node 시험의 assertion이다. 앱 서버 uplink, 실제 RF/LTE 지연,

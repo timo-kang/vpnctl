@@ -29,6 +29,15 @@ func cloneSpec(s Spec) Spec {
 	}
 	return s
 }
+
+// Clone returns independent mutable slices, including each nested descriptor.
+// It copies the already typed view; validation remains the caller's boundary.
+func (v View) Clone() View {
+	v.Spec = cloneSpec(v.Spec)
+	v.Bindings = slices.Clone(v.Bindings)
+	return v
+}
+
 func clone(s *State) *State {
 	n := *s
 	n.Spec = cloneSpec(s.Spec)

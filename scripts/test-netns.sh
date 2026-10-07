@@ -89,7 +89,7 @@ manifest="$artifact_dir/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
         "suite_dirty=$(test -z "$(git status --porcelain --untracked-files=no)" && echo false || echo true)" \
         "binary_origin=$binary_origin" "suite_race=${VPNCTL_RACE:-1}" \
         "cpus=${VPNCTL_TEST_CPUS:-unlimited}" "sizes=${VPNCTL_NETNS_SIZES:-1,3,8,32}" \
-        "direct_sizes=${VPNCTL_DIRECT_SIZES:-2}" "kernel=$(uname -r)"
+        "direct_sizes=${VPNCTL_DIRECT_SIZES:-2}" "direct_fault=${VPNCTL_DIRECT_FAULT:-outer-wg}" "kernel=$(uname -r)"
     printf '%s\n' "memory=${VPNCTL_TEST_MEMORY:-unlimited}" \
         "soak_duration=${VPNCTL_SOAK_DURATION:-disabled}" "soak_profile=${VPNCTL_SOAK_PROFILE:-auto}" \
         "soak_nodes=${VPNCTL_SOAK_NODES:-}" "soak_rejoin_only=${VPNCTL_SOAK_REJOIN_ONLY:-0}" \
@@ -108,7 +108,7 @@ docker run "${docker_limits[@]}" --rm --init --entrypoint /bin/sh --name "$conta
     "${work_mount[@]}" \
     "${previous_args[@]}" \
     -e VPNCTL_INTEGRATION=1 -e VPNCTL_BIN=/test/vpnctl \
-    -e VPNCTL_DIRECT_SIZES="${VPNCTL_DIRECT_SIZES:-2}" -e VPNCTL_ARTIFACT_DIR=/results -e VPNCTL_NETNS_SIZES="${VPNCTL_NETNS_SIZES:-1,3,8,32}" \
+    -e VPNCTL_DIRECT_SIZES="${VPNCTL_DIRECT_SIZES:-2}" -e VPNCTL_DIRECT_FAULT="${VPNCTL_DIRECT_FAULT:-outer-wg}" -e VPNCTL_ARTIFACT_DIR=/results -e VPNCTL_NETNS_SIZES="${VPNCTL_NETNS_SIZES:-1,3,8,32}" \
     -e VPNCTL_SOAK_PROFILE="${VPNCTL_SOAK_PROFILE:-auto}" -e VPNCTL_SOAK_DURATION="${VPNCTL_SOAK_DURATION:-}" -e VPNCTL_SOAK_NODES="${VPNCTL_SOAK_NODES:-}" \
     -e VPNCTL_SOAK_PHASE_INTERVAL="${VPNCTL_SOAK_PHASE_INTERVAL:-}" -e VPNCTL_SOAK_REJOIN_ONLY="${VPNCTL_SOAK_REJOIN_ONLY:-0}" \
     -e GORACE=atexit_sleep_ms=0 -e VPNCTL_RESULT_UID="$(id -u)" -e VPNCTL_RESULT_GID="$(id -g)" \

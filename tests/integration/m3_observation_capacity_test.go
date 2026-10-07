@@ -173,7 +173,17 @@ func TestNetns_M3PreparationCapacity(t *testing.T) {
 }
 
 func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
-	f := applicationFixture(t, true, 8)
+	applicationMixedCandidatesProfile(t, healthy, rebuild, 8, "")
+}
+
+func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, paths int, robotCPU string) {
+	var group *capacityGroup
+	var groupFD *os.File
+	if robotCPU != "" {
+		group = newCapacityGroup(t, robotCPU)
+		groupFD = group.file
+	}
+	f := applicationFixtureWithGroup(t, true, paths, false, groupFD)
 	managed := map[string]relayapply.PreparationStatus{}
 	if rebuild {
 		for _, p := range f.plan.Paths {
@@ -182,10 +192,16 @@ func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
 	}
 	cgroup := func(name string) string { b, _ := os.ReadFile(filepath.Join("/sys/fs/cgroup", name)); return string(b) }
 	report := map[string]any{"healthy_index": healthy, "healthy_path": f.plan.Paths[healthy].PathID, "cpu_stat_before": cgroup("cpu.stat"), "memory_events_before": cgroup("memory.events")}
+	if group != nil {
+		report["resource_profile"] = group.evidence(t)
+	}
 	t.Cleanup(func() {
 		report["completed"] = !t.Failed()
 		report["cpu_stat_after"] = cgroup("cpu.stat")
 		report["memory_events_after"] = cgroup("memory.events")
+		if group != nil {
+			report["resource_profile_after"] = group.evidence(t)
+		}
 		writeM3Report(t, filepath.Join(f.results, "application-mixed-candidates.json"), report)
 	})
 	secondLog := filepath.Join(f.results, "capacity-app2.jsonl")
@@ -193,7 +209,7 @@ func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
 	if rebuild {
 		secondArgs = append(secondArgs, "--mode", "manual", "--path-id", f.plan.Paths[healthy].PathID)
 	}
-	second := startNetworkProcess(t, f.robot, secondLog, nil, secondArgs...)
+	second := startNetworkProcessInGroup(t, groupFD, f.robot, secondLog, nil, secondArgs...)
 	eventually(t, 45*time.Second, "independent app activated", func() error {
 		r := latestApplicationResult(secondLog)
 		if !r.Applied {
@@ -212,7 +228,18 @@ func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
 	started := time.Now()
 	report["fault_installed_at"] = started
 	logfile := filepath.Join(f.results, "capacity-app.jsonl")
-	watcher := startNetworkProcess(t, f.robot, logfile, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "500ms", "--probe-timeout", "2s")
+	watcher := startNetworkProcessInGroup(t, groupFD, f.robot, logfile, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "500ms", "--probe-timeout", "2s")
+	if group != nil {
+		for _, p := range []*networkProcess{f.nodeSupervisor, watcher, second} {
+			group.requireMembership(t, p.cmd.Process.Pid, true)
+		}
+		group.requireMembership(t, os.Getpid(), false)
+		group.requireMembership(t, f.controller.process.cmd.Process.Pid, false)
+		for _, r := range f.recipients {
+			group.requireMembership(t, r.watch.cmd.Process.Pid, false)
+		}
+		report["role_placement_verified"] = true
+	}
 	// A payload can detect quarantine before the current reconcile finishes
 	// writing its diagnostic row. Preserve that bounded cycle before automatic
 	// process cleanup; the original failure remains a failure even if it recovers.
@@ -304,7 +331,7 @@ func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
 		}
 		p := applicationPayload(t, f, m3Target)
 		source := "198.18.0.11"
-		if healthy >= 4 {
+		if healthy >= paths/2 {
 			source = "198.18.0.12"
 		}
 		if !p.OK || p.Source != source {
@@ -367,7 +394,11 @@ func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
 	report["maximum_fresh_observation_gap_seconds"] = map[string]float64{"app": gap1.Seconds(), "app2": gap2.Seconds()}
 	report["samples"] = samples
 	report["result"] = applied
-	report["all_eight_leases_active"] = true
+	report["paths"] = paths
+	report["all_candidate_leases_active"] = true
+	if paths == 8 {
+		report["all_eight_leases_active"] = true
+	}
 	report["automatic_rebuild"] = rebuild
 	if rebuild {
 		report["rebuilt_path"] = broken
@@ -375,8 +406,8 @@ func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
 	}
 	report["two_actuators_and_payloads_verified"] = true
 	counters := netOutput(t, f.robot, "nft", "list", "table", "inet", "capacity_slow")
-	if strings.Count(counters, "counter packets ") != 7 || strings.Contains(counters, "counter packets 0 bytes 0") {
-		t.Fatal("not all seven slow paths exercised", counters)
+	if strings.Count(counters, "counter packets ") != paths-1 || strings.Contains(counters, "counter packets 0 bytes 0") {
+		t.Fatal("not all slow paths exercised", counters)
 	}
 	report["fault_counters"] = counters
 	watcher.terminate(t)

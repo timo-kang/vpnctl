@@ -44,7 +44,7 @@ func nodeLeaseFaultFixture(t *testing.T) (*m3AuthorityFixture, string) {
 }
 func startNodeLeaseWatch(t *testing.T, f *m3AuthorityFixture, label string, env ...string) *networkProcess {
 	t.Helper()
-	return startNetworkProcess(t, f.robot, filepath.Join(f.results, label+".jsonl"), env, integrationBinary(t), "node", "relay", "supervise", "--config", f.node, "--refresh-interval", "1s")
+	return startNetworkProcessInGroup(t, f.nodeGroup, f.robot, filepath.Join(f.results, label+".jsonl"), env, integrationBinary(t), "node", "relay", "supervise", "--config", f.node, "--refresh-interval", "1s")
 }
 func awaitNodeLease(t *testing.T, f *m3AuthorityFixture) {
 	t.Helper()

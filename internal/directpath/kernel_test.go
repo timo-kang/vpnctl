@@ -5,6 +5,7 @@ package directpath
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -12,10 +13,12 @@ import (
 type fixtureRunner struct {
 	dump  string
 	calls []string
+	argv  [][]string
 }
 
 func (r *fixtureRunner) RunContext(_ context.Context, name string, args ...string) error {
 	r.calls = append(r.calls, name+" "+strings.Join(args, " "))
+	r.argv = append(r.argv, append([]string{name}, args...))
 	return nil
 }
 func (r *fixtureRunner) OutputContext(_ context.Context, name string, args ...string) (string, error) {
@@ -69,5 +72,18 @@ func TestEmptyForeignAllowedIPsIsAnEmptySet(t *testing.T) {
 	s, err := k.Snapshot(context.Background())
 	if err != nil || len(s.Peers[key(4)].Prefixes) != 0 {
 		t.Fatal(s, err)
+	}
+}
+
+func TestKernelStageRetainsEmptyAllowedIPsArgument(t *testing.T) {
+	runner := &fixtureRunner{}
+	k := kernel{"wg0", "10.7.0.2", runner}
+	c := Candidate{Key: key(3), Endpoint: "192.0.2.3:51820", Address: "10.7.0.3", Keepalive: 25}
+	if err := k.Stage(context.Background(), []Candidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"wg", "set", "wg0", "peer", c.Key, "endpoint", c.Endpoint, "allowed-ips", "", "persistent-keepalive", "1"}
+	if len(runner.argv) != 1 || !reflect.DeepEqual(runner.argv[0], want) {
+		t.Fatal("staging must clear prefixes without replacing the interface", runner.argv)
 	}
 }

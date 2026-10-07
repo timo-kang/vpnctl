@@ -35,17 +35,25 @@ func TestNetns_DirectDataplane(t *testing.T) {
 	}
 }
 func testDirectDataplane(t *testing.T, size int) {
+	mode, err := directFaultMode(os.Getenv("VPNCTL_DIRECT_FAULT"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ns := newNamespaces(t, size)
 	private := t.TempDir()
 	root := os.Getenv("VPNCTL_ARTIFACT_DIR")
 	if root == "" {
 		root = t.TempDir()
 	}
-	results, err := os.MkdirTemp(root, fmt.Sprintf("direct-dataplane-%d-", size))
+	prefix := fmt.Sprintf("direct-dataplane-%d-", size)
+	if mode == "inner-nonce" {
+		prefix = fmt.Sprintf("direct-dataplane-inner-nonce-%d-", size)
+	}
+	results, err := os.MkdirTemp(root, prefix)
 	if err != nil {
 		t.Fatal(err)
 	}
-	report := map[string]any{"nodes": size, "completed": false, "scope": "actual WG/overlay reachability and local relay fallback; not application target or multi-relay selection SLO"}
+	report := map[string]any{"nodes": size, "fault_mode": mode, "completed": false, "scope": "actual WG/overlay reachability and local relay fallback; not application target or multi-relay selection SLO"}
 	for _, name := range []string{"memory.events", "memory.peak", "cpu.stat"} {
 		b, _ := os.ReadFile(filepath.Join("/sys/fs/cgroup", name))
 		report[name+"_before"] = string(b)
@@ -91,7 +99,7 @@ func testDirectDataplane(t *testing.T, size int) {
 		report["node0_ip_stats"] = netOutput(t, ns[1], "ip", "-s", "link", "show", "wg0")
 		report["node0_udp_stats"] = netOutput(t, ns[1], "cat", "/proc/net/snmp")
 		report["node0_udp_sockets"] = netOutput(t, ns[1], "ss", "-u", "-a", "-m", "-n")
-		report["socket_wmem_max"] = netOutput(t, ns[1], "cat", "/proc/sys/net/core/wmem_max")
+		report["socket_wmem_max"] = directSocketDiagnostic(os.ReadFile)
 		report["node0_neighbours"] = netOutput(t, ns[1], "ip", "-s", "neigh", "show")
 		report["arp_cache_stats"] = "global cache counters are not exposed in this network namespace"
 	}()
@@ -119,6 +127,13 @@ func testDirectDataplane(t *testing.T, size int) {
 		n.DirectIntervalSec = 1
 		n.HealthCheckIntervalSec = 3600
 		n.STUNServers = nil
+		if mode == "inner-nonce" {
+			// Exercise authenticated empty WG packets while nonce payloads are
+			// unavailable. Use normal config so ownership readback stays exact.
+			n.DirectKeepaliveSec = 1
+			n.DirectKeepaliveSymmetricSec = 1
+			n.DirectKeepaliveUnknownSec = 1
+		}
 		if err = config.Save(paths[i], nodes[i]); err != nil {
 			t.Fatal(err)
 		}
@@ -267,15 +282,21 @@ func testDirectDataplane(t *testing.T, size int) {
 	// The controller API is gone but the hub WG dataplane remains installed.
 	c.process.stop()
 	report["controller_stopped_at"] = time.Now().UTC()
-	// Underlay UDP readiness (51900) stays available. Drop only A<->B WG.
+	// Underlay UDP readiness (51900) stays available in both explicit modes.
+	// The original mode drops all A<->B WG; inner-nonce preserves handshake
+	// and empty authenticated transport while dropping encrypted payloads.
 	for _, i := range []int{0, 1} {
-		other := 3 - i
+		rules, err := directFaultRules(mode, fmt.Sprintf("192.0.2.%d", 3-i))
+		if err != nil {
+			t.Fatal(err)
+		}
 		faultPath := filepath.Join(private, fmt.Sprintf("fault-%d.nft", i))
-		mustWrite(t, faultPath, "table inet direct_fault {\n chain output {\n type filter hook output priority 0; policy accept;\n ip daddr 192.0.2."+fmt.Sprint(other)+" udp dport 51820 drop\n }\n}\n")
+		mustWrite(t, faultPath, rules)
 		netOutput(t, ns[i+1], "nft", "-f", faultPath)
 	}
 	failedAt := time.Now()
 	report["wg_fault_installed_at"] = failedAt.UTC()
+	report["fault_installed_unix"] = failedAt.Unix()
 	eventually(t, 5*time.Second, "local direct removal with controller offline", func() error {
 		for _, i := range []int{0, 1} {
 			other := 1 - i
@@ -304,9 +325,27 @@ func testDirectDataplane(t *testing.T, size int) {
 	watch := startNetworkProcess(t, ns[1], filepath.Join(results, "retry-packets.jsonl"), []string{"VPNCTL_WORKER=direct-loss-watch", "VPNCTL_PROBE_ENDPOINT=" + endpoint}, worker, "-test.run=^TestNetworkWorker$")
 	beganWatch := time.Now()
 	var samples []directLossSample
+	transport := map[string]directTransportEvidence{}
+	if mode == "inner-nonce" {
+		report["inner_fault_transport"] = transport
+	}
+	var nextTransportObservation time.Time
 	for {
 		if state(0, 1) == "active" || state(1, 0) == "active" {
 			t.Fatal("broken WG advertised active despite successful UDP")
+		}
+		if mode == "inner-nonce" && !time.Now().Before(nextTransportObservation) {
+			for _, i := range []int{0, 1} {
+				handshakes := netOutput(t, ns[i+1], "wg", "show", "wg0", "latest-handshakes")
+				transfers := netOutput(t, ns[i+1], "wg", "show", "wg0", "transfer")
+				observed, err := directTransportSummary(nodes[1-i].Node.WGPublicKey, handshakes, transfers)
+				// A fresh retry handshake, not the pre-fault active peer, must
+				// authenticate transport while the payload drop remains installed.
+				if err == nil && observed.Handshake > failedAt.Unix() {
+					transport[fmt.Sprintf("node-%d", i)] = observed
+				}
+			}
+			nextTransportObservation = time.Now().Add(500 * time.Millisecond)
 		}
 		data, err := os.ReadFile(watch.log)
 		if err != nil {
@@ -356,6 +395,22 @@ func testDirectDataplane(t *testing.T, size int) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	report["udp_success_not_dataplane_success"] = true
+	if mode == "inner-nonce" {
+		counters := map[string]map[string]uint64{}
+		report["inner_fault_counters"] = counters
+		for _, i := range []int{0, 1} {
+			label := fmt.Sprintf("node-%d", i)
+			counts, err := directFaultCounters([]byte(netOutput(t, ns[i+1], "nft", "-j", "list", "table", "inet", "direct_fault")))
+			counters[label] = counts
+			if err != nil {
+				t.Fatal("inner nonce fault not exercised", label, err)
+			}
+		}
+		if len(transport) != 2 {
+			t.Fatal("fresh authenticated WG transport was not observed during inner nonce fault")
+		}
+		report["inner_nonce_blackhole_verified"] = true
+	}
 	for _, i := range []int{0, 1} {
 		netOutput(t, ns[i+1], "nft", "delete", "table", "inet", "direct_fault")
 	}

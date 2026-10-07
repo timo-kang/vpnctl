@@ -34,6 +34,7 @@ type snapshot struct {
 }
 type backend interface {
 	Snapshot(context.Context) (snapshot, error)
+	Stage(context.Context, []Candidate) error
 	Add(context.Context, []Candidate) error
 	Remove(context.Context, []string) error
 	Probe(context.Context, Candidate) error
@@ -108,6 +109,17 @@ func (k kernel) Snapshot(ctx context.Context) (snapshot, error) {
 	}
 	return s, nil
 }
+
+// No AllowedIPs means neither outgoing application selection nor incoming IP
+// authorization moves from the relay. Keepalives establish only WG transport.
+func (k kernel) Stage(ctx context.Context, candidates []Candidate) error {
+	args := []string{"set", k.iface}
+	for _, c := range candidates {
+		args = append(args, "peer", c.Key, "endpoint", c.Endpoint, "allowed-ips", "", "persistent-keepalive", "1")
+	}
+	return k.run.RunContext(ctx, "wg", args...)
+}
+
 func (k kernel) Add(ctx context.Context, candidates []Candidate) error {
 	args := []string{"set", k.iface}
 	for _, c := range candidates {
