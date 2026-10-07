@@ -34,13 +34,17 @@ domain requires explicit reconciliation, not automatic adoption.
 ## Incremental execution
 
 Every supervisor admission refreshes when due and services all candidate leases
-first. It then advances at most **two durable work units** within the **remaining
-five second maintenance budget**. Both share a single **750 ms** wall/BOOTTIME
-budget; a second unit starts only with at least **500 ms** remaining. Each unit
+first. It then advances at most **eight durable work units** within the **remaining
+five second maintenance budget**. All share a single **750 ms** wall/BOOTTIME
+budget; each additional unit starts only with at least **500 ms** remaining. Each unit
 still repeats approval/inventory/ownership checks and persists its own boundary. No 60 second Prepare/Release transaction runs inside this loop.
 The round-robin path cursor and exponential retry delays (1, 2, 4, 8, 16, 30
 seconds of BOOTTIME) are durable. Healthy paths already checked by that admission
 do not consume rebuild work. Slow or conflicting paths cannot take all turns.
+The cursor commits together with that unit's owner, in-flight marker, progress
+or failure/backoff write. There is no separate cursor-only fsync. Every creation
+still requires a durable owner and in-flight marker before the kernel command;
+idempotent removal resumes from the already durable releasing phase.
 Underlying blocked storage/syscalls can still stall a process; the kernel lease
 closes independently, and a late result cannot complete preparation.
 

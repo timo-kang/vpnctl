@@ -117,6 +117,10 @@ its existing 750ms shared budget and 500ms reserve for each additional unit.
 This avoids rejoining two busy application watchers after every pair of tiny
 operations; slow operations retain the same deadline and yielding conditions.
 The 120-second convergence watchdog is unchanged.
+The durable round-robin cursor shares the unit's state/owner/in-flight commit;
+a cursor-only fsync must not consume this bounded work quantum. Tests read back
+the owner, cursor and in-flight marker before every kernel add and inject errors
+before/after every dynamically traced journal write.
 
 Keeping an already active route uses its exact current decision fingerprint and
 underlay generation followed by a fresh unbound application TCP proof, with

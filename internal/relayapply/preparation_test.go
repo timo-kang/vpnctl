@@ -4,8 +4,11 @@ package relayapply
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"syscall"
 	"testing"
@@ -18,12 +21,16 @@ import (
 
 type preparationKernel struct {
 	*fakeNodeLease
-	removals []string
+	removals   []string
+	beforeStep func(Entry)
 }
 
 func (k *preparationKernel) Step(ctx context.Context, e Entry, step, key string) error {
 	if k.foreign {
 		return ErrConflict
+	}
+	if k.beforeStep != nil {
+		k.beforeStep(e)
 	}
 	return k.fakeKernel.Step(ctx, e, step, key)
 }
@@ -356,9 +363,23 @@ func TestPreparationReleaseStorageFailureCannotResurrect(t *testing.T) {
 }
 
 func TestPreparationJournalFailureEveryBoundary(t *testing.T) {
-	// Initial cursor, before/after each add, and final readback commits. Both
-	// pre-rename and committed-but-uncertain outcomes must reopen consistently.
-	for point := 1; point <= 34; point++ {
+	// Trace all actual owner, pre/post-add and final readback writes, so adding
+	// a new durable boundary cannot silently leave it outside the fault matrix.
+	// Both pre-rename and committed-but-uncertain outcomes must reopen safely.
+	boundaries := 0
+	t.Run("trace", func(t *testing.T) {
+		e, _, _, now := preparationFixture(t)
+		if _, err := e.RequestPreparation(context.Background(), "p0", ""); err != nil {
+			t.Fatal(err)
+		}
+		save := e.save
+		e.save = func(b []byte) error { boundaries++; return save(b) }
+		readyPreparation(t, e, now, "p0")
+	})
+	if boundaries == 0 {
+		t.Fatal("no durable boundaries traced")
+	}
+	for point := 1; point <= boundaries; point++ {
 		for _, after := range []bool{false, true} {
 			t.Run(fmt.Sprintf("write%d/committed%v", point, after), func(t *testing.T) {
 				e, k, dir, now := preparationFixture(t)
@@ -626,6 +647,68 @@ func TestPreparationSlowJournalYieldsBeforeNextUnit(t *testing.T) {
 	// a slow journal still prevents a second unit from taking a fresh budget.
 	if k.steps != 1 || k.active["p0"] || k.active["p1"] {
 		t.Fatal("slow persistence did not yield or opened lease", k.steps, k.active)
+	}
+}
+
+func TestPreparationCursorAndInFlightAreDurableBeforeEveryAdd(t *testing.T) {
+	e, k, dir, now := preparationFixture(t)
+	for _, path := range []string{"p0", "p1"} {
+		if _, err := e.RequestPreparation(context.Background(), path, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checked := 0
+	k.beforeStep = func(entry Entry) {
+		// The wg callback holds the cache key lock; inspect this test fixture's
+		// committed journal directly, without reentering that same cache lock.
+		raw, err := os.ReadFile(filepath.Join(dir, "apply.json"))
+		var env envelope
+		if err != nil || json.Unmarshal(raw, &env) != nil || env.Digest != digest(env.Journal) || env.Journal.RebuildCursor != entry.Candidate.PathID {
+			t.Fatal("kernel add preceded durable scheduling identity", err)
+		}
+		found := false
+		for _, p := range env.Journal.Preparations {
+			if p.PathID == entry.Candidate.PathID {
+				found = p.Phase == "preparing" && p.InFlight && p.Step < len(preparationSteps)
+			}
+		}
+		owned := false
+		for _, saved := range env.Journal.Entries {
+			owned = owned || saved.Candidate.PathID == entry.Candidate.PathID && saved.Alias == entry.Alias && saved.LinkIndex == entry.LinkIndex
+		}
+		if !found || !owned {
+			t.Fatal("kernel add preceded durable owner/in-flight marker")
+		}
+		checked++
+	}
+	readyPreparation(t, e, now, "p0")
+	readyPreparation(t, e, now, "p1")
+	if checked != 2*len(preparationSteps) {
+		t.Fatal("not every creation boundary was verified", checked)
+	}
+}
+
+func TestPreparationSlowPersistenceAvoidsCursorOnlyWrite(t *testing.T) {
+	e, k, _, now := preparationFixture(t)
+	for _, path := range []string{"p0", "p1"} {
+		if _, err := e.RequestPreparation(context.Background(), path, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.rebuildCandidates(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	// Controlled storage latency isolates the scheduling effect. Actual durable
+	// readback and failures are verified by the adjacent tests and fault matrix.
+	e.save = func([]byte) error { *now += 55 * time.Millisecond; return nil }
+	if _, err := e.RebuildCandidates(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if k.steps != 3 || k.active["p0"] || k.active["p1"] {
+		t.Fatal("redundant cursor writes consumed the quantum or granted traffic", k.steps)
+	}
+	if e.journal.Preparations[0].Step != 2 || e.journal.Preparations[1].Step != 1 {
+		t.Fatal("storage optimization changed round-robin fairness")
 	}
 }
 
