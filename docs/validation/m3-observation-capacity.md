@@ -670,3 +670,37 @@ baseline barrier; bootstrap load and readiness thresholds are unchanged. The
 host-safe regression retains both applications' initial failed cycles without
 opening sockets and retains them after early shutdown. Removing passive reader
 startup makes that regression fail. The bounded log/cycle/packet limits remain.
+
+
+## Cleanup behind a deferred creation (#201)
+
+The clean `4ec7782` [manager-auto-8 run](https://github.com/timo-kang/vpnctl/actions/runs/37655099506/job/112908097254)
+failed the 120-second preferred-recovery bound on an AMD EPYC 7763 runner with
+one CPU for the entire VM. Baseline, manager/link loss, all-relays-down and alternate recovery
+passed first. The alternate remained verified during preferred recovery. This is
+an executed integration failure, separate from that run's unstarted jobs whose
+GitHub annotations report repeated runner acquisition failures.
+
+The retained cycles show slow forward progress, without preparation-step resets.
+Admission waiting dominated the sampled supervision cycles. One independently
+reproduced contributor was a waiting/preparing/ready candidate ending the queue
+scan when fewer than 500ms of the 750ms quantum remained. A later owned cleanup
+could still fit that remainder, but it waited for another admission instead.
+
+The scheduler now scans beyond such candidates for idempotent removal work.
+Once it skips a creation candidate, it retains the prior durable scheduling
+cursor while completing opportunistic cleanup. The deferred creation therefore
+keeps priority after a process restart and a new admission. Cleanup-only queues
+retain normal round-robin order. No additional journal field or fsync is needed.
+
+Independent normal/race tests reproduce the blocked cleanup with 450ms remaining,
+then verify progress through real temporary journal writes and reopen. They also
+cover creation fairness on the next admission, unchanged candidate state,
+closed leases, ownership changes, cancellation, shared wall/BOOTTIME expiry,
+backoff, no eligible removal and the eight-unit bound. Allowing the cursor to
+advance past the skipped creation makes the restart fairness regression fail.
+
+The 750ms budget, 500ms creation reserve and live ownership/authority checks are
+unchanged. This removes a demonstrated wasted admission; it does not prove that
+the original remote 120-second bound now holds under arbitrary contention.
+The broader recovery and deployment-capacity work remain in #195 and #185.
