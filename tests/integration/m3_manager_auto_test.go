@@ -7,6 +7,7 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -402,14 +403,37 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			t.Fatal("expired approval carried payload", e)
 		}
 	}
+	report["relay_after_fresh_approval"] = map[string]m3SupervisorReport{}
 	phase("fresh-approval-awaiting-relay-apply", "fresh approval without relay installation", "", "authority", false, func() {
 		f.controller.start()
 		fresh := f.controller.apply(f.spec, 3600)
 		for _, relay := range f.recipients {
-			relay.readyApproval(fresh.ExpiresAt)
-			if len(relay.require("inspect", -1, 0).Endpoints) != 0 {
-				t.Fatal("retired relay endpoint resurrected without explicit apply")
-			}
+			// An absent endpoint must not meet the installed-endpoint readiness
+			// helper's KernelReady requirement. Verify fresh authority AND empty,
+			// non-ready kernel state independently before any explicit apply.
+			after := time.Now()
+			eventually(t, 12*time.Second, "fresh approval with empty relay "+relay.relay, func() error {
+				b, err := os.ReadFile(relay.watch.log)
+				if err != nil {
+					return err
+				}
+				lines := strings.Split(string(b), "\n")
+				if len(lines) < 2 {
+					return fmt.Errorf("missing supervisor report")
+				}
+				var state m3SupervisorReport
+				if err := json.Unmarshal([]byte(lines[len(lines)-2]), &state); err != nil {
+					return err
+				}
+				if !state.ObservedAt.After(after) || state.Refresh != "success" || !state.ApprovalValid || !state.ApprovalExpiresAt.Equal(fresh.ExpiresAt) || state.Kernel == nil {
+					return fmt.Errorf("fresh authority not yet observed")
+				}
+				if len(state.Kernel.Endpoints) != 0 || state.Kernel.KernelReady {
+					t.Fatal("retired relay resurrected without explicit apply", state)
+				}
+				report["relay_after_fresh_approval"].(map[string]m3SupervisorReport)[relay.relay] = state
+				return nil
+			})
 		}
 		eventually(t, 20*time.Second, "fresh node approval while relay remains absent", func() error {
 			if latestApplicationResult(logs["app"]).Selection.Generation != fresh.Generation {
