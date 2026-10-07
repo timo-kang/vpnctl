@@ -188,7 +188,14 @@ func runDataplaneWorker(ctx context.Context, cfg config.NodeConfig, updates <-ch
 				}
 				previous = r.statuses
 			}
-			timer.Reset(max(0, time.Until(lastStart.Add(time.Second))))
+			interval := time.Second
+			for _, status := range r.statuses {
+				if status.State == "probing" {
+					interval = directpath.VerificationInterval
+					break
+				}
+			}
+			timer.Reset(max(0, time.Until(lastStart.Add(interval))))
 		case <-timer.C:
 			if done != nil {
 				continue
