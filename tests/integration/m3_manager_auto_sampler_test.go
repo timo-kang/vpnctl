@@ -11,7 +11,10 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"vpnctl/internal/relayapply"
 	"vpnctl/internal/relayobserve"
+	"vpnctl/internal/relayselect"
 )
 
 // Host-safe: net.Pipe uses no kernel interface or network configuration.
@@ -180,5 +183,50 @@ func TestManagerTimelineQuarantineDoesNotProveAllCandidatesFailed(t *testing.T) 
 	got = managerNoPathTimeline(nil, cycles, "p11", 90)
 	if got["decision_complete"] != 140 || got["routes_completed"] != 120 {
 		t.Fatal("all-candidate failure or earlier quarantine lost", got)
+	}
+}
+
+func TestManagerTimelineBaselineRequiresFreshCyclesFromBothWatchers(t *testing.T) {
+	result := func(path string, start, finish time.Duration) relayapply.TargetReconcileResult {
+		return relayapply.TargetReconcileResult{
+			Applied: true,
+			Selection: relayselect.Decision{DesiredPathID: path, Candidates: []relayselect.Candidate{
+				{Eligible: true, TargetObservation: relayobserve.TargetObservation{PathID: path, State: "reachable"}},
+			}},
+			Diagnostics: &relayobserve.Diagnostics{MonotonicAvailable: true, StartedMono: start, FinishedMono: finish},
+		}
+	}
+	b := managerBaselineBarrier{after: 100}
+	app, other := result("p00", 80, 90), result("p11", 80, 90)
+	for i := 0; i < 100; i++ {
+		if b.ready(app, other, 1) {
+			t.Fatal("old successful logs passed setup barrier")
+		}
+	}
+	app, other = result("p00", 90, 110), result("p11", 90, 110)
+	if b.ready(app, other, 1) {
+		t.Fatal("inflight pre-setup cycle counted as fresh")
+	}
+	app, other = result("p00", 101, 110), result("p11", 101, 110)
+	for i := 0; i < 100; i++ {
+		if b.ready(app, other, 1) {
+			t.Fatal("duplicate log reads counted as completed cycles")
+		}
+	}
+	app = result("p00", 111, 120)
+	if b.ready(app, other, 1) {
+		t.Fatal("one fresh watcher certified both")
+	}
+	other = result("p11", 111, 120)
+	if !b.ready(app, other, 1) {
+		t.Fatal("two fresh ready cycles rejected")
+	}
+	app.Applied = false
+	if b.ready(app, other, 1) {
+		t.Fatal("readiness retained after withdrawal")
+	}
+	app.Applied = true
+	if b.ready(app, other, 1) {
+		t.Fatal("old logs reused after readiness reset")
 	}
 }

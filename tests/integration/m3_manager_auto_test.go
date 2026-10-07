@@ -50,16 +50,13 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	// events. Start fault measurements only after all candidates and both apps
 	// have a stable, fully confirmed baseline; do not count bootstrap as a fault.
 	report["baseline_wait_started_monotonic_ns"] = managerMono()
+	barrier := managerBaselineBarrier{after: report["baseline_wait_started_monotonic_ns"].(int64)}
 	var stableSince time.Time
 	eventually(t, 120*time.Second, "stable automatic baseline", func() error {
 		app, independent := latestApplicationResult(logs["app"]), latestApplicationResult(logs["app2"])
-		ready := app.Applied && app.Selection.DesiredPathID == "p00" && independent.Applied && independent.Selection.DesiredPathID == "p11" && len(app.Selection.Candidates) == size
-		for _, c := range app.Selection.Candidates {
-			ready = ready && c.Eligible && c.State == "reachable"
-		}
-		if !ready {
+		if !barrier.ready(app, independent, size) {
 			stableSince = time.Time{}
-			return fmt.Errorf("bootstrap candidates or application not ready")
+			return fmt.Errorf("waiting for two fresh ready cycles per application after fixture policy changes")
 		}
 		if stableSince.IsZero() {
 			stableSince = time.Now()
@@ -70,6 +67,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		return nil
 	})
 	report["baseline_ready_monotonic_ns"] = managerMono()
+	report["baseline_ready_cycles"] = map[string]int{"app": barrier.appSamples, "app2": barrier.otherSamples}
 	trace := startManagerAutoTrace(logs)
 	t.Cleanup(func() {
 		trace.close()

@@ -81,8 +81,10 @@ A command's start/completion brackets the injected event; the start is a
 conservative latency origin, not a claim about an exact kernel notification.
 Cycles already running at fault start retain their later checkpoints. Initial
 manager setup must settle with all candidates confirmed before measurement; its
-wait interval is recorded separately. Manager profiles activate before the two
-application watchers start; the real node supervisor must rebuild any invalidated
+wait interval is recorded separately. Both application watchers must finish two
+distinct ready cycles started after all fixture policy changes; rereading old
+successful logs for a few seconds cannot satisfy that barrier. Manager profiles
+activate before the two application watchers start; the real node supervisor must rebuild any invalidated
 bootstrap candidates within 120 seconds, verified by device-bound payload. All
 measured manager faults run with both application watchers active. Complete public
 preparation reports from the last 32 supervisor cycles accompany failure

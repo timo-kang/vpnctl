@@ -535,3 +535,34 @@ func managerNoPathTimeline(packets []managerAutoEvent, cycles []managerAutoCycle
 	}
 	return out
 }
+
+// Fixture policy setup can publish a global underlay event. Earlier successful
+// logs do not prove readiness after that event, even if repeatedly read for a
+// few seconds. Require distinct completed ready cycles from both live watchers.
+type managerBaselineBarrier struct {
+	after, appFinished, otherFinished int64
+	appSamples, otherSamples          int
+}
+
+func (b *managerBaselineBarrier) ready(app, independent relayapply.TargetReconcileResult, size int) bool {
+	fresh := func(r relayapply.TargetReconcileResult) bool {
+		return r.Diagnostics != nil && r.Diagnostics.MonotonicAvailable && int64(r.Diagnostics.StartedMono) > b.after && r.Diagnostics.FinishedMono >= r.Diagnostics.StartedMono
+	}
+	ready := fresh(app) && fresh(independent) && app.Applied && app.Selection.DesiredPathID == "p00" && independent.Applied && independent.Selection.DesiredPathID == "p11" && len(app.Selection.Candidates) == size
+	for _, c := range app.Selection.Candidates {
+		ready = ready && c.Eligible && c.State == "reachable"
+	}
+	if !ready {
+		b.appSamples, b.otherSamples = 0, 0
+		return false
+	}
+	if at := int64(app.Diagnostics.FinishedMono); at > b.appFinished {
+		b.appFinished = at
+		b.appSamples = min(2, b.appSamples+1)
+	}
+	if at := int64(independent.Diagnostics.FinishedMono); at > b.otherFinished {
+		b.otherFinished = at
+		b.otherSamples = min(2, b.otherSamples+1)
+	}
+	return b.appSamples >= 2 && b.otherSamples >= 2
+}
