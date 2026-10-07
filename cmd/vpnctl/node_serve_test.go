@@ -17,6 +17,17 @@ import (
 )
 
 func TestNodeServeRestoresCachedPathAndRetriesRequestTimeout(t *testing.T) {
+	testNodeServeStartupRetry(t, 0)
+}
+
+func TestNodeServeRetriesInitialRegistrationServerFailure(t *testing.T) {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) { testNodeServeStartupRetry(t, status) })
+	}
+}
+
+func testNodeServeStartupRetry(t *testing.T, status int) {
+	t.Helper()
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "tunnel-ready")
 	// Command shims keep this supervisor test unprivileged; the netns suite
@@ -44,6 +55,10 @@ func TestNodeServeRestoresCachedPathAndRetriesRequestTimeout(t *testing.T) {
 			t.Error("controller request preceded cached WireGuard restoration")
 		}
 		if requests.Add(1) == 1 {
+			if status != 0 {
+				http.Error(w, "node registration failed", status)
+				return
+			}
 			// Exceed the API client's real request timeout. The supervisor must
 			// retry while its process context is still alive.
 			<-r.Context().Done()
@@ -76,6 +91,6 @@ func TestNodeServeRestoresCachedPathAndRetriesRequestTimeout(t *testing.T) {
 	select {
 	case <-reached:
 	case <-time.After(15 * time.Second):
-		t.Fatal("node serve stopped or failed to retry after a request timeout")
+		t.Fatal("node serve stopped or failed to retry after a startup request failure")
 	}
 }
