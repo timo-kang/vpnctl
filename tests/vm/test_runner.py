@@ -8,6 +8,13 @@ from unittest import mock
 import guest_agent
 import observer
 
+def lan_reconfiguration_evidence():
+    return dict(action_completed_monotonic_ns=2, recovered_monotonic_ns=3,
+                watchdog_ms=5000, failed_samples=0,
+                payload_verified_monotonic_ns={'172.20.10.2': 3, '172.20.20.2': 3},
+                rf_route=[dict(dev='rf0', prefsrc='172.20.10.1')],
+                gimbal_route=[dict(dev='gimbal0', prefsrc='172.20.20.1')])
+
 class IsolationTests(unittest.TestCase):
     def args(self):
         return {'vpnctl_vm_test': '', 'vpnctl_vm_token': 'a' * 32,
@@ -152,8 +159,12 @@ class ManagerEvidenceTests(unittest.TestCase):
         names = ['baseline', 'nm-reload', 'nm-restart', 'nm-disconnect-reconnect',
                  'netplan-apply', 'networkd-reload', 'networkd-restart',
                  'nm-shared-up', 'nm-shared-down', 'udev-recreate']
-        return {'exit': 0, 'report': {'schema_version': 1, 'completed': True,
-                'steps': [{'name': n, 'passed': True} for n in names]}}
+        steps = [{'name': n, 'passed': True} for n in names]
+        netplan = next(s for s in steps if s['name'] == 'netplan-apply')
+        netplan.update(begin_monotonic_ns=1, lan_reconfiguration=lan_reconfiguration_evidence())
+        for key in ('traffic_before', 'traffic_after_lan_recovery', 'traffic_after'):
+            netplan[key] = {target: dict(failed=0) for target in ('172.20.10.2', '172.20.20.2')}
+        return {'exit': 0, 'report': {'schema_version': 1, 'completed': True, 'steps': steps}}
 
     def test_skipped_empty_nonzero_and_incomplete_cannot_pass(self):
         for status in ({'exit': 0}, {'exit': 1, 'report': self.valid()['report']},
@@ -179,6 +190,17 @@ class ManagerEvidenceTests(unittest.TestCase):
     def test_complete_exact_matrix_passes(self):
         observer.validate_manager_result(self.valid())
 
+    def test_lan_failure_is_measured_only_during_direct_reconfiguration(self):
+        status = self.valid()
+        step = next(s for s in status['report']['steps'] if s['name'] == 'netplan-apply')
+        step['lan_reconfiguration']['failed_samples'] = 1
+        for key in ('traffic_after_lan_recovery', 'traffic_after'):
+            step[key]['172.20.20.2']['failed'] = 1
+        observer.validate_manager_result(status)
+        step['traffic_after']['172.20.20.2']['failed'] = 2
+        with self.assertRaises(RuntimeError):
+            observer.validate_manager_result(status)
+
 class AutoManagerEvidenceTests(unittest.TestCase):
     def valid(self):
         metrics = {'nm-down': 'failover', 'relay0-down': 'failover', 'flap-down-0': 'failover',
@@ -197,6 +219,8 @@ class AutoManagerEvidenceTests(unittest.TestCase):
                 row['no_uplink_evidence_state'] = 'no_verified_path'
                 row['previous_path'], row['failover_path'] = 'p00', 'p02'
             steps.append(row)
+            if name == 'netplan-apply':
+                row['lan_reconfiguration'] = lan_reconfiguration_evidence()
         report = dict(schema_version=2, completed=True, paths=4, mode='automatic', trace_error='', steps=steps,
                       fresh_generation_confirmed=True, recovery_hysteresis_observed=True, foreign_policy_preserved=True,
                       foreign_peer_preserved=True, fallback_positive_control=True,
@@ -211,6 +235,31 @@ class AutoManagerEvidenceTests(unittest.TestCase):
 
     def test_complete_functional_matrix_does_not_claim_p95(self):
         observer.validate_manager_auto_result(self.valid(), 4)
+
+    def test_lan_reconfiguration_records_losses_without_hiding_late_failure(self):
+        status = self.valid()
+        step = next(s for s in status['report']['steps'] if s['name'] == 'netplan-apply')
+        sample = next(p for p in status['report']['packets'] if p['kind'] == 'gimbal-lan')
+        sample['ok'] = False
+        step['traffic']['gimbal-lan'] = dict(failed=1)
+        step['lan_reconfiguration']['failed_samples'] = 1
+        observer.validate_manager_auto_result(status, 4)
+        sample['end_monotonic_ns'] = 4
+        with self.assertRaisesRegex(RuntimeError, 'outside direct reconfiguration'):
+            observer.validate_manager_auto_result(status, 4)
+
+    def test_lan_recovery_needs_routes_payloads_and_bounded_clock(self):
+        for mutate in (lambda r: r.pop('lan_reconfiguration'),
+                       lambda r: r['lan_reconfiguration'].update(recovered_monotonic_ns=5_000_000_003),
+                       lambda r: r['lan_reconfiguration'].update(payload_verified_monotonic_ns={}),
+                       lambda r: r['lan_reconfiguration'].update(rf_route=[]),
+                       lambda r: r['lan_reconfiguration'].update(gimbal_route=[dict(dev='wan0', prefsrc='172.20.20.1')]),
+                       lambda r: r['lan_reconfiguration'].update(failed_samples=1)):
+            status = self.valid()
+            step = next(s for s in status['report']['steps'] if s['name'] == 'netplan-apply')
+            mutate(step)
+            with self.assertRaises(RuntimeError):
+                observer.validate_manager_auto_result(status, 4)
 
     def test_partial_evidence_is_rejected(self):
         mutations = [lambda r: r.update(completed=False), lambda r: r.update(paths=8),

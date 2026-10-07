@@ -46,6 +46,19 @@ type managerAutoEvent struct {
 	Error    string `json:"error,omitempty"`
 	Session  int    `json:"session,omitempty"`
 }
+
+func managerLANReconfigurationSample(phase string, p managerAutoEvent, begin, recovered int64) bool {
+	return phase == "netplan-apply" && (p.Kind == "rf-lan" || p.Kind == "gimbal-lan") &&
+		begin > 0 && recovered >= begin && p.Begin >= begin && p.End >= p.Begin && p.End <= recovered
+}
+
+// Changing fixture authority resets health confirmation. Do not inject the
+// subsequent controller fault while either app is still confirming that change.
+func managerApprovalReady(generation uint64, app, independent relayapply.TargetReconcileResult) bool {
+	return generation > 0 && app.Applied && independent.Applied &&
+		app.Selection.Generation == generation && independent.Selection.Generation == generation
+}
+
 type managerAutoCycle struct {
 	Observed          int64                     `json:"observed_monotonic_ns"`
 	Target            string                    `json:"target"`

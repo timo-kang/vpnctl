@@ -17,6 +17,47 @@ import (
 	"vpnctl/internal/relayselect"
 )
 
+func TestManagerLANReconfigurationCannotHideUnrelatedFailures(t *testing.T) {
+	for _, test := range []struct {
+		phase, kind string
+		start, end  int64
+		allowed     bool
+	}{
+		{"netplan-apply", "gimbal-lan", 10, 15, true},
+		{"netplan-apply", "rf-lan", 10, 15, true},
+		{"netplan-apply", "independent-app", 10, 15, false},
+		{"nm-down", "rf-lan", 10, 15, false},
+		{"netplan-apply", "rf-lan", 9, 15, false},
+		{"netplan-apply", "rf-lan", 10, 21, false},
+		{"netplan-apply", "rf-lan", 21, 22, false},
+	} {
+		p := managerAutoEvent{Kind: test.kind, Begin: test.start, End: test.end}
+		if got := managerLANReconfigurationSample(test.phase, p, 10, 20); got != test.allowed {
+			t.Fatalf("unexpected LAN interruption classification: %+v got %v", test, got)
+		}
+	}
+}
+
+func TestManagerTimelineApprovalBarrierRequiresBothApplications(t *testing.T) {
+	app := relayapply.TargetReconcileResult{Applied: true, Selection: relayselect.Decision{Generation: 4}}
+	other := app
+	if !managerApprovalReady(4, app, other) {
+		t.Fatal("fresh confirmed applications rejected")
+	}
+	other.Selection.Generation = 3
+	if managerApprovalReady(4, app, other) {
+		t.Fatal("old independent app proof admitted controller fault")
+	}
+	other.Selection.Generation, other.Applied = 4, false
+	if managerApprovalReady(4, app, other) {
+		t.Fatal("confirming independent application admitted controller fault")
+	}
+	other.Applied, app.Applied = true, false
+	if managerApprovalReady(4, app, other) {
+		t.Fatal("confirming primary application admitted controller fault")
+	}
+}
+
 // Host-safe: net.Pipe uses no kernel interface or network configuration.
 func TestManagerStreamRetainsPartialFrameAcrossTimeout(t *testing.T) {
 	client, server := net.Pipe()

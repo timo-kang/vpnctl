@@ -63,6 +63,31 @@ func managerCommand(t *testing.T, args ...string) string {
 	}
 	return strings.TrimSpace(string(b))
 }
+
+// Netplan apply explicitly reconfigures these LANs. systemd-networkd's forced
+// reconfigure removes managed addresses/routes before adding them again. Record
+// that operation's recovery separately; VPN switching must still leave LANs up.
+func managerLANRecovery(t *testing.T, completed int64) map[string]any {
+	t.Helper()
+	proofs := map[string]int64{}
+	eventually(t, 5*time.Second, "direct LAN reconfiguration recovery", func() error {
+		for target, source := range map[string]string{"172.20.10.2": "172.20.10.1", "172.20.20.2": "172.20.20.1"} {
+			if err := managerPayload(target, source); err != nil {
+				return err
+			}
+			proofs[target] = managerMono()
+		}
+		return nil
+	})
+	recovered := managerMono()
+	if recovered-completed > int64(5*time.Second) {
+		t.Fatal("LAN recovery exceeded the five-second fixture watchdog")
+	}
+	return map[string]any{"action_completed_monotonic_ns": completed, "recovered_monotonic_ns": recovered,
+		"watchdog_ms": 5000, "payload_verified_monotonic_ns": proofs,
+		"rf_route":     json.RawMessage(managerCommand(t, "ip", "-j", "route", "get", "172.20.10.2")),
+		"gimbal_route": json.RawMessage(managerCommand(t, "ip", "-j", "route", "get", "172.20.20.2"))}
+}
 func managerWrite(t *testing.T, path, data string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -453,9 +478,17 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 		for name, s := range traffic {
 			before[name] = s.snapshot()
 		}
-		row := map[string]any{"name": step.name, "passed": false, "traffic_before": before}
+		row := map[string]any{"name": step.name, "passed": false, "traffic_before": before, "begin_monotonic_ns": managerMono()}
 		report["steps"] = append(report["steps"].([]map[string]any), row)
 		step.action()
+		lanRecovered := map[string]any{}
+		if step.name == "netplan-apply" {
+			row["lan_reconfiguration"] = managerLANRecovery(t, managerMono())
+			for _, name := range []string{"172.20.10.2", "172.20.20.2"} {
+				lanRecovered[name] = traffic[name].snapshot()
+			}
+			row["traffic_after_lan_recovery"] = lanRecovered
+		}
 		eventually(t, 120*time.Second, "manager recovery "+step.name, func() error {
 			for _, log := range logs {
 				if !latestApplicationResult(log).StartedAt.After(started) {
@@ -463,7 +496,11 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 				}
 			}
 			for name, stats := range traffic {
-				if stats.snapshot()["ok"].(int) <= before[name].(map[string]any)["ok"].(int) {
+				baseline := before[name]
+				if recovered, ok := lanRecovered[name]; ok {
+					baseline = recovered
+				}
+				if stats.snapshot()["ok"].(int) <= baseline.(map[string]any)["ok"].(int) {
 					return fmt.Errorf("waiting for payload samples: %s", name)
 				}
 			}
@@ -503,11 +540,22 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 			after[name] = s.snapshot()
 		}
 		for _, name := range []string{"172.20.10.2", "172.20.20.2", "198.18.0.3"} {
-			if after[name].(map[string]any)["failed"] != before[name].(map[string]any)["failed"] {
+			comparison := before[name]
+			if recovered, ok := lanRecovered[name]; ok {
+				comparison = recovered
+			}
+			if after[name].(map[string]any)["failed"] != comparison.(map[string]any)["failed"] {
 				t.Fatal("independent application or LAN traffic interrupted", step.name, name, after[name])
 			}
 		}
 		row["traffic_after"] = after
+		if step.name == "netplan-apply" {
+			failed := 0
+			for _, name := range []string{"172.20.10.2", "172.20.20.2"} {
+				failed += after[name].(map[string]any)["failed"].(int) - before[name].(map[string]any)["failed"].(int)
+			}
+			row["lan_reconfiguration"].(map[string]any)["failed_samples"] = failed
+		}
 		row["elapsed_ms"] = time.Since(started).Milliseconds()
 		row["passed"] = true
 	}

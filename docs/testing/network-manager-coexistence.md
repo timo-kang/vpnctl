@@ -59,7 +59,11 @@ networkd drop-in과 `.network`는 서비스 UID가 읽는 0644, Netplan YAML은 
   실행한다. 대체 경로를 자동 선택하는 failover SLO 시험과 구분한다.
   두 앱과 두 LAN에 서로 다른 TCP socket의 무작위 nonce를 연속 전송하며 서버가 본
   source도 확인한다. 각 단계의 성공/실패 건수, 최대 성공 간격과 실행 시간을 기록한다.
-  LAN 또는 독립 앱의 실패는 해당 단계 실패다. 새 TCP 검증이며 기존 세션 이동 보장을 주장하지 않는다.
+  LAN 또는 독립 앱의 실패는 해당 단계 실패다. 단, LAN을 직접 재설정하는 `netplan-apply`는
+  관리자 자체의 중단 건수를 별도 기록하고, 명령 완료 후 5초 이내 실제 nonce 응답·기존 source와
+  route 복구를 요구한다. 복구 확인 후 LAN 실패나 독립 앱 실패는 여전히 시험 실패다.
+  `lan_reconfiguration`, 재설정 전/직후/단계 종료의 샘플 수를 남기며 Netplan 자체의 무손실을
+  주장하지 않는다. 새 TCP 검증이며 기존 세션 이동 보장을 주장하지 않는다.
 - 공유망 client는 실제 NM dnsmasq와 DHCP discover/offer/request/ack를 교환해 주소,
   mask, router, DNS, lease를 검사한다. UDP bootstrap을 위한 초기 시험 주소를 받은
   주소로 바꾼 후 RF target까지 실제 SNAT된 source와 payload를 검사한다.
