@@ -31,7 +31,7 @@ explicit relay installation with fresh approval. Manager operations and syntheti
 kernel faults are distinguished by each step's `origin` field.
 
 Relay supervision renews already installed endpoints; it does not retain an
-installation intent after approval expiry removes them. Fresh approval alone
+installation intent after approval expiry removes them ([follow-up #178](https://github.com/timo-kang/vpnctl/issues/178)). Fresh approval alone
 must leave those absent endpoints blocked. The final recovery explicitly runs
 `relay apply` with the existing matching local key; only node candidate rebuilding
 and application path selection recover automatically. This is a deployment
@@ -59,6 +59,11 @@ management NIC's default route remains intact. Other VPN/firewall resources are
 synthetic ownership fixtures, not a claim about every third-party VPN product.
 
 ## Timing, TCP semantics and evidence
+
+The outer runner's legacy `mode` option applies to its lease/power cases; manager
+cases keep supervisors running and describe intentional process stops in their
+individual steps. `qualified=true` means this functional matrix completed, not
+that a p95 or an end-to-end deployment SLO passed.
 
 `manager-auto` in the VM verdict contains a schema-2 report, every scenario,
 bounded packet and application-cycle traces, final inventory and diagnostics.
