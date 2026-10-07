@@ -615,3 +615,92 @@ is checked separately using a Go overlay without altering the product source.
 The manager comparison results are tracked separately; no general CPU
 capacity improvement or resolution of the 120-second failure is inferred from
 this isolation fix alone.
+
+
+## Reusing the remaining preparation quantum (#195)
+
+The matched local manager-install-8 baseline and endpoint-isolation candidate
+both passed all 28 steps on AMD Ryzen 7 9800X3D at whole-VM 0.5 CPU with the
+same cached image, without race instrumentation. Flap-up 0/1 convergence was 32.209/30.470 seconds before
+and 33.275/30.378 seconds after. These single samples do not show a speedup or
+reproduce the remote failure. Endpoint isolation remains justified by its
+independent deadline-stall correctness regression, not those timings.
+
+A further independent production-scheduler reproduction found that finalizing
+one candidate ended the entire quantum, even with 650ms of the 750ms budget
+left and another fully installed, closed candidate awaiting final validation.
+Two 100ms readbacks therefore required two admissions. The loop now continues
+within the existing budget, remembering completed paths only until this call
+returns. It does not treat completion as lease evidence or update `maintained`.
+Both readbacks can finish in one 200ms quantum in the deterministic fixture.
+
+The 500ms BOOTTIME and wall-clock reserve, 8-unit limit, fresh approval, current
+inventory/ownership checks and durable journal boundaries remain unchanged.
+Tests forbid creation and lease calls during finalization, reopen the actual
+journal, and check interrupted saves before and after persistence. Cancellation,
+authority denial, changed underlay, failed kernel readback and expired budget
+remain closed; a new admission without fresh lease maintenance still rejects
+the prepared candidate. This saves a demonstrably unnecessary admission but
+does not establish an upper bound on arbitrary host contention. The original
+remote failure and deployment capacity qualification remain separately tracked.
+
+
+## Manager fixture priority collision and early evidence (#197)
+
+The `40d189e` [manager-install-8 CI failure](https://github.com/timo-kang/vpnctl/actions/runs/37648920742/job/112886809459)
+failed before fault injection, at the stable-baseline barrier. This was a different
+incident from #195's slow preferred-path rebuild. The captured application
+reservation and the fixture's unrelated VPN rule both used priority **32000**.
+Application reservations span 32000..32759, so the fixture's fixed value could
+collide with a randomly assigned application reservation. The primary app stayed
+in `target_quarantine_conflict`; the independent app remained active. The
+product correctly refused the foreign collision, and that rule is unchanged.
+
+The fixture now uses priority **32761**, outside candidate/probe and application
+reservations, after its fallback32760 and before main32766. Creation and all
+preservation checks use the same constant. Replaying the captured ownership
+tuples confirms that the original collision prevents mutation; with the fixture
+priority outside the reservation, owned application-route cleanup succeeds while
+preserving both the terminal guard and foreign rule.
+
+The old trace began only after the stable baseline passed, leaving this failure
+without full application cycles. Passive log readers and their cleanup now
+start before fixture setup. Packet samplers still start only after the original
+baseline barrier; bootstrap load and readiness thresholds are unchanged. The
+host-safe regression retains both applications' initial failed cycles without
+opening sockets and retains them after early shutdown. Removing passive reader
+startup makes that regression fail. The bounded log/cycle/packet limits remain.
+
+
+## Cleanup behind a deferred creation (#201)
+
+The clean `4ec7782` [manager-auto-8 run](https://github.com/timo-kang/vpnctl/actions/runs/37655099506/job/112908097254)
+failed the 120-second preferred-recovery bound on an AMD EPYC 7763 runner with
+one CPU for the entire VM. Baseline, manager/link loss, all-relays-down and alternate recovery
+passed first. The alternate remained verified during preferred recovery. This is
+an executed integration failure, separate from that run's unstarted jobs whose
+GitHub annotations report repeated runner acquisition failures.
+
+The retained cycles show slow forward progress, without preparation-step resets.
+Admission waiting dominated the sampled supervision cycles. One independently
+reproduced contributor was a waiting/preparing/ready candidate ending the queue
+scan when fewer than 500ms of the 750ms quantum remained. A later owned cleanup
+could still fit that remainder, but it waited for another admission instead.
+
+The scheduler now scans beyond such candidates for idempotent removal work.
+Once it skips a creation candidate, it retains the prior durable scheduling
+cursor while completing opportunistic cleanup. The deferred creation therefore
+keeps priority after a process restart and a new admission. Cleanup-only queues
+retain normal round-robin order. No additional journal field or fsync is needed.
+
+Independent normal/race tests reproduce the blocked cleanup with 450ms remaining,
+then verify progress through real temporary journal writes and reopen. They also
+cover creation fairness on the next admission, unchanged candidate state,
+closed leases, ownership changes, cancellation, shared wall/BOOTTIME expiry,
+backoff, no eligible removal and the eight-unit bound. Allowing the cursor to
+advance past the skipped creation makes the restart fairness regression fail.
+
+The 750ms budget, 500ms creation reserve and live ownership/authority checks are
+unchanged. This removes a demonstrated wasted admission; it does not prove that
+the original remote 120-second bound now holds under arbitrary contention.
+The broader recovery and deployment-capacity work remain in #195 and #185.

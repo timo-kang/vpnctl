@@ -279,6 +279,10 @@ func (e *Engine) rebuildCandidates(parent context.Context, units int) (out Resul
 	if err = budget(); err != nil {
 		return failure("", "rebuild_budget_exhausted", err)
 	}
+	// A newly completed candidate remains closed until later lease maintenance.
+	// Skip it only in this quantum, allowing other candidates to use the shared
+	// budget without rechecking the new entry as an expired ready lease.
+	completed := map[string]bool{}
 	for n := 0; n < units; n++ {
 		creationHeadroom := true
 		if n > 0 {
@@ -298,21 +302,24 @@ func (e *Engine) rebuildCandidates(parent context.Context, units int) (out Resul
 		if err = e.syncTerminalScopes(ctx); err != nil {
 			return failure("", "underlay_events_unavailable", err)
 		}
-		unit, unitErr := e.rebuildCandidateUnit(ctx, budget, creationHeadroom)
+		unit, unitErr := e.rebuildCandidateUnit(ctx, budget, creationHeadroom, completed)
 		if unit.PathID != "" || n == 0 {
 			out = unit
 		}
 		if unitErr != nil {
 			return out, unitErr
 		}
-		if unit.State == "idle" || unit.State == "prepared" {
+		if unit.State == "idle" {
 			break
+		}
+		if unit.State == "prepared" {
+			completed[unit.PathID] = true
 		}
 	}
 	return out, nil
 }
 
-func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error, creationHeadroom bool) (out Result, err error) {
+func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error, creationHeadroom bool, completed map[string]bool) (out Result, err error) {
 	ctx, done := relayobserve.Phase(ctx, "rebuild_unit")
 	defer done()
 	out = result("idle", "", "")
@@ -324,20 +331,27 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error, 
 		return out, err
 	}
 	begin := e.preparationIndex(e.journal.RebuildCursor) + 1
+	preserveCursor := false
 	for n := 0; n < len(e.journal.Preparations); n++ {
 		i := (begin + n) % len(e.journal.Preparations)
 		p := e.journal.Preparations[i]
+		if completed[p.PathID] {
+			continue
+		}
 		allowed, consentErr := e.preparationAllowed(p.PathID)
 		if p.RetryBootNS > uint64(start) || consentErr == nil && allowed && p.Phase == "ready" && e.maintained[p.PathID] {
 			continue
 		}
 		if !creationHeadroom && p.Phase != "removing" {
-			// Preserve the scheduling cursor: this candidate resumes first in
-			// the next admission. Never spend cleanup headroom on a new add.
-			return out, nil
+			// Later owned cleanup may use the remainder, but keep the cursor
+			// before this deferred candidate so it resumes first next admission.
+			preserveCursor = true
+			continue
 		}
 		out.PathID, out.State = p.PathID, "rebuilding"
-		e.journal.RebuildCursor = p.PathID
+		if !preserveCursor {
+			e.journal.RebuildCursor = p.PathID
+		}
 		// Commit the scheduling cursor with this unit's durable state change,
 		// failure/backoff, or pre-add InFlight marker below. A separate cursor
 		// write adds an fsync without authorizing or protecting any kernel work.
