@@ -395,7 +395,7 @@ Optimization ledger (all checks and freshness limits retained):
 | Candidate | Measurement | Decision |
 | --- | --- | --- |
 | Fresh bounded native `rp_filter` reads | 1,000 reads × 3, race, Ryzen 9800X3D: original command 260.659–267.245µs/read; native command path 4.222–4.721µs/read | Kept: roughly 120 fewer children per cohort in the VM; no cached settings or skipped checks |
-| FIFO polling | Two 25ms waiters: 0.0119–0.0136 CPU production, 0.0315–0.0318 race on the same local CPU | Measured secondary cost; no production change |
+| FIFO polling | Two 25ms waiters: 0.0119–0.0136 CPU production, 0.0315–0.0318 race on the same local CPU | Measured wait-only predecessor hint; same cadence, full validation before every admission |
 | Repeated public inventory decoding | Not yet isolated in a representative profile | No speculative cache added |
 
 A separate, stricter diagnostic limits the whole local VM to 0.5 CPU while
@@ -414,5 +414,37 @@ End-to-end headroom remains insufficient: the largest steady eligible gap was
 9.706s, and app2 recorded 10.157–10.295s confirmation gaps during initial
 activation. A pass in this short fixture is not a claim that all gaps disappeared
 or that the slower remote profile is resolved. The original failures remain
-retained. Measured FIFO polling cost is the next bounded improvement; final
-same-profile comparison and exact-head CI remain required before merging.
+retained. FIFO polling cost is addressed below; final same-profile comparison and
+exact-head CI remain required before merging.
+
+
+### Bound the cost of waiting without changing admission authority
+
+The FIFO queue now retains the last fully validated predecessor's slot, ticket
+and inode as a waiting hint. Each 25ms poll freshly opens and validates the
+metadata file and that slot. A still-locked matching predecessor can only keep
+the caller waiting. Allocation, admission and every changed or missing hint
+still require the original complete 32-slot scan under the metadata lock.
+Cancelled contexts stop before filesystem work; no cached approval or lease is
+introduced. Other corruption may remain unobserved while blocked, but is always
+checked before any turn can be granted.
+
+Independent review rejected the first hint implementation: an unlocked-slot
+`flock` probe outside the metadata lock could briefly look like a live queue
+member and falsely return `ErrAdmissionFull` with only 31 actual tickets.
+A controlled preemption with real files/locks reproduced it. The final hint
+holds the metadata lock and closes the probed slot before releasing that guard;
+the same reproduction passes. No production test hook was added.
+
+Real inotify regressions require at most two files per blocked poll, forbid
+slot inspection during metadata publication, and require a complete scan after
+an inode change even if its ticket is identical. Tests cover partial publication,
+rename, replacement, symlink, wrong permissions, corruption, same-inode ticket
+reuse, FIFO rejoin, cancelled waits and real process death. The full relaycache
+race suite and independent review passed.
+
+The same two-waiter, 25ms, 5s × 3 benchmark reduced CPU from 0.0119–0.0136 to
+0.00314–0.00320 cores in production and from 0.0315–0.0318 to 0.00512–0.00614
+with race instrumentation. Tight per-poll CPU fell from 106–108µs to
+6.71–6.73µs production, and from 294–297µs to 17.68–18.12µs race. These are
+local Ryzen 9800X3D measurements; the end-to-end VM qualification is separate.

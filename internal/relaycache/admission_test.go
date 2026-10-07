@@ -165,7 +165,7 @@ func TestAdmissionProcessWorker(t *testing.T) {
 	for scanner.Scan() {
 		switch scanner.Text() {
 		case "check":
-			first, err := a.scan(context.Background())
+			first, err := a.poll(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
