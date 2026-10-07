@@ -97,6 +97,17 @@ Capacity overflow, truncation, missing clocks, omitted phases or nonzero test
 exit cannot pass. Raw private config, certificates, cache and WG keys remain in
 the private VM work directory and are not exported.
 
+The six 200ms packet samplers retain up to 40,000 events: enough for their
+36,006-event upper bound over the existing 20-minute fixture timeout. Overflow
+still fails, retains prior evidence, and never overwrites an earlier failure.
+Status polling reads at most a 512KiB+1 tail and decodes the newest complete
+application record rather than reparsing all historical cycles. An unfinished
+write grants no new evidence; a blocked latest cycle cannot reuse an earlier
+success. The independent incremental trace reader preserves and validates every
+complete cycle. Failure-only polls avoid copying the growing packet history.
+These bounds reduce measurement CPU/allocation pressure without changing probe
+frequency, freshness, lease enforcement or any convergence/SLO deadline.
+
 All packet timestamps, fault-command beginnings, command completions and product
 execution checkpoints use the same guest boot's Linux `CLOCK_MONOTONIC` domain.
 An observation's log receipt time is separate from its recorded execution time.
