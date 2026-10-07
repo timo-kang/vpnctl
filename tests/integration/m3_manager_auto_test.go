@@ -504,8 +504,8 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			relay.readyApproval(approval.ExpiresAt)
 		}
 		eventually(t, 30*time.Second, "short approval before automatic installation test", func() error {
-			if latestApplicationResult(logs["app"]).Selection.Generation != approval.Generation {
-				return fmt.Errorf("node approval not updated")
+			if !managerApprovalReady(approval.Generation, latestApplicationResult(logs["app"]), latestApplicationResult(logs["app2"])) {
+				return fmt.Errorf("awaiting both applications' current approval confirmation")
 			}
 			return nil
 		})
