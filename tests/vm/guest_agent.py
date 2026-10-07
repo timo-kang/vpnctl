@@ -18,6 +18,8 @@ ROOT = Path('/var/lib/vpnctl-vm')
 ARGS = dict(s.split('=', 1) if '=' in s else (s, '') for s in Path('/proc/cmdline').read_text().split())
 TOKEN = ARGS.get('vpnctl_vm_token', '')
 WORKER = None
+DIRECT_NODES = None
+DIRECT_FAULT = 'outer-wg'
 LOCK = threading.Lock()
 
 def guard():
@@ -153,6 +155,95 @@ def storage_fault(kind):
         evidence['recipients'].append(row)
     return evidence
 
+def direct_nodes(req):
+    nodes = req.get('nodes') if isinstance(req, dict) else None
+    if type(nodes) is not int or nodes not in (2, 3, 8, 32):
+        raise ValueError('one explicit direct node count (2, 3, 8, 32) required')
+    return nodes
+
+def direct_fault(req):
+    fault = req.get('fault', 'outer-wg')
+    if fault not in ('outer-wg', 'inner-nonce'):
+        raise ValueError('direct fault must be outer-wg or inner-nonce')
+    return fault
+
+def direct_fixture_id(nodes, fault):
+    return f'direct-inner-{nodes}' if fault == 'inner-nonce' else f'direct-{nodes}'
+
+def start_direct(req):
+    global WORKER, DIRECT_NODES, DIRECT_FAULT
+    guard()
+    nodes = direct_nodes(req)
+    fault = direct_fault(req)
+    with LOCK:
+        if WORKER is not None:
+            raise RuntimeError('only one fixture per direct VM')
+        (ROOT / 'results').mkdir(mode=0o700, exist_ok=True)
+        env = dict(os.environ, VPNCTL_VM_WORKER='1', VPNCTL_VM_DIRECT='1', VPNCTL_INTEGRATION='1',
+                   VPNCTL_DIRECT_SIZES=str(nodes), VPNCTL_DIRECT_FAULT=fault, VPNCTL_BIN='/opt/vpnctl-vm/vpnctl',
+                   VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'), TMPDIR='/tmp', GORACE='atexit_sleep_ms=0')
+        with (ROOT / 'worker.log').open('wb') as log:
+            WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test',
+                '-test.run=^TestVMDirectDataplane$', '-test.v', '-test.timeout=15m'],
+                env=env, stdout=log, stderr=log, start_new_session=True)
+        DIRECT_NODES, DIRECT_FAULT = nodes, fault
+    return {'started': True, 'fixture_id': direct_fixture_id(nodes, fault),
+            'nodes': nodes, 'fault_mode': fault, 'test': 'TestVMDirectDataplane'}
+
+def direct_artifact(path, limit, tail=False):
+    # Never follow a named public artifact back into the fixture's private tree.
+    allowed_root = ROOT if tail and path == ROOT / 'worker.log' else ROOT / 'results'
+    if (path.is_symlink() or path.parent.is_symlink() or allowed_root.is_symlink()
+            or not path.resolve().is_relative_to(allowed_root.resolve())):
+        raise RuntimeError('unexpected direct artifact path')
+    with path.open('rb') as stream:
+        offset = max(0, path.stat().st_size - limit) if tail else 0
+        stream.seek(offset)
+        raw = stream.read(limit if tail else limit + 1)
+    if len(raw) > limit:
+        raise RuntimeError('direct artifact exceeds size limit: ' + path.name)
+    if offset:
+        # A cut line may omit the keyword that marks a secret; drop it whole.
+        raw = raw.partition(b'\n')[2]
+    text = raw.decode(errors='replace')
+    if tail:
+        text = '\n'.join('[redacted]' if any(word in line.lower() for word in
+                         ('token', 'private', 'key', 'credential')) else line for line in text.splitlines())
+        # Replacement markers and invalid UTF-8 can expand the bounded input.
+        text = text.encode()[-limit:].decode(errors='ignore')
+    return text
+
+def direct_result(req):
+    guard()
+    nodes, fault = direct_nodes(req), direct_fault(req)
+    if nodes != DIRECT_NODES or fault != DIRECT_FAULT:
+        raise ValueError('direct result must match the started node count and fault')
+    if WORKER is None:
+        raise RuntimeError('direct fixture not started')
+    result = {'exit': WORKER.poll(), 'fixture_id': direct_fixture_id(nodes, fault),
+              'nodes': nodes, 'fault_mode': fault, 'test': 'TestVMDirectDataplane'}
+    if result['exit'] is not None:
+        worker_log = ROOT / 'worker.log'
+        result['worker_log'] = direct_artifact(worker_log, 32768, tail=True) if worker_log.exists() else ''
+        result['reports'] = []
+        # Export exactly named public evidence. Configs, caches, PKI and private
+        # fixture directories are never traversed. Extra reports remain visible
+        # so the observer cannot qualify a duplicate or a mismatched fixture.
+        for report in sorted((ROOT / 'results').glob('direct-dataplane-*/report.json')):
+            if len(result['reports']) >= 4:
+                raise RuntimeError('too many direct fixture reports')
+            row = {'fixture': report.parent.name,
+                   'report': json.loads(direct_artifact(report, 8 * 1024 * 1024)), 'logs': {}}
+            packets = report.parent / 'retry-packets.jsonl'
+            if packets.exists() or packets.is_symlink():
+                row['logs'][packets.name] = direct_artifact(packets, 512 * 1024)
+            for name in ['controller.log'] + [f'agent-{i}.log' for i in range(nodes)]:
+                path = report.parent / name
+                if path.exists() or path.is_symlink():
+                    row['logs'][name] = direct_artifact(path, 32768, tail=True)
+            result['reports'].append(row)
+    return result
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -181,6 +272,10 @@ class Handler(BaseHTTPRequestHandler):
                         return json.load(r)
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     result = list(pool.map(probe, jobs))
+            elif action == 'direct-start':
+                result = start_direct(req)
+            elif action == 'direct-result':
+                result = direct_result(req)
             elif action in ('application-mixed-start', 'application-preparation-start', 'application-approval-start', 'application-capacity-start'):
                 with LOCK:
                     if WORKER is not None:

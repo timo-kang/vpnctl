@@ -161,6 +161,64 @@ race 계측과 배포 바이너리의 자원 계약을 분리하고, 이후 repo
 `/tmp/vpnctl-direct-final-rejoin`, `/tmp/vpnctl-direct-approval-barrier`에 있다.
 이전 실패 및 중간 검증 디렉터리도 그대로 보존한다.
 
+## 재시도 중 relay 경로 보존 보강 (2026-10-07, #191)
+
+3초 동안 `/32`를 먼저 설치하던 구현은 양 끝의 독립적인 worker 시각과
+제거·journal 지연이 겹치면 5초 응답 공백을 넘었다. 창을 2초로 줄이고 빠르게
+재검사하는 것만으로는 15초 재연결 조건을 만족하지 못했다. 현재 구현은 다음
+순서로 통신 경로를 준비한다.
+
+1. journal v2에 staging 의도를 저장하고, application AllowedIPs가 **없는** peer와
+   1초 keepalive를 설치한다. 이 상태에서는 송수신 application prefix를 relay가
+   계속 소유한다. WireGuard handshake·RX·TX가 관측될 때까지 `handshaking`이다.
+2. relay의 30초 검증 cache가 오래되었으면 갱신하고, 인터페이스·relay baseline과
+   다른 peer의 prefix 충돌을 다시 확인한다. `activating` 의도를 저장한 뒤에만
+   `/32`와 설정된 keepalive를 부여한다.
+3. kernel 변경 시작부터 최대 2초 안에 별개의 nonce 응답과 RX/TX 증가를 두 번
+   확인해야 `active`다. 요청은 기존처럼 최대 1초이며 남은 초기 창으로 제한하고,
+   worker 재검사 간격은 250ms다. 후보의 초기
+   만료가 이미 active인 다른 peer의 온전한 1초 검증 시간을 줄이지 않는다.
+4. 실패·withdrawal·재시작은 phase별로 확인 가능한 소유 peer만 제거한다. prefix,
+   PSK, keepalive가 외부 설정으로 바뀌었으면 지우지 않는다. 저장 실패를 무시하거나
+   handshake만으로 application 도달을 주장하지 않는다.
+
+빈 AllowedIPs 상태에서도 keepalive로 transport를 준비할 수 있는 근거는
+[WireGuard Linux netlink](https://git.zx2c4.com/wireguard-linux/tree/drivers/net/wireguard/netlink.c),
+[send 구현](https://git.zx2c4.com/wireguard-linux/tree/drivers/net/wireguard/send.c),
+[wg 설정 파서](https://git.zx2c4.com/wireguard-tools/tree/src/config.c)다.
+
+journal v1은 기존 소유권 검증을 거쳐 v2로 승격한다. 구버전 바이너리는 v2를 읽지
+못하므로 단순 실행 파일 교체로 downgrade하지 않는다. 현재 버전으로 서비스를
+종료하고 소유 peer 회수를 확인한 뒤, 전용 baseline과 상태 파일을 명시적으로
+재구성하는 운영 절차가 필요하다. 실패한 저장 파일을 삭제해서 복구 권한을
+추측하지 않는다.
+
+공유 호스트에서의 실제 네트워크 검증은 기존 netns 명령을 직접 실행하지 않고
+격리 VM wrapper를 이용한다. 각 case는 별도 guest이며 기존 5초 fallback/응답 공백,
+12초 이상 장애 관측, 15초 재연결 기준을 그대로 적용한다.
+
+```sh
+VPNCTL_VM_RACE=0 VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-direct-vm-production \
+  scripts/test-vm.sh --case direct-2 direct-3 direct-8 direct-32 \
+    direct-inner-2 direct-inner-3 direct-inner-8 direct-inner-32
+VPNCTL_VM_RACE=1 VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-direct-vm-race \
+  scripts/test-vm.sh --case direct-2 direct-3 direct-8 \
+    direct-inner-2 direct-inner-3 direct-inner-8
+```
+
+`direct-inner-*`는 양 끝의 암호화된 비어 있지 않은 WireGuard data만 차단한다.
+handshake와 빈 authenticated keepalive는 통과하며, post-fault handshake·RX/TX와
+각 방향의 payload drop/keepalive/handshake nft counter를 모두 요구한다. 같은
+`wg0`의 평문 nonce를 차단하면 relay fallback까지 막으므로 그 방식은 사용하지
+않는다. CI에서는 원래 `outer-wg`와 `inner-nonce`를 production/race별 독립 job으로
+실행한다. CI의 netns 명령은 전용 runner용이며 공유 호스트에서는 VM wrapper를 쓴다.
+
+검증기는 worker 종료 코드, 정확한 node 수·fixture·fault mode, 필수 완료 조건과 개별 nonce
+기록을 함께 확인한다. 요약 수치만 양호하거나 `completed=true`인 report만 있어서는
+합격하지 않는다. 최초 VM 실행은 네 크기 모두 기능 조건에 도달했지만 선택적
+`wmem_max` 진단 파일 부재로 종료 코드 1이었다. 이 실패 원본은
+`/tmp/vpnctl-fix191-direct-prod-v1`에 보존하며 합격 근거로 사용하지 않는다.
+
 ## 판정 범위
 
 5초는 이 격리된 node-to-node 시험의 assertion이다. 앱 서버 uplink, 실제 RF/LTE 지연,

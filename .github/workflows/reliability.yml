@@ -231,9 +231,19 @@ jobs:
           - profile: production-32
             race: '0'
             sizes: '2,3,8,32'
+            fault: outer-wg
           - profile: race-8
             race: '1'
             sizes: '2,3,8'
+            fault: outer-wg
+          - profile: inner-production-32
+            race: '0'
+            sizes: '2,3,8,32'
+            fault: inner-nonce
+          - profile: inner-race-8
+            race: '1'
+            sizes: '2,3,8'
+            fault: inner-nonce
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
@@ -246,6 +256,7 @@ jobs:
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-direct-${{ matrix.profile }}
           VPNCTL_RACE: ${{ matrix.race }}
           VPNCTL_DIRECT_SIZES: ${{ matrix.sizes }}
+          VPNCTL_DIRECT_FAULT: ${{ matrix.fault }}
           VPNCTL_TEST_CPUS: '2'
           VPNCTL_TEST_MEMORY: 2g
         run: ./scripts/test-netns.sh -test.run='^Test(Netns_DirectDataplane|DirectLossWatchRejectsOverlongOutage)$' -test.timeout=8m
