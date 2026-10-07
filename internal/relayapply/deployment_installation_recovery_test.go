@@ -23,22 +23,8 @@ func awaitInstallationReady(ctx context.Context, e *DeploymentEngine) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("installation test recovery bound: %w", err)
 		}
-		boot, err := leaseBootTime()
-		if err != nil {
+		if err := waitInstallationTestRetry(ctx, e, ""); err != nil {
 			return err
-		}
-		var wait time.Duration
-		for _, p := range e.journal.Installations {
-			wait = max(wait, time.Duration(p.RetryBootNS)-boot)
-		}
-		if wait > 0 {
-			timer := time.NewTimer(wait)
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				timer.Stop()
-				return fmt.Errorf("installation test retry backoff: %w", ctx.Err())
-			}
 		}
 		fresh, err := ObserveApproval()
 		if err != nil {
@@ -66,6 +52,34 @@ func awaitInstallationReady(ctx context.Context, e *DeploymentEngine) error {
 		}
 	}
 	return errors.New("installation failed to converge within 12 progress turns")
+}
+
+// An empty endpoint waits for all intents. Fairness tests wait only for their
+// healthy endpoint while retaining deliberate retry pressure on the broken one.
+func waitInstallationTestRetry(ctx context.Context, e *DeploymentEngine, endpoint string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("installation test retry backoff: %w", err)
+	}
+	boot, err := leaseBootTime()
+	if err != nil {
+		return err
+	}
+	var wait time.Duration
+	for _, p := range e.journal.Installations {
+		if endpoint == "" || p.Endpoint == endpoint {
+			wait = max(wait, time.Duration(p.RetryBootNS)-boot)
+		}
+	}
+	if wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return fmt.Errorf("installation test retry backoff: %w", ctx.Err())
+		}
+	}
+	return nil
 }
 
 func installationDeadlineOnly(err error) bool {

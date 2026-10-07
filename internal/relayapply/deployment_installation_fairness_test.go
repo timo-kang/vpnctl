@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"vpnctl/internal/relaycache"
 )
@@ -49,10 +50,10 @@ func breakInstallationConsent(t *testing.T, dir string, unsafe bool) {
 }
 
 func TestRelayInstallationFailureDoesNotStarveOtherEndpoint(t *testing.T) {
-	for _, mode := range []string{"malformed-consent", "unsafe-consent", "missing-key"} {
+	for _, mode := range []string{"malformed-consent", "unsafe-consent", "missing-key", "slow-save"} {
 		t.Run(mode, func(t *testing.T) {
 			e, k, c, dir, key := installationPair(t)
-			if mode == "missing-key" {
+			if mode == "missing-key" || mode == "slow-save" {
 				if err := os.Remove(key); err != nil {
 					t.Fatal(err)
 				}
@@ -70,7 +71,14 @@ func TestRelayInstallationFailureDoesNotStarveOtherEndpoint(t *testing.T) {
 			if e.journal.InstallCursor != "ep0" || e.journal.Installations[0].RetryBootNS != p.RetryBootNS {
 				t.Fatal("restart lost failed endpoint cursor or backoff")
 			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			deadlineRecoveries := 0
+			fault := &fairnessReproDelay{}
 			for n := 0; n < 24; n++ {
+				if err := waitInstallationTestRetry(ctx, e, "ep1"); err != nil {
+					t.Fatal(err)
+				}
 				// Emulate a slow next cycle after the retry deadline, without
 				// changing the host clock. Cursor fairness must survive both
 				// elapsed backoff and a process restart between every unit.
@@ -79,9 +87,22 @@ func TestRelayInstallationFailureDoesNotStarveOtherEndpoint(t *testing.T) {
 					t.Fatal(err)
 				}
 				e, c = reopenDeployment(t, e, c, dir)
-				r, err := e.RebuildInstallations(context.Background(), installationWitness(t))
+				if mode == "slow-save" {
+					e.cache = &fairnessReproSave{deploymentCache: e.cache, fault: fault}
+				}
+				r, err := e.RebuildInstallations(ctx, installationWitness(t))
+				if invalid := installationTestClosed(ctx, e); invalid != nil || e.uncertain {
+					t.Fatal("installation violated closed-lease or journal invariant", invalid, err)
+				}
 				if err != nil && r.Reason != "installation_consent_unavailable" && r.Reason != "local_key_unavailable_or_mismatched" {
-					t.Fatal(r, err)
+					// A real fsync can exceed the unchanged production quantum.
+					// Permit only bounded, certain deadline recovery, as in
+					// awaitInstallationReady; all other failures stay fatal.
+					deadlineRecoveries++
+					if ctx.Err() != nil || !installationDeadlineOnly(err) || deadlineRecoveries > 3 {
+						t.Fatal(r, err)
+					}
+					n = -1 // Cleanup can require a fresh 24-unit attempt.
 				}
 				if _, exists := k.objects["ep0"]; exists {
 					t.Fatal("failed endpoint installed")
@@ -90,6 +111,9 @@ func TestRelayInstallationFailureDoesNotStarveOtherEndpoint(t *testing.T) {
 					t.Fatal("rebuilding opened healthy endpoint's lease")
 				}
 				if i := e.index("ep1"); i >= 0 && e.journal.Entries[i].Phase == "applied" {
+					if mode == "slow-save" && (!fault.delayed || deadlineRecoveries == 0) {
+						t.Fatal("slow durable save did not exercise deadline recovery")
+					}
 					return
 				}
 			}
