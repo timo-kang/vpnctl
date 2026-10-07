@@ -19,6 +19,9 @@ type deploymentCache interface {
 	Status() (relaycache.DeploymentReport, error)
 	DeploymentJournal() ([]byte, error)
 	SaveDeploymentJournal([]byte) error
+	InstallationConsent(string, string) (bool, error)
+	AllowInstallation(string, string) error
+	RevokeInstallation(string) error
 }
 type deploymentBackend interface {
 	Check(context.Context, DeploymentEntry, bool) (bool, error)
@@ -76,7 +79,7 @@ func openDeploymentEngine(cache deploymentCache, domain string, b deploymentBack
 		return nil, errors.New("deployment journal corrupt")
 	}
 	j := env.Journal
-	if j.Version != 1 || j.Principal != r.PrincipalID || j.Relay != r.RelayID || j.Domain != domain || j.Entries == nil || len(j.Entries) > 8 {
+	if (j.Version != 1 && j.Version != 2) || j.Principal != r.PrincipalID || j.Relay != r.RelayID || j.Domain != domain || j.Entries == nil || len(j.Entries) > 8 {
 		return nil, errors.New("deployment journal identity or kernel domain mismatch")
 	}
 	seen := map[string]bool{}
@@ -88,6 +91,9 @@ func openDeploymentEngine(cache deploymentCache, domain string, b deploymentBack
 			return nil, errors.New("duplicate endpoint journal")
 		}
 		seen[v.Endpoint] = true
+	}
+	if err := validateInstallations(j); err != nil {
+		return nil, err
 	}
 	e.journal = j
 	return e, nil
@@ -127,6 +133,7 @@ func (e *DeploymentEngine) result(state, reason string) DeploymentResult {
 			r.ExpiryEnforcement = "legacy_upgrade_required"
 		}
 	}
+	r.Installations = e.installationStatus()
 	return r
 }
 func (e *DeploymentEngine) index(endpoint string) int {
@@ -153,6 +160,10 @@ func (e *DeploymentEngine) remove(ctx context.Context, i int) error {
 		return err
 	}
 	e.journal.Entries = append(e.journal.Entries[:i], e.journal.Entries[i+1:]...)
+	if p := e.installationIndex(v.Endpoint); p >= 0 {
+		e.journal.Installations[p].Step = 0
+		e.journal.Installations[p].InFlight = false
+	}
 	return e.persist()
 }
 
@@ -165,7 +176,8 @@ func (e *DeploymentEngine) enforce(ctx context.Context) (relaycache.DeploymentRe
 	for i := len(e.journal.Entries) - 1; i >= 0; i-- {
 		v := e.journal.Entries[i]
 		want, err := desiredDeployment(r, v.Endpoint, v.ListenPort)
-		if readErr != nil || err != nil || !sameDeployment(v, want) {
+		intentErr := e.installationAuthorized(v.Endpoint, want)
+		if readErr != nil || err != nil || intentErr != nil || !sameDeployment(v, want) {
 			failures = errors.Join(failures, e.remove(ctx, i))
 		}
 	}
@@ -190,6 +202,9 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
+	if e.installationIndex(o.EndpointID) >= 0 {
+		return e.result("blocked", "release_automatic_intent_first"), ErrConflict
+	}
 	r, err := e.enforce(ctx)
 	if err != nil {
 		return e.result("blocked", "approval_or_cleanup_failed"), err
@@ -393,6 +408,12 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 		if approvalErr != nil || !sameDeployment(v, want) {
 			continue // enforce has already attempted to quiesce this entry.
 		}
+		// Opt-in preparation advances behind closed kernel guards. Do not
+		// undo its link-up step between durable units; only applied entries
+		// may reach lease renewal. enforce above handles invalid authority.
+		if v.Phase == "preparing" && e.installationIndex(v.Endpoint) >= 0 {
+			continue
+		}
 		ready, x := check(ctx, v, false)
 		if x != nil || !ready || v.Phase != "applied" {
 			failures = append(failures, deploymentFailure(v.Endpoint, "ownership_check", x, authenticatedAt))
@@ -444,6 +465,15 @@ func (e *DeploymentEngine) Release(ctx context.Context, endpoint string) (Deploy
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
+	// Unlink/fsync consent before any journal update or kernel cleanup. A
+	// later ENOSPC, cleanup failure or crash cannot resurrect this opt-out.
+	if i := e.installationIndex(endpoint); i >= 0 {
+		if err := e.cache.RevokeInstallation(endpoint); err != nil {
+			return e.result("blocked", "installation_revocation_failed"), err
+		}
+		// Retain the disabled intent until ownership cleanup completes. Removing
+		// it earlier could reinterpret a surviving endpoint as a manual one.
+	}
 	// Check all endpoints so release of one cannot overlook known revocation.
 	if _, err := e.enforce(ctx); err != nil {
 		return e.result("blocked", "approval_or_cleanup_failed"), err
@@ -457,6 +487,13 @@ func (e *DeploymentEngine) Release(ctx context.Context, endpoint string) (Deploy
 	defer stop()
 	if _, err := e.enforce(cleanup); err != nil {
 		return e.result("blocked", "approval_or_cleanup_failed"), err
+	}
+	if i := e.installationIndex(endpoint); i >= 0 {
+		e.journal.Installations = append(e.journal.Installations[:i], e.journal.Installations[i+1:]...)
+		e.journal.InstallCursor = ""
+		if err := e.persist(); err != nil {
+			return e.result("blocked", "journal_save_failed"), err
+		}
 	}
 	return e.result("released", ""), nil
 }

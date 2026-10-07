@@ -475,6 +475,77 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		}
 	})
 	report["relay_expiry_recovery"] = "fresh approval plus explicit relay apply; node candidates and application selection recover automatically"
+	if os.Getenv("VPNCTL_VM_RELAY_INSTALL") == "1" {
+		report["installation_mode"] = true
+		phase("intent-enrolled", "explicit opt-in; automatic relay installation", "p00", "authority", false, func() {
+			for _, relay := range f.recipients {
+				for endpoint := range f.spec.Relays[0].Endpoints {
+					relay.require("release", endpoint, 0)
+					relay.require("prepare", endpoint, 51820+endpoint)
+				}
+			}
+		})
+		before := map[string]relayapply.DeploymentResult{}
+		for _, relay := range f.recipients {
+			relay.ready()
+			before[relay.relay] = relay.require("inspect", -1, 0)
+		}
+		report["installation_before_expiry"] = before
+		approval := f.controller.apply(f.spec, 60)
+		for _, relay := range f.recipients {
+			relay.readyApproval(approval.ExpiresAt)
+		}
+		eventually(t, 30*time.Second, "short approval before automatic installation test", func() error {
+			if latestApplicationResult(logs["app"]).Selection.Generation != approval.Generation {
+				return fmt.Errorf("node approval not updated")
+			}
+			return nil
+		})
+		phase("intent-controller-offline-valid", "controller process", "p00", "authority", true, func() { f.controller.process.stop() })
+		phase("intent-expired-offline", "real elapsed approval TTL", "", "authority", false, func() {
+			if wait := time.Until(approval.ExpiresAt.Add(300 * time.Millisecond)); wait > 0 {
+				time.Sleep(wait)
+			}
+		})
+		phase("intent-offline-relay-restart", "relay supervisor restart without authority", "", "authority", false, func() {
+			for _, relay := range f.recipients {
+				relay.watch.terminate(t)
+				relay.start()
+			}
+		})
+		// Kernel ownership is gone; durable local intent still cannot authorize
+		// installation after an offline process restart.
+		empty := map[string]m3SupervisorReport{}
+		for _, relay := range f.recipients {
+			state := relay.awaitOffline(time.Now(), false, false)
+			if state.Kernel == nil || len(state.Kernel.Endpoints) != 0 || len(state.Kernel.Installations) != len(f.spec.Relays[0].Endpoints) {
+				t.Fatal("offline installation state", state)
+			}
+			empty[relay.relay] = state
+		}
+		report["installation_offline_restart"] = empty
+		phase("intent-fresh-approval-recovery", "new authenticated approval; automatic relay and node recovery", "p00", "authority", false, func() {
+			f.controller.start()
+			f.controller.apply(f.spec, 3600)
+		})
+		after := map[string]relayapply.DeploymentResult{}
+		for _, relay := range f.recipients {
+			relay.ready()
+			state := relay.require("inspect", -1, 0)
+			if !state.KernelReady || len(state.Installations) != len(before[relay.relay].Installations) {
+				t.Fatal("automatic installation incomplete", state)
+			}
+			for i, intent := range state.Installations {
+				old := before[relay.relay].Installations[i]
+				if !intent.Enabled || intent.Phase != "applied" || intent.Revision != old.Revision || intent.Attempts != old.Attempts+1 {
+					t.Fatal("intent changed or uncontrolled reinstall", intent, old)
+				}
+			}
+			after[relay.relay] = state
+		}
+		report["installation_after_recovery"] = after
+		report["relay_installation_recovery"] = "explicit intent retained across real expiry and offline supervisor restart; fresh authenticated approval restores relay endpoints and actual TCP/UDP without apply"
+	}
 	report["final"] = snapshot()
 	report["foreign_policy_preserved"] = true
 	// Sample count is deliberately explicit: this functional matrix alone does

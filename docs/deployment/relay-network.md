@@ -140,3 +140,11 @@ forward chain이 넓게 열려 있어도 제품 정책에서 차단한다.
 [네트워크 관리자와의 공존 계약](network-ownership.md)에 NetworkManager/networkd 예제와
 자동 경로 전환에 앞서 확인할 소유권·충돌·reload 검증을 정리했다. 실제 관리자별 호환성은
 배포 환경에서 검증해야 하며, 이 문서나 template을 개발 호스트에 자동 설치하지 않는다.
+
+## Opt-in automatic endpoint restoration
+
+See [relay installation intent](../architecture/relay-installation-intent.md) for
+`relay prepare`, safe external key references, consent-first release, and the
+same-boot process-restart scope. Manual `relay apply` remains the default; existing
+installations are never silently enrolled. New boot/namespace migration is not
+automatic and must not be bypassed by removing ownership journals.

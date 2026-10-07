@@ -159,7 +159,7 @@ func (r *m3Recipient) callContext(ctx context.Context, action string, ep, port i
 	if ep >= 0 {
 		a = append(a, "--endpoint-id", fmt.Sprintf("ep%d", ep))
 	}
-	if action == "apply" {
+	if action == "apply" || action == "prepare" {
 		a = append(a, "--key-file", r.key, "--key-generation", fmt.Sprint(r.generation), "--listen-port", fmt.Sprint(port))
 	}
 	a = append(a, extra...)
@@ -199,7 +199,7 @@ func (r *m3Recipient) require(action string, ep, port int) relayapply.Deployment
 			return err
 		}
 		var options []string
-		if action == "apply" || action == "release" || action == "recover" || action == "inspect" {
+		if action == "prepare" || action == "apply" || action == "release" || action == "recover" || action == "inspect" {
 			deadline, _ := ctx.Deadline()
 			remaining := time.Until(deadline)
 			options = []string{"--lock-wait", min(5*time.Second, remaining).String(), "--timeout", remaining.String()}

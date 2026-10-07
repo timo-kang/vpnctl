@@ -51,27 +51,30 @@ type DeploymentEntry struct {
 	Phase         string            `json:"phase"`
 }
 type deploymentJournal struct {
-	Version   int               `json:"version"`
-	Principal string            `json:"principal_id"`
-	Relay     string            `json:"relay_id"`
-	Domain    string            `json:"kernel_domain"`
-	Entries   []DeploymentEntry `json:"entries"`
+	Version       int                      `json:"version"`
+	Principal     string                   `json:"principal_id"`
+	Relay         string                   `json:"relay_id"`
+	Domain        string                   `json:"kernel_domain"`
+	Entries       []DeploymentEntry        `json:"entries"`
+	Installations []deploymentInstallation `json:"installations,omitempty"`
+	InstallCursor string                   `json:"installation_cursor,omitempty"`
 }
 type deploymentEnvelope struct {
 	Journal deploymentJournal `json:"journal"`
 	Digest  string            `json:"sha256"`
 }
 type DeploymentResult struct {
-	SchemaVersion     int                        `json:"schema_version"`
-	State             string                     `json:"state"`
-	Reason            string                     `json:"reason,omitempty"`
-	RelayID           string                     `json:"relay_id"`
-	KernelReady       bool                       `json:"kernel_ready"`
-	UplinkHealth      string                     `json:"uplink_health"`
-	ForwardingPolicy  string                     `json:"forwarding_policy"`
-	ExpiryEnforcement string                     `json:"expiry_enforcement"`
-	Endpoints         []DeploymentEndpointResult `json:"endpoints"`
-	Failures          []DeploymentFailure        `json:"failures,omitempty"`
+	SchemaVersion     int                            `json:"schema_version"`
+	State             string                         `json:"state"`
+	Reason            string                         `json:"reason,omitempty"`
+	RelayID           string                         `json:"relay_id"`
+	KernelReady       bool                           `json:"kernel_ready"`
+	UplinkHealth      string                         `json:"uplink_health"`
+	ForwardingPolicy  string                         `json:"forwarding_policy"`
+	ExpiryEnforcement string                         `json:"expiry_enforcement"`
+	Endpoints         []DeploymentEndpointResult     `json:"endpoints"`
+	Failures          []DeploymentFailure            `json:"failures,omitempty"`
+	Installations     []DeploymentInstallationStatus `json:"installations,omitempty"`
 }
 type DeploymentFailure struct {
 	EndpointID string `json:"endpoint_id"`

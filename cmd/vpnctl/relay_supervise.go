@@ -32,6 +32,7 @@ type relaySupervisionReport struct {
 	LastSuccessAt         time.Time                    `json:"last_success_at,omitempty"`
 	ApprovalExpiresAt     time.Time                    `json:"approval_expires_at,omitempty"`
 	Kernel                *relayapply.DeploymentResult `json:"kernel,omitempty"`
+	Installation          *relayapply.DeploymentResult `json:"installation,omitempty"`
 }
 
 const relayKernelRetryInterval = 25 * time.Millisecond
@@ -88,12 +89,20 @@ func relaySupervisionCycle(ctx context.Context, dir, principal, relay string, cl
 	// Even a rejected refresh must reach enforcement.
 	kernel, enforceErr := e.Maintain(ctx, authenticatedAt)
 	out.Kernel = &kernel
+	installation, rebuildErr := e.RebuildInstallations(ctx, authenticatedAt)
+	if len(installation.Installations) > 0 {
+		out.Installation = &installation
+	}
+	enforceErr = errors.Join(enforceErr, rebuildErr)
 	latest, statusErr := c.Status()
 	out.ApprovalValid = latest.ApprovalValid && statusErr == nil
 	out.ApprovalState = latest.Validity
 	out.ApprovalBlockedReason = latest.BlockedReason
 	if enforceErr != nil {
 		out.Reason = kernel.Reason
+		if rebuildErr != nil {
+			out.Reason = installation.Reason
+		}
 		return out, enforceErr
 	}
 	if statusErr != nil {
