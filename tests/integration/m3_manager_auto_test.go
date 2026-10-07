@@ -129,7 +129,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	phase := func(name, origin, desired, metric string, independent bool, action func()) map[string]any {
 		t.Helper()
 		t.Log("automatic manager phase", name)
-		packets, _, err := trace.snapshot()
+		packetOffset, err := trace.position()
 		if err != "" {
 			t.Fatal(err)
 		}
@@ -153,7 +153,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		}
 		begin := managerMono()
 		before := latestApplicationResult(logs["app"])
-		row := map[string]any{"name": name, "passed": false, "origin": origin, "desired": desired, "metric": metric, "begin_monotonic_ns": begin, "previous_path": before.Selection.DesiredPathID, "packet_offset": len(packets)}
+		row := map[string]any{"name": name, "passed": false, "origin": origin, "desired": desired, "metric": metric, "begin_monotonic_ns": begin, "previous_path": before.Selection.DesiredPathID, "packet_offset": packetOffset}
 		report["steps"] = append(report["steps"].([]map[string]any), row)
 		action()
 		row["action_completed_monotonic_ns"] = managerMono()
@@ -165,7 +165,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		}
 		var out relayapply.TargetReconcileResult
 		eventually(t, 120*time.Second, "automatic manager convergence "+name, func() error {
-			_, _, err := trace.snapshot()
+			_, err := trace.position()
 			if err != "" {
 				t.Fatal(err)
 			}

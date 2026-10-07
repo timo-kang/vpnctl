@@ -5,9 +5,11 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,9 +32,59 @@ func applicationResults(path string) (out []relayapply.TargetReconcileResult) {
 	}
 	return
 }
+
+const applicationLogRecordLimit = 256 * 1024
+
+// Polling must not reparse the complete history on every iteration. That makes
+// the measuring process consume progressively more of the fixture's CPU quota.
+// Read a bounded tail and decode only the newest complete schema-v1 record.
+// The separate trace reader still validates and preserves every complete cycle.
 func latestApplicationResult(path string) (out relayapply.TargetReconcileResult) {
-	if results := applicationResults(path); len(results) > 0 {
-		out = results[len(results)-1]
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return
+	}
+	return readLatestApplicationResult(f, st.Size())
+}
+
+func readLatestApplicationResult(r io.ReaderAt, size int64) (out relayapply.TargetReconcileResult) {
+	if size <= 0 || size > 32*1024*1024 {
+		return
+	}
+	start := max(int64(0), size-2*applicationLogRecordLimit-1)
+	b := make([]byte, size-start)
+	n, err := r.ReadAt(b, start)
+	if n != len(b) || err != nil && err != io.EOF {
+		return
+	}
+	// A writer may have appended only part of its next JSON record.
+	end := bytes.LastIndexByte(b, '\n')
+	if end < 0 {
+		return
+	}
+	b = b[:end]
+	for len(b) > 0 {
+		sep := bytes.LastIndexByte(b, '\n')
+		if sep < 0 && start != 0 {
+			return // The first bytes of the tail may be a partial record.
+		}
+		line := b[sep+1:]
+		if len(line) > applicationLogRecordLimit {
+			return
+		}
+		var v relayapply.TargetReconcileResult
+		if json.Unmarshal(line, &v) == nil && v.SchemaVersion == 1 {
+			return v
+		}
+		if sep < 0 {
+			break
+		}
+		b = b[:sep]
 	}
 	return
 }
