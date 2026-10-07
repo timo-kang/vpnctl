@@ -139,6 +139,12 @@ func TestManagerTimelineFirstAlternativePrecedesPreferredRecovery(t *testing.T) 
 	if path != "p02" || got["first_success"] != 127 || got["routes_completed"] != 120 || got["decision_complete"] != 110 {
 		t.Fatal("preferred dwell counted as failover", path, got)
 	}
+	// The relay source is identical for both underlays. A reply after p01's
+	// apply cannot be credited to p02 merely because its SNAT source matches.
+	path, got = managerFailoverTimeline([]managerAutoEvent{packets[0], packets[2]}, cycles, "p00", sources, 90)
+	if path != "p01" || got["first_success"] != 207 || got["routes_completed"] != 200 {
+		t.Fatal("later same-relay reply credited to an earlier path", path, got)
+	}
 	// A failed apply, unrelated application or unknown source/path is not proof.
 	for _, mutate := range []func([]managerAutoCycle){
 		func(c []managerAutoCycle) { c[0].Applied = false },
