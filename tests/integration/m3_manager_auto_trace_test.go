@@ -83,6 +83,7 @@ type managerAutoTrace struct {
 	events        []managerAutoEvent
 	cycles        []managerAutoCycle
 	failure       string
+	ctx           context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 }
@@ -254,9 +255,18 @@ func serveManagerUDPEcho() error {
 		}
 	}
 }
-func startManagerAutoTrace(logs map[string]string) *managerAutoTrace {
+
+// Start passive evidence before fixture setup/baseline can fail. Packet probes
+// are admitted separately, only after the same stable-baseline barrier as before.
+func startManagerCycleTrace(logs map[string]string) *managerAutoTrace {
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &managerAutoTrace{cancel: cancel, streamSession: 1}
+	r := &managerAutoTrace{ctx: ctx, cancel: cancel, streamSession: 1}
+	r.startCycles(logs)
+	return r
+}
+
+func (r *managerAutoTrace) startTraffic() {
+	ctx := r.ctx
 	jobs := map[string]func() (string, error){"tcp-new": func() (string, error) { return managerAutoTCP(m3Target) }, "udp": managerAutoUDP,
 		"independent-app": func() (string, error) { return managerAutoTCP("198.18.0.3") }, "rf-lan": func() (string, error) { return managerAutoTCP("172.20.10.2") }, "gimbal-lan": func() (string, error) { return managerAutoTCP("172.20.20.2") }}
 	for kind, probe := range jobs {
@@ -340,6 +350,10 @@ func startManagerAutoTrace(logs map[string]string) *managerAutoTrace {
 			}
 		}
 	}()
+}
+
+func (r *managerAutoTrace) startCycles(logs map[string]string) {
+	ctx := r.ctx
 	for target, path := range logs {
 		r.wg.Add(1)
 		go func() {
@@ -410,7 +424,6 @@ func startManagerAutoTrace(logs map[string]string) *managerAutoTrace {
 			}
 		}()
 	}
-	return r
 }
 func managerAutoSource(kind, source string) bool {
 	switch kind {

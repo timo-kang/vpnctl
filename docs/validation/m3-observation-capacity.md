@@ -643,3 +643,30 @@ remain closed; a new admission without fresh lease maintenance still rejects
 the prepared candidate. This saves a demonstrably unnecessary admission but
 does not establish an upper bound on arbitrary host contention. The original
 remote failure and deployment capacity qualification remain separately tracked.
+
+
+## Manager fixture priority collision and early evidence (#197)
+
+The `40d189e` [manager-install-8 CI failure](https://github.com/timo-kang/vpnctl/actions/runs/37648920742/job/112886809459)
+failed before fault injection, at the stable-baseline barrier. This was a different
+incident from #195's slow preferred-path rebuild. The captured application
+reservation and the fixture's unrelated VPN rule both used priority **32000**.
+Application reservations span 32000..32759, so the fixture's fixed value could
+collide with a randomly assigned application reservation. The primary app stayed
+in `target_quarantine_conflict`; the independent app remained active. The
+product correctly refused the foreign collision, and that rule is unchanged.
+
+The fixture now uses priority **32761**, outside candidate/probe and application
+reservations, after its fallback32760 and before main32766. Creation and all
+preservation checks use the same constant. Replaying the captured ownership
+tuples confirms that the original collision prevents mutation; with the fixture
+priority outside the reservation, owned application-route cleanup succeeds while
+preserving both the terminal guard and foreign rule.
+
+The old trace began only after the stable baseline passed, leaving this failure
+without full application cycles. Passive log readers and their cleanup now
+start before fixture setup. Packet samplers still start only after the original
+baseline barrier; bootstrap load and readiness thresholds are unchanged. The
+host-safe regression retains both applications' initial failed cycles without
+opening sockets and retains them after early shutdown. Removing passive reader
+startup makes that regression fail. The bounded log/cycle/packet limits remain.

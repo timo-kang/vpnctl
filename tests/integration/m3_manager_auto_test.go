@@ -16,6 +16,10 @@ import (
 	"vpnctl/internal/relayapply"
 )
 
+// Outside candidate/probe (20000..31999) and application (32000..32759)
+// reservations, after the fixture fallback rule at 32760 and before main.
+const managerForeignRulePriority = "32761"
+
 func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[string]any, logs map[string]string, watchers map[string]*networkProcess, startWatch func(string) *networkProcess, configDigests map[string]string, snapshot func() map[string]any, size int, lanNS map[string]string) {
 	t.Helper()
 	report["clock"] = "CLOCK_MONOTONIC; same guest boot; excludes suspend; not authorization evidence"
@@ -24,6 +28,18 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	report["existing_tcp_contract"] = "fresh socket before each applicable fault, no reconnect within that phase; explicit session IDs; nonce framing survives partial reads/timeouts; server idle limit 30 minutes"
 	report["slo_contract"] = "individual failover/no-uplink limit 10s; nearest-rank p95 requires at least 20 measured transitions per class/profile; incomplete samples never qualify"
 	report["no_uplink_scope"] = "all permitted candidates failed for this server target (no_verified_path); guarded unknown/blocked state is not conclusive no-uplink evidence or physical-link diagnosis"
+	trace := startManagerCycleTrace(logs)
+	t.Cleanup(func() {
+		trace.close()
+		packets, cycles, err := trace.snapshot()
+		report["packets"] = packets
+		report["cycles"] = cycles
+		report["trace_error"] = err
+		report["non_json_log_lines"] = trace.warnings
+		if err != "" {
+			t.Error(err)
+		}
+	})
 	// Below all owned application guards, above main. Preserve the VM's
 	// management default route; a foreign specific route is rightly a conflict.
 	applicationFallbackRoute(t, f, "table", "65002")
@@ -42,10 +58,10 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	// An unrelated VPN policy table and an independently managed firewall table.
 	// These are explicit fixture resources, not another VPN implementation.
 	managerCommand(t, "ip", "route", "add", "unreachable", "203.0.114.0/24", "table", "65001", "metric", "701")
-	managerCommand(t, "ip", "rule", "add", "priority", "32000", "to", "203.0.114.0/24", "table", "65001")
+	managerCommand(t, "ip", "rule", "add", "priority", managerForeignRulePriority, "to", "203.0.114.0/24", "table", "65001")
 	managerCommand(t, "nft", "add", "table", "inet", "manager_foreign")
 	foreignRoutes := managerCommand(t, "ip", "-j", "-N", "route", "show", "table", "65001")
-	foreignRules := managerCommand(t, "ip", "-j", "-N", "rule", "show", "priority", "32000")
+	foreignRules := managerCommand(t, "ip", "-j", "-N", "rule", "show", "priority", managerForeignRulePriority)
 	// NM activation and fixture link creation publish asynchronous netlink
 	// events. Start fault measurements only after all candidates and both apps
 	// have a stable, fully confirmed baseline; do not count bootstrap as a fault.
@@ -68,18 +84,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	})
 	report["baseline_ready_monotonic_ns"] = managerMono()
 	report["baseline_ready_cycles"] = map[string]int{"app": barrier.appSamples, "app2": barrier.otherSamples}
-	trace := startManagerAutoTrace(logs)
-	t.Cleanup(func() {
-		trace.close()
-		packets, cycles, err := trace.snapshot()
-		report["packets"] = packets
-		report["cycles"] = cycles
-		report["trace_error"] = err
-		report["non_json_log_lines"] = trace.warnings
-		if err != "" {
-			t.Error(err)
-		}
-	})
+	trace.startTraffic()
 	sourceFor := func(path string) string {
 		if strings.HasPrefix(path, "p1") {
 			return "198.18.0.12"
@@ -96,7 +101,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 				t.Fatal("external configuration changed", path)
 			}
 		}
-		if managerCommand(t, "ip", "-j", "-N", "route", "show", "table", "65001") != foreignRoutes || managerCommand(t, "ip", "-j", "-N", "rule", "show", "priority", "32000") != foreignRules {
+		if managerCommand(t, "ip", "-j", "-N", "route", "show", "table", "65001") != foreignRoutes || managerCommand(t, "ip", "-j", "-N", "rule", "show", "priority", managerForeignRulePriority) != foreignRules {
 			t.Fatal("foreign VPN policy changed")
 		}
 		managerCommand(t, "nft", "list", "table", "inet", "manager_foreign")
