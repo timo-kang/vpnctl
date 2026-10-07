@@ -63,12 +63,16 @@ func requireApplicationBlocked(t *testing.T, f *m3AuthorityFixture, stream *netw
 }
 func applicationFallback(t *testing.T, f *m3AuthorityFixture) {
 	t.Helper()
+	applicationFallbackRoute(t, f)
+}
+func applicationFallbackRoute(t *testing.T, f *m3AuthorityFixture, extra ...string) {
+	t.Helper()
 	netOutput(t, f.robot, "ip", "link", "add", "fallback0", "type", "veth", "peer", "name", "fallback1", "netns", f.target)
 	netOutput(t, f.robot, "ip", "addr", "add", "203.0.113.1/30", "dev", "fallback0")
 	netOutput(t, f.target, "ip", "addr", "add", "203.0.113.2/30", "dev", "fallback1")
 	netOutput(t, f.robot, "ip", "link", "set", "fallback0", "up")
 	netOutput(t, f.target, "ip", "link", "set", "fallback1", "up")
-	netOutput(t, f.robot, "ip", "route", "add", "default", "via", "203.0.113.2", "dev", "fallback0")
+	netOutput(t, f.robot, append([]string{"ip", "route", "add", "default", "via", "203.0.113.2", "dev", "fallback0"}, extra...)...)
 	// This fixed fixture tests target reservation, not ARP convergence/GC. Keep
 	// its two owned neighbours permanent, as in the direct dataplane fixture.
 	mac := func(ns, dev string) string {

@@ -44,3 +44,33 @@ func TestConcurrentCostAccountingAndSnapshotIsolation(t *testing.T) {
 		t.Fatal("unrelated operation leaked into observation")
 	}
 }
+
+func TestCheckpointClockOrderingBoundsAndIsolation(t *testing.T) {
+	ctx, r := Start(context.Background())
+	_, nested := Start(ctx)
+	if nested != r {
+		t.Fatal("nested cycle lost clock domain")
+	}
+	for i := 0; i < MaxCheckpoints+1; i++ {
+		Mark(ctx, "decision_complete")
+	}
+	d := r.Snapshot()
+	if !d.MonotonicAvailable || d.StartedMono <= 0 || d.FinishedMono < d.StartedMono || !d.CheckpointsDropped || len(d.Checkpoints) != MaxCheckpoints {
+		t.Fatal(d)
+	}
+	last := d.StartedMono
+	for _, e := range d.Checkpoints {
+		if e.At < last || e.At > d.FinishedMono {
+			t.Fatal("checkpoint outside its monotonic cycle", e, d)
+		}
+		last = e.At
+	}
+	d.Checkpoints[0].Name = "changed"
+	if r.Snapshot().Checkpoints[0].Name != "decision_complete" {
+		t.Fatal("checkpoint snapshot aliases recorder")
+	}
+	Mark(context.Background(), "unrelated")
+	if len(r.Snapshot().Checkpoints) != MaxCheckpoints {
+		t.Fatal("unrelated operation changed checkpoints")
+	}
+}

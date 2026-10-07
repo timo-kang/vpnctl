@@ -81,3 +81,6 @@ LTE 모뎀 및 DHCP uplink renewal, 물리장치 ifindex 재사용, 외부 VPN/f
 전체 조합은 각각 후속 검증이 필요하다. EtherCAT 실제 frame과 cycle deadline 검증은
 전용 장비에서 수행해야 하며 여기서 LAN TCP 성공으로 대체하지 않는다.
 이 시험만으로 #22/#23/#24 또는 M3 운영 gate를 완료 처리하지 않는다.
+
+자동 선택·다중 릴레이 장애·같은 시계의 전환 계측은
+[자동전환 VM 매트릭스](manager-auto-failover.md)를 사용한다.

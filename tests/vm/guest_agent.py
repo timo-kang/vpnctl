@@ -181,24 +181,33 @@ class Handler(BaseHTTPRequestHandler):
                         return json.load(r)
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     result = list(pool.map(probe, jobs))
-            elif action == 'managers-start':
+            elif action in ('managers-start', 'manager-auto-start'):
+                automatic = action == 'manager-auto-start'
+                paths = req.get('paths')
+                if automatic and (type(paths) is not int or paths not in (4, 8)):
+                    raise ValueError('automatic manager paths must be 4 or 8')
                 with LOCK:
                     if WORKER is not None:
                         raise RuntimeError('only one fixture per manager VM')
                     env = dict(os.environ, VPNCTL_VM_MANAGERS='1', VPNCTL_INTEGRATION='1',
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
                                TMPDIR=str(ROOT / 'work'))
+                    if automatic:
+                        env.update(VPNCTL_VM_MANAGER_AUTO='1', VPNCTL_VM_MANAGER_PATHS=str(paths), VPNCTL_VM_WORKER='1')
+                    test = 'TestVMNetworkManagerAuto' if automatic else 'TestVMNetworkManagers'
+                    timeout = '20m' if automatic else '12m'
                     with (ROOT / 'worker.log').open('wb') as log:
-                        WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test', '-test.run=^TestVMNetworkManagers$', '-test.v', '-test.timeout=12m'],
+                        WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test', '-test.run=^' + test + '$', '-test.v', '-test.timeout=' + timeout],
                                                   env=env, stdout=log, stderr=log, start_new_session=True)
                 result = {'started': True}
-            elif action == 'managers-result':
+            elif action in ('managers-result', 'manager-auto-result'):
                 if WORKER is None:
                     raise RuntimeError('manager fixture not started')
                 result = {'exit': WORKER.poll()}
-                report = ROOT / 'managers.json'
+                automatic = action == 'manager-auto-result'
+                report = ROOT / ('manager-auto.json' if automatic else 'managers.json')
                 if result['exit'] is not None and report.exists():
-                    if report.stat().st_size > 1024 * 1024:
+                    if report.stat().st_size > (32 if automatic else 1) * 1024 * 1024:
                         raise RuntimeError('manager report too large')
                     result['report'] = json.loads(report.read_text())
             elif action == 'start':

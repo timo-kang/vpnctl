@@ -254,6 +254,7 @@ func (e *Engine) quarantineTarget(parent context.Context, id string) (TargetGuar
 	if err := b.SetRoutes(ctx, g, e.journal.Entries, nil); err != nil {
 		return e.targetFailure(id, "target_quarantine_conflict", errors.Join(err, e.blockTargetCandidates(ctx, g)))
 	}
+	relayobserve.Mark(ctx, "target_routes_blocked")
 	g.Active, g.Pending, g.VerifiedAt = nil, nil, nil
 	at := time.Now()
 	g.ChangedAt = &at
@@ -304,7 +305,9 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 			report.Paths[j].State, report.Paths[j].Reason = "unknown", "application_preparation_required"
 		}
 	}
+	relayobserve.Mark(ctx, "observation_complete")
 	out.Selection = selector.Decide(report)
+	relayobserve.Mark(ctx, "decision_complete")
 	if out.Selection.DesiredPathID == "" {
 		out.Application, err = e.quarantineTarget(ctx, id)
 		return out, errors.Join(out.Selection.Error(), err)
@@ -395,6 +398,7 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 		if err := b.SetRoutes(ctx, g, e.journal.Entries, desired); err != nil {
 			return e.targetFailure(id, "target_switch_failed", err)
 		}
+		relayobserve.Mark(ctx, "target_routes_applied")
 		at := time.Now()
 		g.ChangedAt = &at
 	}
@@ -402,6 +406,7 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 	if err != nil {
 		return e.targetFailure(id, "application_verification_failed", err)
 	}
+	relayobserve.Mark(ctx, "application_verified")
 	if !time.Now().Before(d.ValidUntil) {
 		return e.targetFailure(id, "decision_expired", ErrLeaseExpired)
 	}
@@ -413,6 +418,7 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 	if err := e.persist(); err != nil {
 		return e.targetFailure(id, "journal_save_failed", err)
 	}
+	relayobserve.Mark(ctx, "application_committed")
 	out := e.targetResult(id, "active", "unbound_tcp_connect_verified")
 	out.Activated, out.Proof = true, &proof
 	return out, nil
@@ -429,6 +435,7 @@ func (e *Engine) rollbackTarget(ctx context.Context, old TargetGuard, d relaysel
 			err = b.SetRoutes(ctx, g, e.journal.Entries, old.Active)
 		}
 		if err == nil {
+			relayobserve.Mark(ctx, "rollback_routes_applied")
 			proof, probeErr := e.applicationProof(ctx, g, old.Active)
 			if probeErr == nil && time.Now().Before(d.ValidUntil) && decisionUnderlay(ctx, entry, d, proof.UnderlayGeneration) == nil {
 				g.Active, g.Pending, g.Phase, g.Generation, g.VerifiedAt = old.Active, nil, "active", entry.Generation, &proof.ObservedAt
@@ -436,6 +443,7 @@ func (e *Engine) rollbackTarget(ctx context.Context, old TargetGuard, d relaysel
 				g.ChangedAt = &at
 				e.journal.Targets[e.targetIndex(id)] = g
 				if err := e.persist(); err == nil {
+					relayobserve.Mark(ctx, "rollback_committed")
 					out := e.targetResult(id, "rolled_back", "switch_failed_valid_previous_path_restored")
 					out.Activated, out.Proof = true, &proof
 					return out, cause
