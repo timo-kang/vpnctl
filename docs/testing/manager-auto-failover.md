@@ -83,7 +83,9 @@ This clock excludes suspend; these scenarios do not suspend. These diagnostics
 never authorize communication or replace BOOTTIME lease enforcement.
 `observation_complete`, `decision_complete`, `target_routes_applied`,
 `target_routes_blocked`, `application_verified` and `application_committed` denote
-completed boundaries. Rollback checkpoints are separately named. Successful
+completed boundaries. Candidate/application revalidation failures also have
+explicit checkpoints. Safety quarantine can precede the next no-path selection
+decision; the timeline preserves this order. Rollback checkpoints are separately named. Successful
 route installation alone is not first-payload success. The approval cutoff
 conversion from wall expiry to monotonic is explicitly an estimate.
 

@@ -110,3 +110,16 @@ func TestManagerTimelineKeepsPostFaultCheckpointsFromInflightCycle(t *testing.T)
 		}
 	}
 }
+
+func TestManagerTimelineKeepsQuarantineBeforeNoPathDecision(t *testing.T) {
+	cycles := []managerAutoCycle{
+		{Target: "app", Path: "p11", Guarded: true, Diagnostics: &relayobserve.Diagnostics{StartedMono: 50, FinishedMono: 125, Checkpoints: []relayobserve.Checkpoint{
+			{Name: "decision_complete", At: 110}, {Name: "candidate_revalidation_failed", At: 115}, {Name: "target_routes_blocked", At: 120},
+		}}},
+		{Target: "app", Guarded: true, Diagnostics: &relayobserve.Diagnostics{StartedMono: 130, FinishedMono: 145, Checkpoints: []relayobserve.Checkpoint{{Name: "decision_complete", At: 140}}}},
+	}
+	got := managerTimeline(nil, cycles, "p11", "", "", 90)
+	if got["detection_complete"] != 115 || got["routes_completed"] != 120 || got["decision_complete"] != 140 {
+		t.Fatal("lost earlier safety quarantine", got)
+	}
+}

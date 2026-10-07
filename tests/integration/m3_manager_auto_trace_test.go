@@ -412,6 +412,20 @@ func managerTimeline(packets []managerAutoEvent, cycles []managerAutoCycle, prev
 				}
 			}
 		}
+		// Revalidation can quarantine a route before the selector's next
+		// no-path decision. Preserve that real ordering and earlier detection.
+		for _, mark := range c.Diagnostics.Checkpoints {
+			at := int64(mark.At)
+			if at < begin {
+				continue
+			}
+			if (mark.Name == "candidate_revalidation_failed" || mark.Name == "application_verification_failed") && (detected == 0 || at < detected) {
+				detected = at
+			}
+			if desired == "" && c.Guarded && mark.Name == "target_routes_blocked" && applied == 0 {
+				applied = at
+			}
+		}
 		if c.Path != desired {
 			continue
 		}

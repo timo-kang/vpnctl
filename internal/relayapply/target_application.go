@@ -382,6 +382,7 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 	}
 	entry, err := e.verifyTargetChoice(ctx, old, desired, d, timeout)
 	if err != nil {
+		relayobserve.Mark(ctx, "candidate_revalidation_failed")
 		return e.targetFailure(id, "candidate_revalidation_failed", err)
 	}
 	if err := b.CheckRoutes(ctx, old, e.journal.Entries, old.Active); err != nil {
@@ -404,6 +405,7 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 	}
 	proof, err := e.applicationProof(ctx, g, desired)
 	if err != nil {
+		relayobserve.Mark(ctx, "application_verification_failed")
 		return e.targetFailure(id, "application_verification_failed", err)
 	}
 	relayobserve.Mark(ctx, "application_verified")

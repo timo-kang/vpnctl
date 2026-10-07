@@ -214,6 +214,9 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			if !p.OK && (p.Kind == "rf-lan" || p.Kind == "gimbal-lan" || independent && p.Kind == "independent-app") {
 				t.Fatal("unaffected communication interrupted", name, p)
 			}
+			if desired != "" && p.Begin >= ready && p.OK && (p.Kind == "tcp-new" || p.Kind == "udp") && p.Source != sourceFor(desired) {
+				t.Fatal("post-convergence payload used another relay", name, p)
+			}
 			if desired == "" && p.Begin >= ready && (p.Kind == "tcp-new" || p.Kind == "udp" || p.Kind == "tcp-existing" && p.Sent >= ready) && p.OK {
 				t.Fatal("no-uplink/approval quarantine leaked payload", name, p)
 			}
