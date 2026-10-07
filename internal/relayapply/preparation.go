@@ -331,6 +331,7 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error, 
 		return out, err
 	}
 	begin := e.preparationIndex(e.journal.RebuildCursor) + 1
+	preserveCursor := false
 	for n := 0; n < len(e.journal.Preparations); n++ {
 		i := (begin + n) % len(e.journal.Preparations)
 		p := e.journal.Preparations[i]
@@ -342,12 +343,15 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error, 
 			continue
 		}
 		if !creationHeadroom && p.Phase != "removing" {
-			// Preserve the scheduling cursor: this candidate resumes first in
-			// the next admission. Never spend cleanup headroom on a new add.
-			return out, nil
+			// Later owned cleanup may use the remainder, but keep the cursor
+			// before this deferred candidate so it resumes first next admission.
+			preserveCursor = true
+			continue
 		}
 		out.PathID, out.State = p.PathID, "rebuilding"
-		e.journal.RebuildCursor = p.PathID
+		if !preserveCursor {
+			e.journal.RebuildCursor = p.PathID
+		}
 		// Commit the scheduling cursor with this unit's durable state change,
 		// failure/backoff, or pre-add InFlight marker below. A separate cursor
 		// write adds an fsync without authorizing or protecting any kernel work.
