@@ -281,24 +281,53 @@ def validate_application_approval_result(status):
                 raise RuntimeError('application expiry did not isolate the intended grant')
 
 
-def validate_application_mixed_result(status, preparation=False):
+def validate_robot_capacity(row, paths, cpu):
+    quota = {'1': '100000 100000', '0.5': '50000 100000', '0.25': '25000 100000'}.get(cpu)
+    if not quota or row.get('paths') != paths or row.get('role_placement_verified') is not True:
+        raise RuntimeError('missing role capacity configuration or placement')
+    stats = []
+    for name in ('resource_profile', 'resource_profile_after'):
+        profile = row.get(name, {})
+        if (profile.get('scope') != 'robot-supervisor-and-two-actuators'
+                or profile.get('cpu_max') != quota
+                or profile.get('initial_preparation_limited') is not False
+                or profile.get('controller_relay_measurement_limited') is not False
+                or not profile.get('cpu_pressure', '').startswith('some ')):
+            raise RuntimeError('incorrect robot-only resource profile')
+        try:
+            values = dict(line.split() for line in profile['cpu_stat'].splitlines())
+            values = {k: int(values[k]) for k in ('usage_usec', 'nr_periods', 'nr_throttled', 'throttled_usec')}
+        except (KeyError, ValueError, AttributeError) as error:
+            raise RuntimeError('incomplete robot CPU accounting') from error
+        if any(v < 0 for v in values.values()):
+            raise RuntimeError('invalid robot CPU accounting')
+        stats.append(values)
+    if (stats[1]['usage_usec'] <= stats[0]['usage_usec']
+            or any(stats[1][k] < stats[0][k] for k in stats[0])):
+        raise RuntimeError('robot CPU accounting did not advance')
+
+
+def validate_application_mixed_result(status, preparation=False, paths=8, robot_cpu=None):
     reports = [row.get('report', {}) for row in status.get('reports', [])]
     if (status.get('exit') != 0 or len(reports) != 3
-            or {row.get('healthy_index') for row in reports} != {0, 3, 7}):
+            or paths not in (4, 8)
+            or {row.get('healthy_index') for row in reports} != {0, paths // 2 - 1, paths - 1}):
         raise RuntimeError('mixed application matrix failed or omitted cases')
     for row in reports:
         cycles = row.get('steady_applied_cycles', {})
         gaps = row.get('maximum_fresh_observation_gap_seconds', {})
-        if (row.get('completed') is not True or row.get('all_eight_leases_active') is not True
+        if (row.get('completed') is not True or row.get('all_candidate_leases_active', row.get('all_eight_leases_active') if paths == 8 else None) is not True
                 or row.get('two_actuators_and_payloads_verified') is not True
                 or set(cycles) != {'app', 'app2'} or any(type(n) is not int or n < 3 for n in cycles.values())
                 or set(gaps) != {'app', 'app2'} or any(not 0 < n <= 10 for n in gaps.values())
                 or row.get('steady_seconds', 0) < 15):
             raise RuntimeError('mixed application continuity evidence incomplete')
+        if robot_cpu is not None:
+            validate_robot_capacity(row, paths, robot_cpu)
         if preparation:
-            paths = ('p00', 'p01', 'p02', 'p03', 'p10', 'p11', 'p12', 'p13')
+            path_ids = ('p00', 'p01', 'p02', 'p03', 'p10', 'p11', 'p12', 'p13')
             if (row.get('automatic_rebuild') is not True or row.get('rebuild_completed') is not True
-                    or row.get('rebuilt_path') != paths[(row['healthy_index'] + 1) % 8]):
+                    or row.get('rebuilt_path') != path_ids[(row['healthy_index'] + 1) % 8]):
                 raise RuntimeError('mixed application rebuild evidence incomplete')
 
 
@@ -477,21 +506,24 @@ def validate_manager_auto_result(status, paths, installation=False):
             or summary.get('required_samples_per_class') != 20):
         raise RuntimeError('incomplete or misleading SLO summary')
 
-def exercise(vm, case, mode, delta, result):
+def exercise(vm, case, mode, delta, result, robot_cpus='0.5'):
     vm.launch()
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
         return result
-    if case in ('application-mixed', 'application-preparation', 'application-approval'):
-        vm.call(case + '-start')
+    if case in ('application-mixed', 'application-preparation', 'application-approval') or case.startswith('application-capacity-'):
+        capacity = case.startswith('application-capacity-')
+        action = 'application-capacity' if capacity else case
+        paths = int(case.rsplit('-', 1)[1]) if capacity else 8
+        vm.call(action + '-start', {'paths': paths, 'robot_cpus': robot_cpus} if capacity else {})
         until = time.monotonic() + 16 * 60
         while time.monotonic() < until:
-            status = vm.call(case + '-result')
+            status = vm.call(action + '-result')
             if status['exit'] is not None:
                 result[case] = status
                 vm.record(case + '-result', status)
-                if case in ('application-mixed', 'application-preparation'):
-                    validate_application_mixed_result(status, preparation=case == 'application-preparation')
+                if capacity or case in ('application-mixed', 'application-preparation'):
+                    validate_application_mixed_result(status, preparation=case == 'application-preparation', paths=paths, robot_cpu=robot_cpus if capacity else None)
                 else:
                     validate_application_approval_result(status)
                 return result
@@ -721,10 +753,11 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-capacity-4', 'application-capacity-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
+    parser.add_argument('--robot-cpus', default='0.5', choices=['1', '0.5', '0.25'])
     args = parser.parse_args()
     if not Path('/.dockerenv').exists() or set(os.listdir('/sys/class/net')) != {'lo'}:
         raise SystemExit('run only inside the dedicated network-none container')
@@ -765,7 +798,7 @@ def main():
         vm = VM('/work/vm-' + uuid.uuid4().hex[:8], '/results/' + label + '-' + uuid.uuid4().hex[:8], rtc)
         verdict = {'schema_version': 1, 'case': case, 'mode': mode, 'delta': delta, 'rtc': rtc, 'completed': False, 'qualified': False}
         try:
-            exercise(vm, case, mode, delta, verdict)
+            exercise(vm, case, mode, delta, verdict, args.robot_cpus)
             verdict['completed'] = True
             if 'unsupported_reason' not in verdict and 'defect_reason' not in verdict:
                 verdict['qualified'] = True

@@ -390,6 +390,45 @@ class ApplicationMixedEvidenceTests(unittest.TestCase):
                 observer.validate_application_mixed_result(status)
 
 
+class ApplicationRobotCapacityEvidenceTests(unittest.TestCase):
+    def valid(self, paths):
+        status = ApplicationMixedEvidenceTests().valid()
+        for row, index in zip(status['reports'], (0, paths // 2 - 1, paths - 1)):
+            report = row['report']
+            report.update(paths=paths, healthy_index=index, all_candidate_leases_active=True,
+                          role_placement_verified=True)
+            for name, usage in (('resource_profile', 10), ('resource_profile_after', 20)):
+                report[name] = dict(scope='robot-supervisor-and-two-actuators', cpu_max='50000 100000',
+                                    initial_preparation_limited=False, controller_relay_measurement_limited=False,
+                                    cpu_pressure='some avg10=0.0 total=0',
+                                    cpu_stat=f'usage_usec {usage}\nnr_periods 5\nnr_throttled 0\nthrottled_usec 0')
+        return status
+
+    def test_both_path_profiles(self):
+        for paths in (4, 8):
+            observer.validate_application_mixed_result(self.valid(paths), paths=paths, robot_cpu='0.5')
+
+    def test_unproven_or_wrong_resource_scope_fails(self):
+        changes = [lambda r: r.update(role_placement_verified=False),
+                   lambda r: r.update(paths=4),
+                   lambda r: r.pop('resource_profile_after'),
+                   lambda r: r['resource_profile'].update(cpu_max='max 100000'),
+                   lambda r: r['resource_profile_after'].update(cpu_max='100000 100000'),
+                   lambda r: r['resource_profile'].update(scope='whole-vm'),
+                   lambda r: r['resource_profile'].update(initial_preparation_limited=True),
+                   lambda r: r['resource_profile'].update(controller_relay_measurement_limited=True),
+                   lambda r: r['resource_profile_after'].update(cpu_stat='usage_usec 20'),
+                   lambda r: r['resource_profile_after'].update(cpu_stat=r['resource_profile']['cpu_stat']),
+                   lambda r: r['resource_profile_after'].update(cpu_pressure='')]
+        for change in changes:
+            status = self.valid(8)
+            change(status['reports'][0]['report'])
+            with self.assertRaises(RuntimeError):
+                observer.validate_application_mixed_result(status, paths=8, robot_cpu='0.5')
+        with self.assertRaises(RuntimeError):
+            observer.validate_application_mixed_result(self.valid(8), paths=8, robot_cpu='0.25')
+
+
 class ApplicationPreparationEvidenceTests(ApplicationMixedEvidenceTests):
     def valid(self):
         status = super().valid()

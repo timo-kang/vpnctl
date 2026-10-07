@@ -181,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
                         return json.load(r)
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     result = list(pool.map(probe, jobs))
-            elif action in ('application-mixed-start', 'application-preparation-start', 'application-approval-start'):
+            elif action in ('application-mixed-start', 'application-preparation-start', 'application-approval-start', 'application-capacity-start'):
                 with LOCK:
                     if WORKER is not None:
                         raise RuntimeError('only one fixture per VM')
@@ -191,15 +191,21 @@ class Handler(BaseHTTPRequestHandler):
                     env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
                                TMPDIR='/tmp', GORACE='atexit_sleep_ms=0')
+                    if action == 'application-capacity-start':
+                        paths, cpu = req.get('paths'), req.get('robot_cpus')
+                        if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25'):
+                            raise ValueError('explicit bounded robot CPU and path profile required')
+                        env.update(VPNCTL_CAPACITY_PATHS=str(paths), VPNCTL_CAPACITY_ROBOT_CPU=cpu)
                     with (ROOT / 'worker.log').open('wb') as log:
                         test = {'application-mixed-start': 'TestNetns_M3TargetApplicationMixedCandidates',
                                 'application-preparation-start': 'TestNetns_M3PreparationCapacity',
-                                'application-approval-start': 'TestNetns_M3TargetApplicationApproval'}[action]
+                                'application-approval-start': 'TestNetns_M3TargetApplicationApproval',
+                                'application-capacity-start': 'TestVMApplicationCapacity'}[action]
                         WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test',
                             '-test.run=^' + test + '$', '-test.v', '-test.timeout=15m'],
                             env=env, stdout=log, stderr=log, start_new_session=True)
                 result = {'started': True}
-            elif action in ('application-mixed-result', 'application-preparation-result', 'application-approval-result'):
+            elif action in ('application-mixed-result', 'application-preparation-result', 'application-approval-result', 'application-capacity-result'):
                 if WORKER is None:
                     raise RuntimeError('mixed application fixture not started')
                 result = {'exit': WORKER.poll()}

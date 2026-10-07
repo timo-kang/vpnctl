@@ -23,11 +23,17 @@ func applicationFixture(t *testing.T, separate bool, size int) *m3AuthorityFixtu
 }
 func applicationFixtureWithGuestRobot(t *testing.T, separate bool, size int, guestRoot bool) *m3AuthorityFixture {
 	t.Helper()
+	return applicationFixtureWithGroup(t, separate, size, guestRoot, nil)
+}
+
+func applicationFixtureWithGroup(t *testing.T, separate bool, size int, guestRoot bool, group *os.File) *m3AuthorityFixture {
+	t.Helper()
 	underlays := 2
 	if size == 8 {
 		underlays = 4
 	}
 	f := newM3AuthorityFixtureWithOptions(t, m3AuthorityOptions{separateController: separate, independentRecipients: true, underlays: underlays, extraTarget: true, robotInGuestRoot: guestRoot})
+	f.nodeGroup = group
 	cpuBefore, _ := os.ReadFile("/sys/fs/cgroup/cpu.stat")
 	memoryBefore, _ := os.ReadFile("/sys/fs/cgroup/memory.events")
 	t.Cleanup(func() {

@@ -70,11 +70,21 @@ type networkProcess struct {
 
 func startNetworkProcess(t *testing.T, ns, log string, env []string, args ...string) *networkProcess {
 	t.Helper()
+	return startNetworkProcessInGroup(t, nil, ns, log, env, args...)
+}
+
+func startNetworkProcessInGroup(t *testing.T, group *os.File, ns, log string, env []string, args ...string) *networkProcess {
+	t.Helper()
 	f, err := os.OpenFile(log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := netCommand(context.Background(), ns, args...)
+	if group != nil {
+		// clone3 places the process in its role cgroup before any user code or
+		// children execute. Moving only the parent PID after Start can miss work.
+		cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(group.Fd())}
+	}
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout, cmd.Stderr = f, f
 	if err := cmd.Start(); err != nil {
