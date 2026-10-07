@@ -25,6 +25,10 @@ import (
 	"vpnctl/internal/relayselect"
 )
 
+// Six samplers emit at most one event per 200ms each. A 20-minute fixture
+// needs up to 36,006 events including initial samples; retain bounded headroom.
+const managerPacketTraceLimit = 40000
+
 var errManagerProtocol = errors.New("invalid manager probe reply")
 
 func managerMono() int64 {
@@ -46,6 +50,19 @@ type managerAutoEvent struct {
 	Error    string `json:"error,omitempty"`
 	Session  int    `json:"session,omitempty"`
 }
+
+func managerLANReconfigurationSample(phase string, p managerAutoEvent, begin, recovered int64) bool {
+	return phase == "netplan-apply" && (p.Kind == "rf-lan" || p.Kind == "gimbal-lan") &&
+		begin > 0 && recovered >= begin && p.Begin >= begin && p.End >= p.Begin && p.End <= recovered
+}
+
+// Changing fixture authority resets health confirmation. Do not inject the
+// subsequent controller fault while either app is still confirming that change.
+func managerApprovalReady(generation uint64, app, independent relayapply.TargetReconcileResult) bool {
+	return generation > 0 && app.Applied && independent.Applied &&
+		app.Selection.Generation == generation && independent.Selection.Generation == generation
+}
+
 type managerAutoCycle struct {
 	Observed          int64                     `json:"observed_monotonic_ns"`
 	Target            string                    `json:"target"`
@@ -80,12 +97,21 @@ func (r *managerAutoTrace) fail(s string) {
 func (r *managerAutoTrace) add(e managerAutoEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.events) >= 20000 {
-		r.failure = "packet trace capacity exceeded"
+	if len(r.events) >= managerPacketTraceLimit {
+		if r.failure == "" {
+			r.failure = "packet trace capacity exceeded"
+		}
 		return
 	}
 	e.Sequence = len(r.events) + 1
 	r.events = append(r.events, e)
+}
+
+// Most polls only need failure/count, not copies of every packet and cycle.
+func (r *managerAutoTrace) position() (int, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.events), r.failure
 }
 func (r *managerAutoTrace) snapshot() ([]managerAutoEvent, []managerAutoCycle, string) {
 	r.mu.Lock()

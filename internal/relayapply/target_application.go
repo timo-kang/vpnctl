@@ -150,7 +150,13 @@ func (e *Engine) approvedTargetEntry(ctx context.Context, g TargetGuard, route *
 	if err := inventoryMatches(ctx, entry, e.underlays, e.collector); err != nil {
 		return entry, target, err
 	}
-	ready, err := e.backend.Check(ctx, entry, false)
+	check := e.backend.Check
+	if k, ok := e.backend.(nodeKernel); ok {
+		// checkLease below verifies the live nft/BPF gate and current grant.
+		// Do not read the same lease twice within this proof boundary.
+		check = k.kernel.Check
+	}
+	ready, err := check(ctx, entry, false)
 	if err != nil || !ready {
 		return entry, target, errors.Join(ErrConflict, err)
 	}
@@ -298,10 +304,10 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 	}
 	ctx, cancel := context.WithTimeout(parent, MaxDuration)
 	defer cancel()
-	report, _ := e.ObserveTarget(ctx, id, controller, timeout)
+	report, _ := e.observeTargetFiltered(ctx, id, controller, timeout, e.candidateProbe(), selector.ObservationExclusion)
 	for j := range report.Paths {
 		k := e.index(report.Paths[j].PathID)
-		if k >= 0 && (e.journal.Entries[k].LeaseVersion != 3 || e.journal.Entries[k].ProbeScope != 1) {
+		if report.Paths[j].State != "excluded" && k >= 0 && (e.journal.Entries[k].LeaseVersion != 3 || e.journal.Entries[k].ProbeScope != 1) {
 			report.Paths[j].State, report.Paths[j].Reason = "unknown", "application_preparation_required"
 		}
 	}
@@ -367,6 +373,32 @@ func (e *Engine) verifyTargetChoice(ctx context.Context, g TargetGuard, route *T
 	}
 	return entry, errors.New("candidate decision changed before application")
 }
+
+// A route that stays unchanged needs the current decision's exact installed
+// identity, then the fresh unbound application proof below. That proof checks
+// approval, live lease, inventory, ownership and routes on both sides of TCP.
+// Running another bound TCP proof before it duplicates those checks while
+// holding the namespace lock, delaying other targets and candidate rebuilding.
+func (e *Engine) verifyUnchangedTargetDecision(ctx context.Context, g TargetGuard, route *TargetRoute, d relayselect.Decision) (Entry, error) {
+	entry, _, err := e.targetEntry(g, route)
+	if err != nil {
+		return entry, err
+	}
+	if g.Phase != "active" || !sameTargetRoute(g.Active, route) || entry.Generation != d.Generation || d.ControllerID != entry.Controller || d.NodeID != entry.Node || d.TargetID != g.TargetID || d.DesiredPathID != entry.Candidate.PathID || !time.Now().Before(d.ValidUntil) {
+		return entry, ErrLeaseExpired
+	}
+	fingerprint := entryFingerprint(entry)
+	generation, err := relayobserve.UnderlayGeneration(ctx, entry.Candidate.UnderlayID)
+	if err != nil || ctx.Err() != nil || !time.Now().Before(d.ValidUntil) {
+		return entry, errors.Join(ErrLeaseExpired, err, ctx.Err())
+	}
+	for _, c := range d.Candidates {
+		if c.PathID == route.PathID && c.Eligible && c.Fingerprint == fingerprint && c.UnderlayGeneration == generation {
+			return entry, nil
+		}
+	}
+	return entry, errors.New("installed identity differs from confirmed decision")
+}
 func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *TargetRoute, d relayselect.Decision, timeout time.Duration) (TargetGuardResult, error) {
 	ctx, done := relayobserve.Phase(ctx, "apply")
 	defer done()
@@ -380,17 +412,23 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 			return e.targetFailure(id, "source_only_probe_bypass", ErrConflict)
 		}
 	}
-	entry, err := e.verifyTargetChoice(ctx, old, desired, d, timeout)
+	changed := !sameTargetRoute(old.Active, desired)
+	var entry Entry
+	var err error
+	if changed {
+		entry, err = e.verifyTargetChoice(ctx, old, desired, d, timeout)
+	} else {
+		entry, err = e.verifyUnchangedTargetDecision(ctx, old, desired, d)
+	}
 	if err != nil {
 		relayobserve.Mark(ctx, "candidate_revalidation_failed")
 		return e.targetFailure(id, "candidate_revalidation_failed", err)
 	}
-	if err := b.CheckRoutes(ctx, old, e.journal.Entries, old.Active); err != nil {
-		return e.targetFailure(id, "target_kernel_conflict", err)
-	}
 	g := old
-	changed := !sameTargetRoute(old.Active, desired)
 	if changed {
+		if err := b.CheckRoutes(ctx, old, e.journal.Entries, old.Active); err != nil {
+			return e.targetFailure(id, "target_kernel_conflict", err)
+		}
 		g.Phase, g.Pending, g.ApplicationVersion = "switching", desired, 1
 		e.journal.Targets[e.targetIndex(id)] = g
 		if err := e.persist(); err != nil {

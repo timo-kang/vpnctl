@@ -35,6 +35,12 @@ type targetProof struct {
 	rx, tx    uint64
 }
 
+func entryFingerprint(entry Entry) string {
+	b, _ := json.Marshal(entry)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 // ObserveTarget holds the same cache and namespace locks as prepare. No route,
 // peer, interface or policy-routing rule is changed. Protected candidates cooperatively renew
 // their leases before a bounded probe wave while holding the shared lock. Each TCP socket pins both the approved
@@ -51,6 +57,14 @@ func (e *Engine) candidateProbe() func(context.Context, Entry, relaycatalog.Targ
 }
 
 func (e *Engine) observeTarget(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) (out TargetReport, err error) {
+	return e.observeTargetFiltered(parent, targetID, controller, timeout, probe, nil)
+}
+
+// A reconcile cycle can omit proofs for candidates its immutable policy cannot
+// select. Keep their diagnostic rows and maintain ALL candidate leases before
+// probing; a target-specific exclusion must never exempt another candidate from
+// approval, consent, inventory or kernel enforcement.
+func (e *Engine) observeTargetFiltered(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), exclude func(string, int) string) (out TargetReport, err error) {
 	parent, recorder := relayobserve.Start(parent)
 	defer func() { out.Diagnostics = recorder.Snapshot() }()
 	out = TargetReport{SchemaVersion: 1, TargetID: targetID, StartedAt: time.Now(), Paths: []TargetObservation{}}
@@ -72,7 +86,11 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 	if e.uncertain {
 		return out, errors.New("reopen uncertain journal before observation")
 	}
-	if err := e.syncTerminalScopes(parent); err != nil {
+	events, eventsDone := relayobserve.Phase(parent, "underlay_events")
+	err = e.syncTerminalScopes(events)
+	eventsDone()
+	if err != nil {
+		out.Reason = "underlay_events_unavailable"
 		return out, err
 	}
 	ctx, cancel := context.WithTimeout(parent, MaxTargetProbeDuration)
@@ -123,11 +141,17 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 			continue
 		}
 		observation := TargetObservation{PathID: path.ID, RelayID: path.RelayID, UnderlayID: path.UnderlayID, Priority: path.Priority, Cost: path.Cost, State: "unknown", ObservedAt: time.Now()}
+		policyExclusion := ""
+		if exclude != nil {
+			policyExclusion = exclude(path.ID, path.Cost)
+		}
 		switch {
 		case path.Disabled:
 			observation.State, observation.Reason = "excluded", "disabled"
 		case path.Drain:
 			observation.State, observation.Reason = "excluded", "draining"
+		case policyExclusion != "":
+			observation.State, observation.Reason = "excluded", policyExclusion
 		default:
 			i := e.index(path.ID)
 			if i < 0 {
@@ -208,6 +232,11 @@ func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target r
 		defer cancel()
 	}
 	check := e.backend.Check
+	if k, ok := e.backend.(nodeKernel); ok {
+		// This function checks the live lease at both proof boundaries itself,
+		// including single-candidate revalidation outside a shared wave.
+		check = k.kernel.Check
+	}
 	if shared, ok := ctx.Value(observationCheckerKey{}).(observationChecker); ok {
 		check = shared
 	}
@@ -242,9 +271,7 @@ func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target r
 		return finish("unknown", "lease_inactive")
 	}
 	// Bind evidence to the installed resource generation, not a reusable path ID.
-	b, _ := json.Marshal(entry)
-	sum := sha256.Sum256(b)
-	out.Fingerprint = hex.EncodeToString(sum[:])
+	out.Fingerprint = entryFingerprint(entry)
 	ready, err := check(ctx, entry, false)
 	if err != nil || !ready {
 		return finish("unknown", "kernel_conflict_or_unavailable")

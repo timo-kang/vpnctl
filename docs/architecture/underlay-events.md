@@ -34,7 +34,11 @@
 netlink는 알림 전달을 보장하지 않는다. `ENOBUFS`, truncation, `NLMSG_OVERRUN`, 잘못된
 framing, 초기 dump 오류는 unknown으로 전환하고 구독을 닫는다. 부분 읽기 결과는
 성공으로 내보내지 않는다. 재구독은 1초 backoff 뒤 수행하고 초기 조회를 다시 한다.
-1회 drain은 최대 128 datagram/25ms, datagram은 최대 64KiB, 초기 조회는 최대
+1회 drain은 최대 128 datagram/25ms까지 이벤트를 처리한다. 한도 직후에는
+비차단 읽기 한 번으로 큐가 비었는지만 확인한다. 스케줄링 지연 중 이미 모든
+이벤트를 처리한 경우 불필요한 전체 세대 무효화를 피하며, 추가 데이터나 오류가
+있으면 처리하지 않고 기존처럼 전체 관측을 무효화한다. 취소된 호출은 세대를
+반환하지 않는다. datagram은 최대 64KiB, 초기 조회는 최대
 2초/512 datagram/128 interface다. 지속 폭주도 같은 유실 경로로 처리한다.
 백그라운드 수신 goroutine이나 무제한 이벤트 queue는 없다. 커널 receive buffer에서
 읽으며 `NETLINK_NO_ENOBUFS`를 켜지 않는다.

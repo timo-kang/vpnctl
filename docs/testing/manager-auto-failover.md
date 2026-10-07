@@ -7,6 +7,14 @@ network namespaces in an identity-guarded guest. Four/eight candidates mean two
 relays × two/four approved virtual Ethernet underlays. The independent second
 application is pinned to relay 1 / underlay 1 to detect unintended disruption.
 
+The pinned application's reconcile loop probes only candidates its immutable
+selection policy permits. Its other seven candidates in the eight-path profile
+remain visible as policy exclusions, and every candidate still receives lease
+maintenance and revocation enforcement. Probing all eight for a manual pin held
+the shared FIFO lock long enough to reset an unaffected application's 10-second
+health history on a slower runner (#183). The full automatic candidate sweep,
+freshness thresholds, lease deadlines and all traffic assertions are unchanged.
+
 ```sh
 VPNCTL_ARTIFACT_DIR=/absolute/new-empty-results ./scripts/test-manager-auto.sh
 # Independent repeats: each case boots a fresh disposable VM.
@@ -19,6 +27,12 @@ network-none container contract as the manual matrix apply. All NM, Netplan,
 networkd, udev, nft and route commands affect only the guest. The host's Wi-Fi,
 kernel modules, network, clocks and power state are never test targets. Each
 invocation gets a new artifact directory; failed experiments remain available.
+
+`VPNCTL_VM_CPUS=0.5` or `0.25` reduces only the test container's CPU quota for
+contention experiments; the default remains one CPU. Both the source manifest
+and isolation report record the quota. Guest clocks, lease deadlines, probe
+timeouts and convergence limits are unchanged. This is CPU pressure testing,
+not a claim that throttling reproduces a particular runner's instruction speed.
 
 ## Scenarios and functional requirements
 
@@ -50,7 +64,16 @@ Each converged route requires ordinary TCP and UDP nonce payloads with the
 server-observed relay source, an actual unbound route lookup, and nonzero WG
 handshake/RX/TX. RF/gimbal LAN traffic and the independent application are sampled
 concurrently. LAN failures, or independent-app failures during an unaffected
-phase, fail the test. NM shared DHCP uses real DORA and its allocated address,
+phase, fail the test. The explicit `netplan-apply` phase directly reconfigures
+RF/gimbal LANs: only LAN failures bracketed by that command's start and verified
+LAN recovery are reported separately. Recovery requires real nonce replies with
+the original sources and original LAN route/device readback within a five-second
+fixture watchdog after command completion. Failure counts and monotonic proof
+times remain in `lan_reconfiguration`; later LAN failures and independent-app
+failures still fail the scenario. A pass does not mean Netplan apply is lossless.
+This distinction follows [systemd v255 forced reconfiguration](https://github.com/systemd/systemd/blob/v255/src/network/networkd-link.c#L1134),
+which drops managed configuration before restoring it. VPN switching phases have
+no such exception (#184). NM shared DHCP uses real DORA and its allocated address,
 then verifies shared NAT using an independent LAN payload. Manager configuration
 hashes, foreign policy routes/rules and foreign peers must be preserved.
 
@@ -74,6 +97,17 @@ Capacity overflow, truncation, missing clocks, omitted phases or nonzero test
 exit cannot pass. Raw private config, certificates, cache and WG keys remain in
 the private VM work directory and are not exported.
 
+The six 200ms packet samplers retain up to 40,000 events: enough for their
+36,006-event upper bound over the existing 20-minute fixture timeout. Overflow
+still fails, retains prior evidence, and never overwrites an earlier failure.
+Status polling reads at most a 512KiB+1 tail and decodes the newest complete
+application record rather than reparsing all historical cycles. An unfinished
+write grants no new evidence; a blocked latest cycle cannot reuse an earlier
+success. The independent incremental trace reader preserves and validates every
+complete cycle. Failure-only polls avoid copying the growing packet history.
+These bounds reduce measurement CPU/allocation pressure without changing probe
+frequency, freshness, lease enforcement or any convergence/SLO deadline.
+
 All packet timestamps, fault-command beginnings, command completions and product
 execution checkpoints use the same guest boot's Linux `CLOCK_MONOTONIC` domain.
 An observation's log receipt time is separate from its recorded execution time.
@@ -94,6 +128,18 @@ its existing 750ms shared budget and 500ms reserve for each additional unit.
 This avoids rejoining two busy application watchers after every pair of tiny
 operations; slow operations retain the same deadline and yielding conditions.
 The 120-second convergence watchdog is unchanged.
+The durable round-robin cursor shares the unit's state/owner/in-flight commit;
+a cursor-only fsync must not consume this bounded work quantum. Tests read back
+the owner, cursor and in-flight marker before every kernel add and inject errors
+before/after every dynamically traced journal write.
+
+Keeping an already active route uses its exact current decision fingerprint and
+underlay generation followed by a fresh unbound application TCP proof, with
+live approval/lease/inventory/ownership/routes checked before and after it. It
+does not run a second bound candidate TCP proof after the observation wave.
+Changing or rolling back a route retains bound candidate revalidation before
+mutation. Duplicate middle lease reads are removed; every proof boundary still
+reads the live gates. This reduces lock contention without extending authority.
 This clock excludes suspend; these scenarios do not suspend. These diagnostics
 never authorize communication or replace BOOTTIME lease enforcement.
 `observation_complete`, `decision_complete`, `target_routes_applied`,
@@ -141,3 +187,23 @@ that SLO. This matrix alone does not close M3 or #24.
 Physical Wi-Fi/AP/roaming, LTE modem behavior, DHCP uplink renewal, other Netplan
 renderers, EtherCAT frames/deadlines and fleet operating SLOs need separate
 hardware/deployment evidence.
+
+## Rebuild cost under contention
+
+A failed post-merge 8-candidate run (CI 37563690087) recovered traffic through
+p01 but exceeded the unchanged 120-second preferred-path convergence limit.
+Increasing the maximum work count alone did not help when each preparation unit
+spent its budget collecting all four underlays. Preparation now collects fresh
+inventory for the requested candidate's underlay, including the approved endpoints
+on that underlay, while retaining the complete catalog and its original resource
+slots. Full underlay configuration validation, current approval checks, kernel
+ownership checks and per-unit persistence remain required. Inventory is never
+reused between work units. Lease maintenance still checks every installed path
+before rebuilding.
+
+Node supervision reports include bounded `diagnostics.phases` for admission,
+maintenance, rebuild, rebuild units and rebuild inventory, with elapsed time and
+external command counts. Phase times are nested and must not be summed as wall
+time. These fields are cost evidence only, never authorization or SLO proof.
+The rebuild's 750ms shared wall/BOOTTIME budget, 500ms next-unit reserve, maximum
+eight units and outer 5-second maintenance limit are unchanged.

@@ -265,6 +265,61 @@ def host_clock():
             'wall_ns': time.time_ns(), 'monotonic_ns': time.monotonic_ns(),
             'boottime_ns': time.clock_gettime_ns(time.CLOCK_BOOTTIME)}
 
+def validate_application_approval_result(status):
+    reports = [row.get('report', {}) for row in status.get('reports', [])]
+    if (status.get('exit') != 0 or len(reports) != 2
+            or {row.get('fault') for row in reports} != {'expiry', 'revocation'}):
+        raise RuntimeError('application approval matrix failed or omitted cases')
+    for row in reports:
+        if (row.get('completed') is not True or row.get('old_and_new_unbound_tcp_blocked') is not True
+                or row.get('relay_approvals_live') is not True):
+            raise RuntimeError('application approval enforcement evidence incomplete')
+        if row['fault'] == 'expiry':
+            generation = row.get('isolated_grant_generation')
+            if (type(generation) is not int or generation <= 0
+                    or row.get('applied_generation') != generation):
+                raise RuntimeError('application expiry did not isolate the intended grant')
+
+
+def validate_application_mixed_result(status, preparation=False):
+    reports = [row.get('report', {}) for row in status.get('reports', [])]
+    if (status.get('exit') != 0 or len(reports) != 3
+            or {row.get('healthy_index') for row in reports} != {0, 3, 7}):
+        raise RuntimeError('mixed application matrix failed or omitted cases')
+    for row in reports:
+        cycles = row.get('steady_applied_cycles', {})
+        gaps = row.get('maximum_fresh_observation_gap_seconds', {})
+        if (row.get('completed') is not True or row.get('all_eight_leases_active') is not True
+                or row.get('two_actuators_and_payloads_verified') is not True
+                or set(cycles) != {'app', 'app2'} or any(type(n) is not int or n < 3 for n in cycles.values())
+                or set(gaps) != {'app', 'app2'} or any(not 0 < n <= 10 for n in gaps.values())
+                or row.get('steady_seconds', 0) < 15):
+            raise RuntimeError('mixed application continuity evidence incomplete')
+        if preparation:
+            paths = ('p00', 'p01', 'p02', 'p03', 'p10', 'p11', 'p12', 'p13')
+            if (row.get('automatic_rebuild') is not True or row.get('rebuild_completed') is not True
+                    or row.get('rebuilt_path') != paths[(row['healthy_index'] + 1) % 8]):
+                raise RuntimeError('mixed application rebuild evidence incomplete')
+
+
+
+def validate_lan_reconfiguration(step):
+    lan = step.get('lan_reconfiguration', {})
+    done, recovered = (lan.get(key, 0) for key in ('action_completed_monotonic_ns', 'recovered_monotonic_ns'))
+    proof = lan.get('payload_verified_monotonic_ns', {})
+    if (not 0 < step.get('begin_monotonic_ns', 0) <= done <= recovered
+            or recovered - done > 5_000_000_000 or lan.get('watchdog_ms') != 5000
+            or type(lan.get('failed_samples')) is not int or lan['failed_samples'] < 0
+            or set(proof) != {'172.20.10.2', '172.20.20.2'}
+            or any(not done <= at <= recovered for at in proof.values())):
+        raise RuntimeError('missing bounded LAN reconfiguration recovery evidence')
+    for key, device, source in [('rf_route', 'rf0', '172.20.10.1'), ('gimbal_route', 'gimbal0', '172.20.20.1')]:
+        routes = lan.get(key, [])
+        if len(routes) != 1 or routes[0].get('dev') != device or routes[0].get('prefsrc') != source:
+            raise RuntimeError('LAN route/source not restored')
+    return lan
+
+
 def validate_manager_result(status):
     report = status.get('report', {})
     if status.get('exit') != 0 or report.get('completed') is not True or report.get('schema_version') != 1:
@@ -275,6 +330,19 @@ def validate_manager_result(status):
     steps = report.get('steps', [])
     if len(steps) != len(expected) or {s.get('name') for s in steps} != expected or any(s.get('passed') is not True for s in steps):
         raise RuntimeError('missing or failed manager scenarios')
+    step = next(s for s in steps if s['name'] == 'netplan-apply')
+    lan = validate_lan_reconfiguration(step)
+    failures = 0
+    for target in ('172.20.10.2', '172.20.20.2'):
+        before = step.get('traffic_before', {}).get(target, {})
+        recovered = step.get('traffic_after_lan_recovery', {}).get(target, {})
+        after = step.get('traffic_after', {}).get(target, {})
+        if (not all(type(r.get('failed')) is int for r in (before, recovered, after))
+                or not before['failed'] <= recovered['failed'] == after['failed']):
+            raise RuntimeError('LAN failures continued after manager recovery')
+        failures += after['failed'] - before['failed']
+    if failures != lan['failed_samples']:
+        raise RuntimeError('LAN interruption count mismatch')
 
 AUTO_MANAGER_STEPS = {
     'baseline', 'nm-down', 'relay0-down', 'all-relays-down', 'alternate-recovery',
@@ -326,6 +394,24 @@ def validate_manager_auto_result(status, paths):
             raise RuntimeError('invalid scenario clock evidence')
         if set(step.get('traffic', {})) != AUTO_PACKET_KINDS:
             raise RuntimeError('missing per-scenario packet evidence')
+        if step['name'] == 'netplan-apply':
+            lan = validate_lan_reconfiguration(step)
+            recovered = lan['recovered_monotonic_ns']
+            if (lan['action_completed_monotonic_ns'] != step['action_completed_monotonic_ns']
+                    or recovered > step['ready_observed_monotonic_ns']):
+                raise RuntimeError('LAN recovery clock mismatch')
+            failures = 0
+            for packet in packets:
+                if (packet.get('kind') not in ('rf-lan', 'gimbal-lan')
+                        or not step['begin_monotonic_ns'] <= packet['begin_monotonic_ns'] <= step['end_monotonic_ns']):
+                    continue
+                if packet.get('ok') is False:
+                    failures += 1
+                    if packet['end_monotonic_ns'] > recovered:
+                        raise RuntimeError('LAN failure outside direct reconfiguration window')
+            if (failures != lan['failed_samples']
+                    or failures != sum(step['traffic'][kind].get('failed', 0) for kind in ('rf-lan', 'gimbal-lan'))):
+                raise RuntimeError('LAN interruption count mismatch')
         if step.get('metric') not in ('failover', 'no-uplink'):
             continue
         slo = step.get('slo', {})
@@ -361,6 +447,21 @@ def exercise(vm, case, mode, delta, result):
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
         return result
+    if case in ('application-mixed', 'application-preparation', 'application-approval'):
+        vm.call(case + '-start')
+        until = time.monotonic() + 16 * 60
+        while time.monotonic() < until:
+            status = vm.call(case + '-result')
+            if status['exit'] is not None:
+                result[case] = status
+                vm.record(case + '-result', status)
+                if case in ('application-mixed', 'application-preparation'):
+                    validate_application_mixed_result(status, preparation=case == 'application-preparation')
+                else:
+                    validate_application_approval_result(status)
+                return result
+            time.sleep(2)
+        raise RuntimeError('mixed application fixture timed out')
     if case == 'managers' or case.startswith('manager-auto-'):
         automatic = case != 'managers'
         paths = int(case.rsplit('-', 1)[1]) if automatic else 4
@@ -584,7 +685,7 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'application-preparation', 'application-approval', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])

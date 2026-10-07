@@ -5,9 +5,11 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,9 +32,59 @@ func applicationResults(path string) (out []relayapply.TargetReconcileResult) {
 	}
 	return
 }
+
+const applicationLogRecordLimit = 256 * 1024
+
+// Polling must not reparse the complete history on every iteration. That makes
+// the measuring process consume progressively more of the fixture's CPU quota.
+// Read a bounded tail and decode only the newest complete schema-v1 record.
+// The separate trace reader still validates and preserves every complete cycle.
 func latestApplicationResult(path string) (out relayapply.TargetReconcileResult) {
-	if results := applicationResults(path); len(results) > 0 {
-		out = results[len(results)-1]
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return
+	}
+	return readLatestApplicationResult(f, st.Size())
+}
+
+func readLatestApplicationResult(r io.ReaderAt, size int64) (out relayapply.TargetReconcileResult) {
+	if size <= 0 || size > 32*1024*1024 {
+		return
+	}
+	start := max(int64(0), size-2*applicationLogRecordLimit-1)
+	b := make([]byte, size-start)
+	n, err := r.ReadAt(b, start)
+	if n != len(b) || err != nil && err != io.EOF {
+		return
+	}
+	// A writer may have appended only part of its next JSON record.
+	end := bytes.LastIndexByte(b, '\n')
+	if end < 0 {
+		return
+	}
+	b = b[:end]
+	for len(b) > 0 {
+		sep := bytes.LastIndexByte(b, '\n')
+		if sep < 0 && start != 0 {
+			return // The first bytes of the tail may be a partial record.
+		}
+		line := b[sep+1:]
+		if len(line) > applicationLogRecordLimit {
+			return
+		}
+		var v relayapply.TargetReconcileResult
+		if json.Unmarshal(line, &v) == nil && v.SchemaVersion == 1 {
+			return v
+		}
+		if sep < 0 {
+			break
+		}
+		b = b[:sep]
 	}
 	return
 }
@@ -161,6 +213,35 @@ func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
 	report["fault_installed_at"] = started
 	logfile := filepath.Join(f.results, "capacity-app.jsonl")
 	watcher := startNetworkProcess(t, f.robot, logfile, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "500ms", "--probe-timeout", "2s")
+	// A payload can detect quarantine before the current reconcile finishes
+	// writing its diagnostic row. Preserve that bounded cycle before automatic
+	// process cleanup; the original failure remains a failure even if it recovers.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		at := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		capture := func(args ...string) string {
+			b, err := netCommand(ctx, f.robot, args...).CombinedOutput()
+			return fmt.Sprintf("%s\nerror=%v", b, err)
+		}
+		diagnostic := map[string]any{"observed_at": at, "wait_limit_ms": 10000,
+			"routes": capture("ip", "-j", "-N", "-4", "route", "show", "table", "all"),
+			"nft":    capture("nft", "-j", "list", "ruleset")}
+		report["failure_diagnostics"] = diagnostic
+		for ctx.Err() == nil {
+			app, app2 := latestApplicationResult(logfile), latestApplicationResult(secondLog)
+			diagnostic["app"], diagnostic["app2"] = app, app2
+			if app.FinishedAt.After(at) && app2.FinishedAt.After(at) {
+				diagnostic["cycles_completed"] = true
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		diagnostic["finished_at"] = time.Now()
+	})
 	// Sample the actual three long-lived workers. The short qualification is
 	// not an indefinite leak proof; record peaks and enforce a generous bound
 	// inside the unchanged 2 GiB container allowance for both build profiles.

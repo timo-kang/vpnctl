@@ -181,6 +181,45 @@ class Handler(BaseHTTPRequestHandler):
                         return json.load(r)
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     result = list(pool.map(probe, jobs))
+            elif action in ('application-mixed-start', 'application-preparation-start', 'application-approval-start'):
+                with LOCK:
+                    if WORKER is not None:
+                        raise RuntimeError('only one fixture per VM')
+                    # Go appends the long subtest name to TMPDIR. Keep the
+                    # guest-only path short enough for Linux's Unix socket
+                    # address limit (the controller admin socket lives below it).
+                    env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
+                               VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
+                               TMPDIR='/tmp', GORACE='atexit_sleep_ms=0')
+                    with (ROOT / 'worker.log').open('wb') as log:
+                        test = {'application-mixed-start': 'TestNetns_M3TargetApplicationMixedCandidates',
+                                'application-preparation-start': 'TestNetns_M3PreparationCapacity',
+                                'application-approval-start': 'TestNetns_M3TargetApplicationApproval'}[action]
+                        WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test',
+                            '-test.run=^' + test + '$', '-test.v', '-test.timeout=15m'],
+                            env=env, stdout=log, stderr=log, start_new_session=True)
+                result = {'started': True}
+            elif action in ('application-mixed-result', 'application-preparation-result', 'application-approval-result'):
+                if WORKER is None:
+                    raise RuntimeError('mixed application fixture not started')
+                result = {'exit': WORKER.poll()}
+                if result['exit'] is not None:
+                    reports, total = [], 0
+                    filename = 'application-mixed-candidates.json' if action != 'application-approval-result' else 'application-approval.json'
+                    for report in sorted((ROOT / 'results').glob('*/' + filename)):
+                        total += report.stat().st_size
+                        if total > 8 * 1024 * 1024:
+                            raise RuntimeError('mixed application diagnostics exceed limit')
+                        row = {'fixture': report.parent.name, 'report': json.loads(report.read_text()), 'logs': {}}
+                        for name in ('capacity-app.jsonl', 'capacity-app2.jsonl', 'application-node-supervisor.jsonl', 'application-kernel.json'):
+                            path = report.parent / name
+                            if path.exists():
+                                total += path.stat().st_size
+                                if total > 8 * 1024 * 1024:
+                                    raise RuntimeError('mixed application diagnostics exceed limit')
+                                row['logs'][name] = path.read_text()
+                        reports.append(row)
+                    result['reports'] = reports
             elif action in ('managers-start', 'manager-auto-start'):
                 automatic = action == 'manager-auto-start'
                 paths = req.get('paths')

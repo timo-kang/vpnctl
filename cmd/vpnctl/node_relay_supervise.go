@@ -21,19 +21,24 @@ import (
 )
 
 type nodeSupervisionReport struct {
-	SchemaVersion int                `json:"schema_version"`
-	ObservedAt    time.Time          `json:"observed_at"`
-	CycleMS       int64              `json:"cycle_ms"`
-	State         string             `json:"state"`
-	Reason        string             `json:"reason,omitempty"`
-	Refresh       string             `json:"refresh"`
-	Kernel        *relayapply.Result `json:"kernel,omitempty"`
-	Preparation   *relayapply.Result `json:"preparation,omitempty"`
+	SchemaVersion int                       `json:"schema_version"`
+	ObservedAt    time.Time                 `json:"observed_at"`
+	CycleMS       int64                     `json:"cycle_ms"`
+	State         string                    `json:"state"`
+	Reason        string                    `json:"reason,omitempty"`
+	Refresh       string                    `json:"refresh"`
+	Kernel        *relayapply.Result        `json:"kernel,omitempty"`
+	Preparation   *relayapply.Result        `json:"preparation,omitempty"`
+	Diagnostics   *relayobserve.Diagnostics `json:"diagnostics,omitempty"`
 }
 
-func nodeSupervisionCycle(ctx context.Context, cfg *config.NodeConfig, dir string, client relaycache.Client, refresh bool) (nodeSupervisionReport, error) {
-	out := nodeSupervisionReport{SchemaVersion: 1, State: "blocked", Refresh: "not_due"}
-	c, e, err := openNodeRelayEngine(ctx, cfg, dir)
+func nodeSupervisionCycle(ctx context.Context, cfg *config.NodeConfig, dir string, client relaycache.Client, refresh bool) (out nodeSupervisionReport, err error) {
+	ctx, recorder := relayobserve.Start(ctx)
+	defer func() { out.Diagnostics = recorder.Snapshot() }()
+	out = nodeSupervisionReport{SchemaVersion: 1, State: "blocked", Refresh: "not_due"}
+	admission, done := relayobserve.Phase(ctx, "admission")
+	c, e, err := openNodeRelayEngine(admission, cfg, dir)
+	done()
 	if err != nil {
 		out.Reason = nodeAdmissionReason(err)
 		return out, err

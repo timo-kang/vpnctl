@@ -60,9 +60,11 @@ func (s *Store) Status() (Report, error) {
 	if s.uncertain {
 		return s.report(), ErrUncertain
 	}
-	// Persist a clock high-water mark: observing expiry must not be undone by a
-	// later clock rollback, including after a process restart.
-	if e := s.save(cloneState(s.state)); e != nil {
+	// Persist every clock high-water mark: observing expiry must not be undone
+	// by a later rollback, including after restart. The mutex-owned state was
+	// validated when loaded/changed; only its scalar timestamp changes here.
+	// Do not clone and rederive every private/public key pair on each read.
+	if e := s.checkpointClock(); e != nil {
 		return s.report(), e
 	}
 	return s.report(), nil

@@ -4,8 +4,11 @@ package relayapply
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"syscall"
 	"testing"
@@ -18,12 +21,16 @@ import (
 
 type preparationKernel struct {
 	*fakeNodeLease
-	removals []string
+	removals   []string
+	beforeStep func(Entry)
 }
 
 func (k *preparationKernel) Step(ctx context.Context, e Entry, step, key string) error {
 	if k.foreign {
 		return ErrConflict
+	}
+	if k.beforeStep != nil {
+		k.beforeStep(e)
 	}
 	return k.fakeKernel.Step(ctx, e, step, key)
 }
@@ -225,7 +232,26 @@ func TestPreparationRevocationDuringEveryStage(t *testing.T) {
 }
 
 func TestPreparationCleanupJournalFailures(t *testing.T) {
-	for point := 1; point <= 16; point++ {
+	// Include entry into releasing and every removal commit, without counting
+	// a fixed number of cursor-only writes or drifting into a new installation.
+	boundaries := 0
+	t.Run("trace", func(t *testing.T) {
+		e, k, _, now := preparationFixture(t)
+		if _, err := e.RequestPreparation(context.Background(), "p0", ""); err != nil {
+			t.Fatal(err)
+		}
+		readyPreparation(t, e, now, "p0")
+		k.objects["p0"] = k.objects["p0"][:9]
+		save := e.save
+		e.save = func(b []byte) error { boundaries++; return save(b) }
+		for i := 0; i < len(preparationRemovalSteps)+2 && e.journal.Preparations[0].Phase != "waiting"; i++ {
+			tickPreparation(t, e, now)
+		}
+		if e.journal.Preparations[0].Phase != "waiting" || boundaries == 0 {
+			t.Fatal("cleanup boundary trace incomplete")
+		}
+	})
+	for point := 1; point <= boundaries; point++ {
 		for _, committed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("write%d/committed%v", point, committed), func(t *testing.T) {
 				e, k, dir, now := preparationFixture(t)
@@ -234,10 +260,6 @@ func TestPreparationCleanupJournalFailures(t *testing.T) {
 				}
 				readyPreparation(t, e, now, "p0")
 				k.objects["p0"] = k.objects["p0"][:9]
-				tickPreparation(t, e, now)
-				if e.journal.Preparations[0].Phase != "removing" {
-					t.Fatal("cleanup not entered")
-				}
 				save := e.save
 				writes := 0
 				e.save = func(b []byte) error {
@@ -252,7 +274,7 @@ func TestPreparationCleanupJournalFailures(t *testing.T) {
 					}
 					return save(b)
 				}
-				for i := 0; i < 9 && !e.uncertain; i++ {
+				for i := 0; i < len(preparationRemovalSteps)+2 && !e.uncertain && e.journal.Preparations[0].Phase != "waiting"; i++ {
 					tickPreparation(t, e, now)
 				}
 				if !e.uncertain {
@@ -356,9 +378,23 @@ func TestPreparationReleaseStorageFailureCannotResurrect(t *testing.T) {
 }
 
 func TestPreparationJournalFailureEveryBoundary(t *testing.T) {
-	// Initial cursor, before/after each add, and final readback commits. Both
-	// pre-rename and committed-but-uncertain outcomes must reopen consistently.
-	for point := 1; point <= 34; point++ {
+	// Trace all actual owner, pre/post-add and final readback writes, so adding
+	// a new durable boundary cannot silently leave it outside the fault matrix.
+	// Both pre-rename and committed-but-uncertain outcomes must reopen safely.
+	boundaries := 0
+	t.Run("trace", func(t *testing.T) {
+		e, _, _, now := preparationFixture(t)
+		if _, err := e.RequestPreparation(context.Background(), "p0", ""); err != nil {
+			t.Fatal(err)
+		}
+		save := e.save
+		e.save = func(b []byte) error { boundaries++; return save(b) }
+		readyPreparation(t, e, now, "p0")
+	})
+	if boundaries == 0 {
+		t.Fatal("no durable boundaries traced")
+	}
+	for point := 1; point <= boundaries; point++ {
 		for _, after := range []bool{false, true} {
 			t.Run(fmt.Sprintf("write%d/committed%v", point, after), func(t *testing.T) {
 				e, k, dir, now := preparationFixture(t)
@@ -629,6 +665,68 @@ func TestPreparationSlowJournalYieldsBeforeNextUnit(t *testing.T) {
 	}
 }
 
+func TestPreparationCursorAndInFlightAreDurableBeforeEveryAdd(t *testing.T) {
+	e, k, dir, now := preparationFixture(t)
+	for _, path := range []string{"p0", "p1"} {
+		if _, err := e.RequestPreparation(context.Background(), path, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checked := 0
+	k.beforeStep = func(entry Entry) {
+		// The wg callback holds the cache key lock; inspect this test fixture's
+		// committed journal directly, without reentering that same cache lock.
+		raw, err := os.ReadFile(filepath.Join(dir, "apply.json"))
+		var env envelope
+		if err != nil || json.Unmarshal(raw, &env) != nil || env.Digest != digest(env.Journal) || env.Journal.RebuildCursor != entry.Candidate.PathID {
+			t.Fatal("kernel add preceded durable scheduling identity", err)
+		}
+		found := false
+		for _, p := range env.Journal.Preparations {
+			if p.PathID == entry.Candidate.PathID {
+				found = p.Phase == "preparing" && p.InFlight && p.Step < len(preparationSteps)
+			}
+		}
+		owned := false
+		for _, saved := range env.Journal.Entries {
+			owned = owned || saved.Candidate.PathID == entry.Candidate.PathID && saved.Alias == entry.Alias && saved.LinkIndex == entry.LinkIndex
+		}
+		if !found || !owned {
+			t.Fatal("kernel add preceded durable owner/in-flight marker")
+		}
+		checked++
+	}
+	readyPreparation(t, e, now, "p0")
+	readyPreparation(t, e, now, "p1")
+	if checked != 2*len(preparationSteps) {
+		t.Fatal("not every creation boundary was verified", checked)
+	}
+}
+
+func TestPreparationSlowPersistenceAvoidsCursorOnlyWrite(t *testing.T) {
+	e, k, _, now := preparationFixture(t)
+	for _, path := range []string{"p0", "p1"} {
+		if _, err := e.RequestPreparation(context.Background(), path, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.rebuildCandidates(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	// Controlled storage latency isolates the scheduling effect. Actual durable
+	// readback and failures are verified by the adjacent tests and fault matrix.
+	e.save = func([]byte) error { *now += 55 * time.Millisecond; return nil }
+	if _, err := e.RebuildCandidates(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if k.steps != 3 || k.active["p0"] || k.active["p1"] {
+		t.Fatal("redundant cursor writes consumed the quantum or granted traffic", k.steps)
+	}
+	if e.journal.Preparations[0].Step != 2 || e.journal.Preparations[1].Step != 1 {
+		t.Fatal("storage optimization changed round-robin fairness")
+	}
+}
+
 func TestPreparationSecondUnitRequiresWallDeadlineHeadroom(t *testing.T) {
 	e, k, _, _ := preparationFixture(t)
 	for _, path := range []string{"p0", "p1"} {
@@ -750,5 +848,86 @@ func TestPreparationAmbiguousWaitingScopeDoesNotDeadlockReplan(t *testing.T) {
 	}
 	if !reflect.DeepEqual(capture.scopes, []relayobserve.TerminalScope{live}) {
 		t.Fatal("current scope not restored", capture.scopes)
+	}
+}
+
+// A partial collector view must not renumber catalog slots or hide a change
+// to the requested candidate. Repeated full-fleet collection previously spent
+// the rebuild quantum querying unrelated networks at every installation step.
+type preparationCollectFunc func(context.Context, relayplan.Underlay, []string) relayplan.Inventory
+
+func (f preparationCollectFunc) Collect(ctx context.Context, u relayplan.Underlay, endpoints []string) relayplan.Inventory {
+	return f(ctx, u, endpoints)
+}
+
+func TestPreparationInventoryIsLocalAndRetainsCatalogSlots(t *testing.T) {
+	e, _, _, _ := preparationFixture(t)
+	r, err := e.cache.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := relayplan.Build(context.Background(), r.NodeID, r.ControllerID, r, e.underlays, e.collector)
+	if err != nil || len(full.Paths) != 8 {
+		t.Fatal(full, err)
+	}
+	for _, want := range full.Paths {
+		calls := 0
+		e.collector = preparationCollectFunc(func(ctx context.Context, u relayplan.Underlay, eps []string) relayplan.Inventory {
+			calls++
+			if u.ID != want.UnderlayID {
+				t.Fatal("unrelated underlay collected", u.ID, want.PathID)
+			}
+			return (&inventory{}).Collect(ctx, u, eps)
+		})
+		got, until, reason, err := e.preparationApproval(context.Background(), PreparationIntent{PathID: want.PathID, Controller: r.ControllerID})
+		if err != nil || reason != "" || !time.Now().Before(until) || !reflect.DeepEqual(got.Candidate, want) || calls != 1 {
+			t.Fatal("candidate identity, freshness or collection scope changed", want.PathID, got, until, reason, err, calls)
+		}
+	}
+	// Collect again on every unit; a changed current source must not reuse
+	// the previous unit's eligible pin or another candidate's inventory.
+	e.collector = &preparationInventory{source: "192.0.2.11"}
+	got, _, _, err := e.preparationApproval(context.Background(), PreparationIntent{PathID: "p7", Controller: r.ControllerID})
+	if err != nil || got.Candidate.Pin.Source != "192.0.2.11" || got.Candidate.Pin.Table != full.Paths[7].Pin.Table {
+		t.Fatal("stale inventory or catalog slot", got, err)
+	}
+	e.collector = &preparationInventory{state: "down"}
+	if _, _, reason, err := e.preparationApproval(context.Background(), PreparationIntent{PathID: "p7", Controller: r.ControllerID}); err == nil || reason != "link_down" {
+		t.Fatal("current underlay failure ignored", reason, err)
+	}
+}
+
+func TestPreparationScopedInventoryPreservesFailClosedValidation(t *testing.T) {
+	for _, kind := range []string{"denied", "missing-path", "unmapped", "invalid-unrelated-config", "foreign-controller"} {
+		t.Run(kind, func(t *testing.T) {
+			e, _, _, _ := preparationFixture(t)
+			r, err := e.cache.Status()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := PreparationIntent{PathID: "p0", Controller: r.ControllerID}
+			switch kind {
+			case "denied":
+				if _, err := e.cache.Refresh(context.Background(), deniedIssuer{}); err == nil {
+					t.Fatal("denial missing")
+				}
+			case "missing-path":
+				p.PathID = "missing"
+			case "unmapped":
+				e.underlays = e.underlays[1:]
+			case "invalid-unrelated-config":
+				e.underlays[3].Interface = e.underlays[2].Interface
+			case "foreign-controller":
+				p.Controller = "foreign"
+			}
+			e.collector = preparationCollectFunc(func(context.Context, relayplan.Underlay, []string) relayplan.Inventory {
+				t.Fatal("invalid input triggered inventory collection", kind)
+				return relayplan.Inventory{}
+			})
+			got, _, _, err := e.preparationApproval(context.Background(), p)
+			if err == nil || got.Candidate.Pin != nil {
+				t.Fatal("invalid authority/configuration produced a candidate", got, err)
+			}
+		})
 	}
 }

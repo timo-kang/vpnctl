@@ -129,7 +129,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	phase := func(name, origin, desired, metric string, independent bool, action func()) map[string]any {
 		t.Helper()
 		t.Log("automatic manager phase", name)
-		packets, _, err := trace.snapshot()
+		packetOffset, err := trace.position()
 		if err != "" {
 			t.Fatal(err)
 		}
@@ -153,13 +153,19 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		}
 		begin := managerMono()
 		before := latestApplicationResult(logs["app"])
-		row := map[string]any{"name": name, "passed": false, "origin": origin, "desired": desired, "metric": metric, "begin_monotonic_ns": begin, "previous_path": before.Selection.DesiredPathID, "packet_offset": len(packets)}
+		row := map[string]any{"name": name, "passed": false, "origin": origin, "desired": desired, "metric": metric, "begin_monotonic_ns": begin, "previous_path": before.Selection.DesiredPathID, "packet_offset": packetOffset}
 		report["steps"] = append(report["steps"].([]map[string]any), row)
 		action()
 		row["action_completed_monotonic_ns"] = managerMono()
+		var lanRecovered int64
+		if name == "netplan-apply" {
+			lan := managerLANRecovery(t, row["action_completed_monotonic_ns"].(int64))
+			row["lan_reconfiguration"] = lan
+			lanRecovered = lan["recovered_monotonic_ns"].(int64)
+		}
 		var out relayapply.TargetReconcileResult
 		eventually(t, 120*time.Second, "automatic manager convergence "+name, func() error {
-			_, _, err := trace.snapshot()
+			_, err := trace.position()
 			if err != "" {
 				t.Fatal(err)
 			}
@@ -209,7 +215,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 				key = "ok"
 			}
 			counts[p.Kind][key]++
-			if !p.OK && (p.Kind == "rf-lan" || p.Kind == "gimbal-lan" || independent && p.Kind == "independent-app") {
+			if !p.OK && (p.Kind == "rf-lan" || p.Kind == "gimbal-lan" || independent && p.Kind == "independent-app") && !managerLANReconfigurationSample(name, p, begin, lanRecovered) {
 				t.Fatal("unaffected communication interrupted", name, p)
 			}
 			if desired != "" && p.Begin >= ready && p.OK && (p.Kind == "tcp-new" || p.Kind == "udp") && p.Source != sourceFor(desired) {
@@ -238,6 +244,9 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			}
 		}
 		row["traffic"] = counts
+		if name == "netplan-apply" {
+			row["lan_reconfiguration"].(map[string]any)["failed_samples"] = counts["rf-lan"]["failed"] + counts["gimbal-lan"]["failed"]
+		}
 		end := managerMono()
 		gaps := map[string]float64{}
 		for kind := range counts {
@@ -405,9 +414,8 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		r.readyApproval(approval.ExpiresAt)
 	}
 	eventually(t, 30*time.Second, "new shortened node approval observed", func() error {
-		v := latestApplicationResult(logs["app"])
-		if !v.Applied || v.Selection.Generation != approval.Generation {
-			return fmt.Errorf("awaiting current approval generation")
+		if !managerApprovalReady(approval.Generation, latestApplicationResult(logs["app"]), latestApplicationResult(logs["app2"])) {
+			return fmt.Errorf("awaiting both applications' current approval confirmation")
 		}
 		return nil
 	})
