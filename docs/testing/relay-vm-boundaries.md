@@ -276,3 +276,12 @@ fixture cleanup. The original failure remains failed even if traffic recovers.
 검증한다. expiry 전 supervised FIFO 갱신 후 앱 적용 세대가 새 grant와 같아야 하며,
 기존/새 unbound TCP 차단과 독립 relay 승인 유지를 확인한다. 두 fault의 완전한 결과와
 generation 일치 증거가 없으면 합격시키지 않는다. `VPNCTL_VM_RACE=1`도 지원한다.
+
+`--case application-preparation` runs `TestNetns_M3PreparationCapacity` with the
+same 0/3/7 healthy-position matrix and seven timeouts. The primary app is automatic;
+the independent app stays manually pinned to the healthy path. During steady
+traffic the fixture deletes an owned resource on a different path and requires
+automatic reconstruction. Both apps must retain actual TCP traffic and the same
+10-second freshness limit. The validator additionally requires the exact damaged
+path and completed automatic rebuild; the ordinary mixed-candidate report cannot
+qualify this case. `VPNCTL_VM_RACE=1` is supported. Host networking is untouched.

@@ -86,7 +86,11 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 	if e.uncertain {
 		return out, errors.New("reopen uncertain journal before observation")
 	}
-	if err := e.syncTerminalScopes(parent); err != nil {
+	events, eventsDone := relayobserve.Phase(parent, "underlay_events")
+	err = e.syncTerminalScopes(events)
+	eventsDone()
+	if err != nil {
+		out.Reason = "underlay_events_unavailable"
 		return out, err
 	}
 	ctx, cancel := context.WithTimeout(parent, MaxTargetProbeDuration)

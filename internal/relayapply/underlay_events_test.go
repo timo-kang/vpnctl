@@ -204,3 +204,21 @@ func TestUnderlayFinalReadCannotCommitExpiredOrCancelledDecision(t *testing.T) {
 		})
 	}
 }
+
+type unavailableTerminalScopes struct{ *testUnderlayEvents }
+
+func (*unavailableTerminalScopes) SetTerminalScopes(context.Context, []relayobserve.TerminalScope) error {
+	return fmt.Errorf("terminal scope event drain unavailable")
+}
+
+func TestUnderlayScopeFailureHasDistinctReasonAndDoesNotProbe(t *testing.T) {
+	e, _ := waveFixture(t)
+	ctx := relayobserve.WithUnderlayEvents(context.Background(), &unavailableTerminalScopes{&testUnderlayEvents{}})
+	out, err := e.observeTarget(ctx, "app", "", time.Second, func(context.Context, Entry, relaycatalog.Target) (targetProof, error) {
+		t.Fatal("probe ran after event scope failure")
+		return targetProof{}, nil
+	})
+	if err == nil || out.Valid || out.Reason != "underlay_events_unavailable" || len(out.Paths) != 0 {
+		t.Fatal("event loss hidden or partial observation accepted", out, err)
+	}
+}

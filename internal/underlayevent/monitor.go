@@ -145,7 +145,7 @@ func (m *Monitor) drain(ctx context.Context) error {
 		}
 		events, err := m.source.read()
 		if errors.Is(err, errEmpty) {
-			return nil
+			return ctx.Err()
 		}
 		if err != nil {
 			return m.lose()
@@ -187,8 +187,16 @@ func (m *Monitor) drain(ctx context.Context) error {
 			return m.lose()
 		}
 	}
-	// A continuously readable socket cannot monopolize a lease/apply budget.
-	// Treat an unfinished drain exactly like loss; no partial generation escapes.
+	// Scheduling can exhaust the wall budget just after the final datagram.
+	// One nonblocking empty-queue check distinguishes that case from loss.
+	// Never process an extra datagram: any pending data/error still retires
+	// the stream, so no partially drained generation can escape the bound.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := m.source.read(); errors.Is(err, errEmpty) {
+		return ctx.Err()
+	}
 	return m.lose()
 }
 
