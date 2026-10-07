@@ -246,3 +246,28 @@ map 소유자와 원시 BOOTTIME 기한을 확인한다. nft가 여전히 통과
 기한 초과·세대 재생, 부분 부착, 같은 이름의 외부 프로그램, link 삭제 후 map 회수를
 검사한다. VM 전체 pause에서는 BOOTTIME도 정지한다. #135의 외부 차단 요구를
 폐기하거나 이 시험으로 전체 M3 완료를 선언하지 않는다.
+
+### Mixed-candidate application reproduction
+
+`VPNCTL_VM_RACE=1 ./scripts/test-vm.sh --case application-mixed` runs the actual
+`TestNetns_M3TargetApplicationMixedCandidates` matrix inside the identity-guarded
+VM. It tests healthy catalog positions 0/3/7 while the other seven TCP candidates
+time out and two automatic application watchers compete. Namespace creation,
+bpffs and kernel changes stay inside the guest. The outer container keeps its
+network-none, no-capability and CPU/memory bounds.
+
+`VPNCTL_VM_RACE` accepts only 0/1 (default 0). It controls both checkout binaries
+and the integration suite; with `VPNCTL_TEST_BINARY`, only the suite is rebuilt
+with that flag. The manifest records `suite_race`, the binary origin and hashes.
+The guest remains one vCPU/768MiB and the container at most one CPU/2GiB; this is
+a distinct stress setup, not an equivalent replacement for the two-CPU direct
+container CI profile.
+
+Passing requires all three positions, at least three complete applied cycles
+per application, 15 seconds of steady traffic, live BOOTTIME guard sampling and
+freshness gaps no greater than 10 seconds. Failed, missing or partial cases cannot
+qualify. The guest exports only the bounded, named public reports/diagnostic
+logs; private configuration and keys remain in the private guest disk.
+On failure the test captures public route/nft state and allows up to 10 seconds
+for the pending application cycles to write their diagnostics before automatic
+fixture cleanup. The original failure remains failed even if traffic recovers.
