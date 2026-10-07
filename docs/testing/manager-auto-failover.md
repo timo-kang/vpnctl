@@ -89,6 +89,11 @@ bootstrap candidates within 120 seconds, verified by device-bound payload. All
 measured manager faults run with both application watchers active. Complete public
 preparation reports from the last 32 supervisor cycles accompany failure
 diagnostics, including failures before packet tracing begins.
+Candidate rebuilding admits up to eight fast durable units per FIFO turn within
+its existing 750ms shared budget and 500ms reserve for each additional unit.
+This avoids rejoining two busy application watchers after every pair of tiny
+operations; slow operations retain the same deadline and yielding conditions.
+The 120-second convergence watchdog is unchanged.
 This clock excludes suspend; these scenarios do not suspend. These diagnostics
 never authorize communication or replace BOOTTIME lease enforcement.
 `observation_complete`, `decision_complete`, `target_routes_applied`,
