@@ -232,7 +232,8 @@ func (e *Engine) startPreparationRemoval(i, entryIndex int, reason string) error
 }
 
 // RebuildCandidates advances at most eight durable work units. All share one
-// 750ms BOOTTIME/wall budget; each additional unit needs 500ms remaining. The
+// 750ms BOOTTIME/wall budget; additional creation needs 500ms remaining.
+// Idempotent cleanup may use the remainder, with live ownership checks. The
 // durable round-robin cursor and backoff survive one-shot supervisors/crashes.
 // This method never opens leases or application routes.
 func (e *Engine) RebuildCandidates(parent context.Context) (Result, error) {
@@ -278,6 +279,7 @@ func (e *Engine) rebuildCandidates(parent context.Context, units int) (out Resul
 		return failure("", "rebuild_budget_exhausted", err)
 	}
 	for n := 0; n < units; n++ {
+		creationHeadroom := true
 		if n > 0 {
 			now, clockErr := e.rebuildNow()
 			if clockErr != nil {
@@ -286,17 +288,16 @@ func (e *Engine) rebuildCandidates(parent context.Context, units int) (out Resul
 			if err = budget(); err != nil {
 				return out, err
 			}
-			// Do not begin another kernel operation with only a small remainder.
-			// Reserve real time too: injected BOOTTIME clocks are not deadlines.
+			// Non-idempotent creation keeps its existing reserve. Cleanup can
+			// continue: each removal rechecks ownership and only records progress
+			// before the same shared deadline; an interrupted deletion is retryable.
 			deadline, _ := ctx.Deadline()
-			if now-start > NodeRebuildDuration-500*time.Millisecond || time.Until(deadline) < 500*time.Millisecond {
-				break
-			}
+			creationHeadroom = now-start <= NodeRebuildDuration-500*time.Millisecond && time.Until(deadline) >= 500*time.Millisecond
 		}
 		if err = e.syncTerminalScopes(ctx); err != nil {
 			return failure("", "underlay_events_unavailable", err)
 		}
-		unit, unitErr := e.rebuildCandidateUnit(ctx, budget)
+		unit, unitErr := e.rebuildCandidateUnit(ctx, budget, creationHeadroom)
 		if unit.PathID != "" || n == 0 {
 			out = unit
 		}
@@ -310,7 +311,7 @@ func (e *Engine) rebuildCandidates(parent context.Context, units int) (out Resul
 	return out, nil
 }
 
-func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) (out Result, err error) {
+func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error, creationHeadroom bool) (out Result, err error) {
 	ctx, done := relayobserve.Phase(ctx, "rebuild_unit")
 	defer done()
 	out = result("idle", "", "")
@@ -328,6 +329,11 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) 
 		allowed, consentErr := e.preparationAllowed(p.PathID)
 		if p.RetryBootNS > uint64(start) || consentErr == nil && allowed && p.Phase == "ready" && e.maintained[p.PathID] {
 			continue
+		}
+		if !creationHeadroom && p.Phase != "removing" {
+			// Preserve the scheduling cursor: this candidate resumes first in
+			// the next admission. Never spend cleanup headroom on a new add.
+			return out, nil
 		}
 		out.PathID, out.State = p.PathID, "rebuilding"
 		e.journal.RebuildCursor = p.PathID
