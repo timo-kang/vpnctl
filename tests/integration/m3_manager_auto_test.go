@@ -402,7 +402,31 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			t.Fatal("expired approval carried payload", e)
 		}
 	}
-	phase("fresh-approval-recovery", "controller fresh approval", "p00", "authority", false, func() { f.controller.start(); f.controller.apply(f.spec, 3600) })
+	phase("fresh-approval-awaiting-relay-apply", "fresh approval without relay installation", "", "authority", false, func() {
+		f.controller.start()
+		fresh := f.controller.apply(f.spec, 3600)
+		for _, relay := range f.recipients {
+			relay.readyApproval(fresh.ExpiresAt)
+			if len(relay.require("inspect", -1, 0).Endpoints) != 0 {
+				t.Fatal("retired relay endpoint resurrected without explicit apply")
+			}
+		}
+		eventually(t, 20*time.Second, "fresh node approval while relay remains absent", func() error {
+			if latestApplicationResult(logs["app"]).Selection.Generation != fresh.Generation {
+				return fmt.Errorf("fresh approval not yet observed")
+			}
+			return nil
+		})
+	})
+	phase("fresh-approval-recovery", "explicit approved relay installation; automatic node selection", "p00", "authority", false, func() {
+		for _, relay := range f.recipients {
+			for endpoint := range f.spec.Relays[0].Endpoints {
+				relay.require("apply", endpoint, 51820+endpoint)
+			}
+			relay.ready()
+		}
+	})
+	report["relay_expiry_recovery"] = "fresh approval plus explicit relay apply; node candidates and application selection recover automatically"
 	report["final"] = snapshot()
 	report["foreign_policy_preserved"] = true
 	// Sample count is deliberately explicit: this functional matrix alone does

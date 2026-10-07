@@ -282,7 +282,7 @@ AUTO_MANAGER_STEPS = {
     'foreign-firewall-reload', 'flap-down-0', 'flap-up-0', 'flap-down-1', 'flap-up-1',
     'nm-shared-up', 'nm-shared-down', 'foreign-peer-conflict', 'foreign-peer-removed',
     'watch-restart', 'controller-offline-valid',
-    'approval-expired-offline', 'fresh-approval-recovery',
+    'approval-expired-offline', 'fresh-approval-awaiting-relay-apply', 'fresh-approval-recovery',
 }
 AUTO_PACKET_KINDS = {'tcp-new', 'tcp-existing', 'udp', 'independent-app', 'rf-lan', 'gimbal-lan'}
 

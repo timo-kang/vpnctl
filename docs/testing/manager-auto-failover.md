@@ -26,8 +26,16 @@ The matrix performs NM profile down/up, relay uplink loss, all-relay loss,
 alternate and preferred recovery, NM restart, Netplan apply, networkd restart,
 foreign firewall reload, two repeated down/up cycles, NM shared DHCP/NAT,
 foreign WG peer conflict/removal, application watcher restart, controller loss,
-real approval expiry and fresh approval recovery. Manager operations and synthetic
+real approval expiry, fresh-approval-only continued blocking, and recovery after
+explicit relay installation with fresh approval. Manager operations and synthetic
 kernel faults are distinguished by each step's `origin` field.
+
+Relay supervision renews already installed endpoints; it does not retain an
+installation intent after approval expiry removes them. Fresh approval alone
+must leave those absent endpoints blocked. The final recovery explicitly runs
+`relay apply` with the existing matching local key; only node candidate rebuilding
+and application path selection recover automatically. This is a deployment
+boundary, not end-to-end automatic relay reinstallation qualification.
 
 No failure is repaired by manually selecting the application's path. Selection
 uses two fresh confirmations, a 10-second recovery hold-down and 15-second
