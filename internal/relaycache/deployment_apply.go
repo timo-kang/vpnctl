@@ -9,7 +9,8 @@ import (
 )
 
 // DeploymentJournal is protected by the same directory and process lock as
-// the approval. It contains public resource ownership only, never private keys.
+// the approval. It contains resource ownership and opt-in key references,
+// never private key contents. Treat it as private deployment configuration.
 func (s *DeploymentStore) DeploymentJournal() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -352,18 +352,53 @@ AUTO_MANAGER_STEPS = {
     'watch-restart', 'controller-offline-valid',
     'approval-expired-offline', 'fresh-approval-awaiting-relay-apply', 'fresh-approval-recovery',
 }
+INSTALL_MANAGER_STEPS = {'intent-enrolled', 'intent-controller-offline-valid', 'intent-expired-offline',
+                         'intent-offline-relay-restart', 'intent-fresh-approval-recovery'}
 AUTO_PACKET_KINDS = {'tcp-new', 'tcp-existing', 'udp', 'independent-app', 'rf-lan', 'gimbal-lan'}
 
-def validate_manager_auto_result(status, paths):
+def validate_manager_auto_result(status, paths, installation=False):
     report = status.get('report', {})
     if (status.get('exit') != 0 or report.get('completed') is not True
             or report.get('schema_version') != 2 or report.get('paths') != paths
             or report.get('mode') != 'automatic' or report.get('trace_error') != ''):
         raise RuntimeError('automatic manager test failed or omitted complete evidence')
     steps = report.get('steps', [])
-    if (len(steps) != len(AUTO_MANAGER_STEPS) or {s.get('name') for s in steps} != AUTO_MANAGER_STEPS
+    expected = AUTO_MANAGER_STEPS | (INSTALL_MANAGER_STEPS if installation else set())
+    if report.get('installation_mode', False) is not installation:
+        raise RuntimeError('incorrect installation test mode')
+    if (len(steps) != len(expected) or {s.get('name') for s in steps} != expected
             or any(s.get('passed') is not True for s in steps)):
         raise RuntimeError('missing or failed automatic manager scenarios')
+    if installation:
+        before, offline, after = (report.get(key, {}) for key in ('installation_before_expiry',
+                                  'installation_offline_restart', 'installation_after_recovery'))
+        if set(before) != {'r0', 'r1'} or set(offline) != set(before) or set(after) != set(before):
+            raise RuntimeError('missing relay installation evidence')
+        for relay in before:
+            old, new = before[relay].get('installations', []), after[relay].get('installations', [])
+            stopped = offline[relay]
+            retained = stopped.get('kernel', {}).get('installations', [])
+            if (not old or len(old) != paths // 2 or len(new) != len(old)
+                    or before[relay].get('kernel_ready') is not True
+                    or stopped.get('approval_valid') is not False
+                    or stopped.get('kernel', {}).get('endpoints') != []
+                    or stopped.get('kernel', {}).get('kernel_ready') is not False
+                    or len(retained) != len(old)
+                    or len({p.get('endpoint_id') for p in old}) != len(old)
+                    or after[relay].get('kernel_ready') is not True):
+                raise RuntimeError('incomplete installation expiry/recovery proof')
+            for previous, blocked, current in zip(old, retained, new):
+                if (not previous.get('endpoint_id') or previous.get('enabled') is not True
+                        or previous.get('phase') != 'applied' or previous.get('attempts') != 1
+                        or blocked.get('endpoint_id') != previous['endpoint_id']
+                        or blocked.get('revision') != previous.get('revision')
+                        or blocked.get('enabled') is not True or blocked.get('phase') != 'waiting'
+                        or blocked.get('attempts') != previous['attempts']
+                        or current.get('endpoint_id') != previous['endpoint_id']
+                        or not previous.get('revision') or current.get('revision') != previous['revision']
+                        or current.get('enabled') is not True or current.get('phase') != 'applied'
+                        or current.get('attempts') != previous.get('attempts', 0) + 1):
+                    raise RuntimeError('installation intent changed or retries uncontrolled')
     for key in ('fresh_generation_confirmed', 'recovery_hysteresis_observed', 'foreign_policy_preserved', 'foreign_peer_preserved', 'fallback_positive_control'):
         if report.get(key) is not True:
             raise RuntimeError('missing automatic manager invariant: ' + key)
@@ -462,11 +497,12 @@ def exercise(vm, case, mode, delta, result):
                 return result
             time.sleep(2)
         raise RuntimeError('mixed application fixture timed out')
-    if case == 'managers' or case.startswith('manager-auto-'):
+    if case == 'managers' or case.startswith(('manager-auto-', 'manager-install-')):
         automatic = case != 'managers'
         paths = int(case.rsplit('-', 1)[1]) if automatic else 4
         action = 'manager-auto' if automatic else 'managers'
-        vm.call(action + '-start', {'paths': paths} if automatic else {})
+        installation = case.startswith('manager-install-')
+        vm.call(action + '-start', {'paths': paths, 'installation': installation} if automatic else {})
         until = time.monotonic() + (21 if automatic else 13) * 60
         while time.monotonic() < until:
             status = vm.call(action + '-result')
@@ -474,7 +510,7 @@ def exercise(vm, case, mode, delta, result):
                 result[action] = status
                 vm.record(action + '-result', status)
                 if automatic:
-                    validate_manager_auto_result(status, paths)
+                    validate_manager_auto_result(status, paths, installation)
                 else:
                     validate_manager_result(status)
                 return result
@@ -685,7 +721,7 @@ def exercise(vm, case, mode, delta, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'application-preparation', 'application-approval', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])

@@ -225,6 +225,9 @@ class Handler(BaseHTTPRequestHandler):
                 paths = req.get('paths')
                 if automatic and (type(paths) is not int or paths not in (4, 8)):
                     raise ValueError('automatic manager paths must be 4 or 8')
+                installation = req.get('installation', False)
+                if type(installation) is not bool or installation and not automatic:
+                    raise ValueError('installation requires an automatic manager test')
                 with LOCK:
                     if WORKER is not None:
                         raise RuntimeError('only one fixture per manager VM')
@@ -233,6 +236,8 @@ class Handler(BaseHTTPRequestHandler):
                                TMPDIR=str(ROOT / 'work'))
                     if automatic:
                         env.update(VPNCTL_VM_MANAGER_AUTO='1', VPNCTL_VM_MANAGER_PATHS=str(paths), VPNCTL_VM_WORKER='1')
+                        if installation:
+                            env['VPNCTL_VM_RELAY_INSTALL'] = '1'
                     test = 'TestVMNetworkManagerAuto' if automatic else 'TestVMNetworkManagers'
                     timeout = '20m' if automatic else '12m'
                     with (ROOT / 'worker.log').open('wb') as log:

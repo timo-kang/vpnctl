@@ -51,14 +51,14 @@ func runRelayRecipient(args []string) error {
 	if len(args) > 0 && args[0] == "supervise" {
 		return runRelaySupervise(args[1:])
 	}
-	if len(args) > 0 && (args[0] == "apply" || args[0] == "inspect" || args[0] == "release" || args[0] == "recover") {
+	if len(args) > 0 && (args[0] == "prepare" || args[0] == "apply" || args[0] == "inspect" || args[0] == "release" || args[0] == "recover") {
 		return runRelayPeerApply(args)
 	}
 	if len(args) > 0 && (args[0] == "refresh" || args[0] == "status") {
 		return runRelayDeploymentCache(args)
 	}
 	if len(args) == 0 || args[0] != "catalog" && args[0] != "sync-credentials" {
-		return fmt.Errorf("relay catalog|sync-credentials|refresh|status|apply|inspect|release|recover|supervise required")
+		return fmt.Errorf("relay catalog|sync-credentials|refresh|status|prepare|apply|inspect|release|recover|supervise required")
 	}
 	fs := flag.NewFlagSet("relay "+args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "enrolled identity YAML configuration")
