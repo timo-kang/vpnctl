@@ -615,3 +615,31 @@ is checked separately using a Go overlay without altering the product source.
 The manager comparison results are tracked separately; no general CPU
 capacity improvement or resolution of the 120-second failure is inferred from
 this isolation fix alone.
+
+
+## Reusing the remaining preparation quantum (#195)
+
+The matched local manager-install-8 baseline and endpoint-isolation candidate
+both passed all 28 steps on AMD Ryzen 7 9800X3D at whole-VM 0.5 CPU with the
+same cached image, without race instrumentation. Flap-up 0/1 convergence was 32.209/30.470 seconds before
+and 33.275/30.378 seconds after. These single samples do not show a speedup or
+reproduce the remote failure. Endpoint isolation remains justified by its
+independent deadline-stall correctness regression, not those timings.
+
+A further independent production-scheduler reproduction found that finalizing
+one candidate ended the entire quantum, even with 650ms of the 750ms budget
+left and another fully installed, closed candidate awaiting final validation.
+Two 100ms readbacks therefore required two admissions. The loop now continues
+within the existing budget, remembering completed paths only until this call
+returns. It does not treat completion as lease evidence or update `maintained`.
+Both readbacks can finish in one 200ms quantum in the deterministic fixture.
+
+The 500ms BOOTTIME and wall-clock reserve, 8-unit limit, fresh approval, current
+inventory/ownership checks and durable journal boundaries remain unchanged.
+Tests forbid creation and lease calls during finalization, reopen the actual
+journal, and check interrupted saves before and after persistence. Cancellation,
+authority denial, changed underlay, failed kernel readback and expired budget
+remain closed; a new admission without fresh lease maintenance still rejects
+the prepared candidate. This saves a demonstrably unnecessary admission but
+does not establish an upper bound on arbitrary host contention. The original
+remote failure and deployment capacity qualification remain separately tracked.
