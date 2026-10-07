@@ -187,6 +187,16 @@ race 계측과 배포 바이너리의 자원 계약을 분리하고, 이후 repo
 [send 구현](https://git.zx2c4.com/wireguard-linux/tree/drivers/net/wireguard/send.c),
 [wg 설정 파서](https://git.zx2c4.com/wireguard-tools/tree/src/config.c)다.
 
+32노드 실제 VM과 CI에서는 다른 후보의 느린 요청 때문에 첫 성공을 받은 후보가
+두 번째 검증 기회를 얻기 전에 만료되는 별도 결함도 재현했다. 단일 쌍의 시간
+모델만으로는 이 공유 대기 문제를 발견하지 못했다. 검증 중인 요청이 남아 있으면
+250ms 간격으로 완료 결과를 함께 조회하고, 초기 후보마다 다음 nonce를 보낸다.
+각 요청 직전의 RX/TX를 별도로 저장하여 이전 요청의 counter 증가를 두 번 세지
+않는다. 이미 active인 후보의 요청 시간과 단독 정상 경로의 두 snapshot 검증은
+그대로 유지한다. 1개 후보 대조군, 2·32개 후보 재현, counter 재사용 거부 검사를
+추가했다. 수정 전 실제 실패는 `/tmp/vpnctl-fix191-direct-prod-v2`와
+[CI 37595610104](https://github.com/timo-kang/vpnctl/actions/runs/37595610104)에 보존한다.
+
 journal v1은 기존 소유권 검증을 거쳐 v2로 승격한다. 구버전 바이너리는 v2를 읽지
 못하므로 단순 실행 파일 교체로 downgrade하지 않는다. 현재 버전으로 서비스를
 종료하고 소유 peer 회수를 확인한 뒤, 전용 baseline과 상태 파일을 명시적으로

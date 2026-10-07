@@ -5,6 +5,7 @@ package directpath
 import (
 	"context"
 	"errors"
+	"net"
 	"sort"
 	"sync"
 	"time"
@@ -14,15 +15,20 @@ type probeResult struct {
 	key       string
 	err       error
 	completed time.Time
+	before    kernelPeer
+	counted   bool
 }
 
-// probeTrials keeps active peers' full verification budget while the Step owner
-// removes expired initial routes. Probe goroutines never mutate engine state.
-// A timely second nonce still needs a kernel readback before its route can stay.
-func (e *Engine) probeTrials(ctx context.Context, trials map[string]Candidate, before snapshot) (map[string]error, []Status, error) {
+// probeTrials gives pending peers another nonce opportunity while unrelated
+// requests remain in flight. Readbacks and retries are batched on the worker's
+// verification cadence; each individual request retains its one-second budget.
+// Only this Step owner changes proofs, journals, or kernel peer ownership.
+func (e *Engine) probeTrials(ctx context.Context, trials map[string]Candidate, before snapshot) (map[string]probeResult, []Status, error) {
 	wave, cancel := context.WithCancel(ctx)
 	expires := map[string]time.Time{}
+	baseline := map[string]kernelPeer{}
 	for key := range trials {
+		baseline[key] = before.Peers[key]
 		if started, initial := e.trialStarted[key]; initial && e.successes[key] < 2 {
 			remaining := InitialTrialWindow - e.now().Sub(started)
 			if e.now().Before(started) {
@@ -32,34 +38,38 @@ func (e *Engine) probeTrials(ctx context.Context, trials map[string]Candidate, b
 		}
 	}
 	out := make(chan probeResult, len(trials))
+	results := make(map[string]probeResult, len(trials))
 	var workers sync.WaitGroup
-	for key, c := range trials {
+	inFlight := 0
+	launch := func(key string) {
+		c := trials[key]
+		old := baseline[key]
 		limit := time.Second
 		if deadline, initial := expires[key]; initial {
 			limit = min(time.Second, time.Until(deadline))
 		}
 		probeCtx, stop := context.WithTimeout(wave, limit)
+		delete(results, key)
+		inFlight++
 		workers.Go(func() {
 			defer stop()
 			err := e.backend.Probe(probeCtx, c)
-			out <- probeResult{key, err, time.Now()}
+			out <- probeResult{key: key, err: err, completed: time.Now(), before: old}
 		})
 	}
-	// The buffered result channel also lets canceled probes finish on errors.
-	// Join every probe before the caller can Reset or begin another Step.
+	for key := range trials {
+		launch(key)
+	}
+	// A bounded channel lets every canceled probe publish and exit, including
+	// when removal/readback fails. Join them before the caller can Reset.
 	defer func() { cancel(); workers.Wait() }()
-	results := make(map[string]error, len(trials))
-	completed := make(map[string]probeResult, len(trials))
-	remaining := len(trials)
 	record := func(result probeResult) {
-		results[result.key] = result.err
-		completed[result.key] = result
-		remaining--
+		results[result.key] = result
+		inFlight--
 	}
 	var statuses []Status
+	nextBatch := time.Now().Add(VerificationInterval)
 	for {
-		// Reconcile all already-published proofs before examining deadlines.
-		// In particular, a slower active peer must not hide nonce number two.
 	drain:
 		for {
 			select {
@@ -69,75 +79,114 @@ func (e *Engine) probeTrials(ctx context.Context, trials map[string]Candidate, b
 				break drain
 			}
 		}
-		var expired, proven []string
 		now := time.Now()
+		expired := map[string]bool{}
 		for key, deadline := range expires {
-			if now.Before(deadline) {
-				continue
-			}
-			expired = append(expired, key)
-			if result, ok := completed[key]; ok && result.err == nil && result.completed.Before(deadline) && e.successes[key] == 1 {
-				proven = append(proven, key)
+			if !now.Before(deadline) {
+				expired[key] = true
 			}
 		}
-		if len(proven) != 0 {
+		// Fast waves return their one result per peer to Step as before. Only
+		// a wave still waiting on another peer needs an in-wave retry batch.
+		batch := inFlight > 0 && len(expires) > 0 && !now.Before(nextBatch)
+		var reconcile []string
+		for key, result := range results {
+			if _, present := trials[key]; present && !result.counted && (batch || expired[key]) {
+				reconcile = append(reconcile, key)
+			}
+		}
+		remove := map[string]string{}
+		var retry []string
+		if len(reconcile) != 0 {
 			after, err := e.inspect(ctx)
 			if err != nil {
 				return results, statuses, err
 			}
-			for _, key := range proven {
-				p, old := after.Peers[key], before.Peers[key]
+			for _, key := range reconcile {
+				result := results[key]
+				p, old := after.Peers[key], baseline[key]
 				if !matches(p, trials[key]) {
 					return results, statuses, errors.New("direct peer changed during verification")
 				}
-				if p.Handshake > 0 && p.RX > old.RX && p.TX > old.TX {
-					e.successes[key] = 2
-					delete(expires, key)
+				deadline, initial := expires[key]
+				valid := result.err == nil && p.Handshake > 0 && p.RX > old.RX && p.TX > old.TX
+				if initial && !result.completed.Before(deadline) {
+					valid = false
+				}
+				if valid {
+					e.successes[key] = min(2, e.successes[key]+1)
+					if e.successes[key] == 2 {
+						delete(expires, key)
+					}
+				} else if initial {
+					e.successes[key] = 0
+				} else {
+					remove[key] = probeFailureReason(p, result.err)
+				}
+				result.counted = true
+				results[key] = result
+				if initial && e.successes[key] < 2 && time.Now().Before(deadline) && batch {
+					baseline[key] = p
+					retry = append(retry, key)
 				}
 			}
 		}
-		var remove []string
-		for _, key := range expired {
-			if _, pending := expires[key]; pending {
-				remove = append(remove, key)
+		for key := range expires {
+			if !time.Now().Before(expires[key]) {
+				remove[key] = "initial_trial_expired"
 			}
 		}
 		if len(remove) != 0 {
-			sort.Strings(remove)
-			if err := e.remove(ctx, remove); err != nil {
+			keys := make([]string, 0, len(remove))
+			for key := range remove {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			if err := e.remove(ctx, keys); err != nil {
 				return results, statuses, err
 			}
-			for _, key := range remove {
+			for _, key := range keys {
 				c := trials[key]
 				e.cooldown[c.ID] = e.now().Add(e.retryDelay(c))
-				statuses = append(statuses, Status{c.ID, "relay_unverified", "initial_trial_expired", c.Generation})
+				statuses = append(statuses, Status{c.ID, "relay_unverified", remove[key], c.Generation})
 				delete(trials, key)
 				delete(expires, key)
 			}
 		}
-		if remaining == 0 {
+		for _, key := range retry {
+			if deadline, pending := expires[key]; pending && time.Now().Before(deadline) {
+				launch(key)
+			}
+		}
+		if inFlight == 0 {
 			return results, statuses, nil
 		}
+		if batch {
+			nextBatch = time.Now().Add(VerificationInterval)
+		}
 		var next time.Time
-		for _, deadline := range expires {
-			if next.IsZero() || deadline.Before(next) {
-				next = deadline
+		if len(expires) != 0 {
+			next = nextBatch
+			for _, deadline := range expires {
+				if deadline.Before(next) {
+					next = deadline
+				}
 			}
 		}
 		var timer *time.Timer
-		var expiredC <-chan time.Time
+		var tick <-chan time.Time
 		if !next.IsZero() {
 			delay := time.Until(next)
 			if delay <= 0 {
 				continue
 			}
 			timer = time.NewTimer(delay)
-			expiredC = timer.C
+			tick = timer.C
 		}
 		select {
 		case result := <-out:
 			record(result)
-		case <-expiredC:
+		case <-tick:
 		case <-ctx.Done():
 			if timer != nil {
 				timer.Stop()
@@ -148,4 +197,22 @@ func (e *Engine) probeTrials(ctx context.Context, trials map[string]Candidate, b
 			timer.Stop()
 		}
 	}
+}
+
+func probeFailureReason(p kernelPeer, err error) string {
+	reason := "direct_traffic_not_observed"
+	if p.Handshake <= 0 {
+		reason = "direct_handshake_missing"
+	}
+	if err != nil {
+		reason = "overlay_probe_failed"
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			reason = "overlay_probe_timeout"
+		}
+		if p.Handshake <= 0 {
+			reason += "_no_handshake"
+		}
+	}
+	return reason
 }

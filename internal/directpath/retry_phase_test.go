@@ -573,3 +573,143 @@ func TestInitialVerificationSupportsSubsecondNonceRoundTrips(t *testing.T) {
 		})
 	}
 }
+
+// retryMeshKernel models a remote that has completed its WireGuard handshake
+// but promotes the reverse /32 just after our first nonce was sent. Another
+// candidate remains silent, independently consuming its full response budget.
+type retryMeshKernel struct {
+	*fakeKernel
+	targetKey string
+	silentKey string
+	readyAt   time.Time
+	requests  []time.Time
+	proofs    []time.Time
+}
+
+func (k *retryMeshKernel) Probe(ctx context.Context, c Candidate) error {
+	if c.Key == k.targetKey {
+		k.mu.Lock()
+		k.requests = append(k.requests, time.Now())
+		k.mu.Unlock()
+	}
+	if c.Key == k.silentKey || c.Key == k.targetKey && time.Now().Before(k.readyAt) {
+		// A nonce sent before the reverse route exists is never replayed when
+		// that route appears. The request keeps its full one-second budget.
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if !retryPhaseWait(ctx, 50*time.Millisecond) {
+		return ctx.Err()
+	}
+	err := k.fakeKernel.Probe(ctx, c)
+	if err == nil && c.Key == k.targetKey {
+		k.mu.Lock()
+		k.proofs = append(k.proofs, time.Now())
+		k.mu.Unlock()
+	}
+	return err
+}
+
+func TestHealthyInitialPeerGetsTwoProofsDespiteSilentMeshCandidate(t *testing.T) {
+	// One peer is a positive control. Two peers isolate shared-wave coupling;
+	// 32 peers reproduce the production worker's mesh size without real I/O.
+	for _, count := range []int{1, 2, MaxPeers} {
+		t.Run(fmt.Sprintf("peers_%d", count), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				e, kernel, target := fixture(t)
+				base := time.Now()
+				k := &retryMeshKernel{fakeKernel: kernel, targetKey: target.Key, readyAt: base.Add(200 * time.Millisecond)}
+				candidates := []Candidate{target}
+				for i := 1; i < count; i++ {
+					c := target
+					c.ID, c.Key, c.Address = fmt.Sprintf("other-%d", i), key(byte(3+i)), fmt.Sprintf("10.7.0.%d", 3+i)
+					candidates = append(candidates, c)
+					if i == 1 {
+						k.silentKey = c.Key
+					}
+				}
+				e.backend = k
+				var targetState string
+				for time.Since(base) < InitialTrialWindow {
+					started := time.Now()
+					ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+					statuses, err := e.Step(ctx, candidates)
+					cancel()
+					if err != nil {
+						t.Fatal(err)
+					}
+					interval := time.Second
+					for _, status := range statuses {
+						if status.ID == target.ID {
+							targetState = status.State
+						}
+						if status.State == "probing" {
+							interval = VerificationInterval
+						}
+					}
+					if targetState == "active" {
+						break
+					}
+					time.Sleep(max(0, interval-time.Since(started)))
+				}
+				if targetState != "active" {
+					var sends, replies []time.Duration
+					for _, at := range k.requests {
+						sends = append(sends, at.Sub(base))
+					}
+					for _, at := range k.proofs {
+						replies = append(replies, at.Sub(base))
+					}
+					t.Fatalf("healthy peer starved by unrelated candidate: state=%s sends=%v nonce_replies=%v", targetState, sends, replies)
+				}
+			})
+		})
+	}
+}
+
+// Only the first target request changes WireGuard counters. A nonce response
+// alone cannot recycle that first request's traffic into a second proof.
+type retryCounterProofKernel struct {
+	*fakeKernel
+	targetKey string
+	requests  int
+}
+
+func (k *retryCounterProofKernel) Probe(ctx context.Context, c Candidate) error {
+	if c.Key != k.targetKey {
+		if !retryPhaseWait(ctx, 350*time.Millisecond) {
+			return ctx.Err()
+		}
+		return k.fakeKernel.Probe(ctx, c)
+	}
+	k.requests++
+	if !retryPhaseWait(ctx, 50*time.Millisecond) {
+		return ctx.Err()
+	}
+	if k.requests == 1 {
+		return k.fakeKernel.Probe(ctx, c)
+	}
+	return nil
+}
+
+func TestInitialRetryRequiresFreshWireGuardCounters(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e, kernel, target := fixture(t)
+		other := target
+		other.ID, other.Key, other.Address = "slow", key(4), "10.7.0.4"
+		k := &retryCounterProofKernel{fakeKernel: kernel, targetKey: target.Key}
+		e.backend = k
+		statuses, err := e.Step(context.Background(), []Candidate{target, other})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if k.requests != 2 {
+			t.Fatalf("expected an in-wave retry, got %d requests", k.requests)
+		}
+		for _, status := range statuses {
+			if status.ID == target.ID && (status.State != "probing" || status.Reason != "direct_traffic_not_observed") {
+				t.Fatalf("one counter increase counted as two proofs: status=%+v successes=%d", status, e.successes[target.Key])
+			}
+		}
+	})
+}

@@ -733,27 +733,15 @@ func (e *Engine) Step(ctx context.Context, candidates []Candidate) ([]Status, er
 	for _, key := range sortedKeys(trials) {
 		c := trials[key]
 		p := after.Peers[key]
-		old := before.Peers[key]
+		result := results[key]
+		old := result.before
 		if !matches(p, c) {
 			return statuses, errors.New("direct peer changed during verification")
 		}
 		started, initial := e.trialStarted[key]
 		trialExpired := initial && e.successes[key] < 2 && (e.now().Before(started) || e.now().Sub(started) >= InitialTrialWindow)
-		if trialExpired || results[key] != nil || p.Handshake <= 0 || p.RX <= old.RX || p.TX <= old.TX {
-			reason := "direct_traffic_not_observed"
-			if p.Handshake <= 0 {
-				reason = "direct_handshake_missing"
-			}
-			if results[key] != nil {
-				reason = "overlay_probe_failed"
-				var netErr net.Error
-				if errors.As(results[key], &netErr) && netErr.Timeout() {
-					reason = "overlay_probe_timeout"
-				}
-				if p.Handshake <= 0 {
-					reason += "_no_handshake"
-				}
-			}
+		if trialExpired || result.err != nil || p.Handshake <= 0 || p.RX <= old.RX || p.TX <= old.TX {
+			reason := probeFailureReason(p, result.err)
 			age := e.now().Sub(started)
 			if initial && e.successes[key] < 2 && age >= 0 && age < InitialTrialWindow {
 				e.successes[key] = 0
@@ -764,7 +752,9 @@ func (e *Engine) Step(ctx context.Context, candidates []Candidate) ([]Status, er
 			e.cooldown[c.ID] = e.now().Add(e.retryDelay(c))
 			statuses = append(statuses, Status{c.ID, "relay_unverified", reason, c.Generation})
 		} else {
-			e.successes[key] = min(2, e.successes[key]+1)
+			if !result.counted {
+				e.successes[key] = min(2, e.successes[key]+1)
+			}
 			state := "probing"
 			if e.successes[key] >= 2 {
 				state = "active"
