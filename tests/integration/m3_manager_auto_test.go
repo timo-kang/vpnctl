@@ -264,47 +264,9 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		row["existing_tcp_outcome"] = streamStatus
 		// Internal checkpoints and the packet sampler share CLOCK_MONOTONIC.
 		// Selection/route command completion are separate from verified payload.
-		var detected, decided, applied, firstSuccess, lastBefore, firstFailure int64
-		for _, c := range cycles {
-			if c.Target != "app" || c.Diagnostics == nil || int64(c.Diagnostics.StartedMono) < begin {
-				continue
-			}
-			for _, candidate := range c.Candidates {
-				if candidate.PathID == before.Selection.DesiredPathID && candidate.State != "reachable" && detected == 0 {
-					for _, m := range c.Diagnostics.Checkpoints {
-						if m.Name == "observation_complete" {
-							detected = int64(m.At)
-						}
-					}
-				}
-			}
-			if c.Path != desired || c.Applied != (desired != "") {
-				continue
-			}
-			for _, m := range c.Diagnostics.Checkpoints {
-				if m.Name == "decision_complete" && decided == 0 {
-					decided = int64(m.At)
-				}
-				if (m.Name == "target_routes_applied" || desired == "" && m.Name == "target_routes_blocked") && applied == 0 {
-					applied = int64(m.At)
-				}
-			}
-		}
-		for _, p := range packets {
-			if p.Kind != "tcp-new" {
-				continue
-			}
-			if p.OK && p.End <= begin {
-				lastBefore = p.End
-			}
-			if !p.OK && p.Begin >= begin && firstFailure == 0 {
-				firstFailure = p.End
-			}
-			if desired != "" && p.OK && p.Source == sourceFor(desired) && p.Begin >= begin && (applied == 0 || p.Begin >= applied) && firstSuccess == 0 {
-				firstSuccess = p.End
-			}
-		}
-		row["timeline"] = map[string]int64{"fault_begin": begin, "detection_complete": detected, "decision_complete": decided, "routes_completed": applied, "first_success": firstSuccess, "last_success_before_fault": lastBefore, "first_failure": firstFailure}
+		timeline := managerTimeline(packets, cycles, before.Selection.DesiredPathID, desired, sourceFor(desired), begin)
+		row["timeline"] = timeline
+		firstSuccess, decided, applied := timeline["first_success"], timeline["decision_complete"], timeline["routes_completed"]
 		if metric == "failover" || metric == "no-uplink" {
 			finish := firstSuccess
 			if metric == "no-uplink" {
@@ -340,11 +302,18 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	if a.Application.Reservation.ChangedAt == nil || p.Application.Reservation.ChangedAt == nil || p.Application.Reservation.ChangedAt.Sub(*a.Application.Reservation.ChangedAt) < 15*time.Second {
 		t.Fatal("preferred recovery violated committed dwell")
 	}
+	alternateApplied := alternate["timeline"].(map[string]int64)["routes_completed"]
+	preferredApplied := preferred["timeline"].(map[string]int64)["routes_completed"]
+	if alternateApplied <= 0 || preferredApplied-alternateApplied < int64(15*time.Second) {
+		t.Fatal("missing monotonic committed dwell evidence")
+	}
+	report["committed_dwell_monotonic_ns"] = preferredApplied - alternateApplied
 	_, cycles, err := trace.snapshot()
 	if err != "" {
 		t.Fatal(err)
 	}
 	fresh, held := false, false
+	var healthyConfirmed int64
 	oldGeneration := ""
 	for _, c := range initial.Selection.Candidates {
 		if c.PathID == "p00" {
@@ -361,12 +330,21 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		for _, path := range c.Candidates {
 			if path.PathID == "p00" && path.UnderlayGeneration != "" && path.UnderlayGeneration != oldGeneration && path.ConsecutiveSuccesses == 1 && !path.Eligible {
 				fresh = true
+				for _, checkpoint := range c.Diagnostics.Checkpoints {
+					if checkpoint.Name == "decision_complete" && int64(checkpoint.At) <= preferredApplied {
+						healthyConfirmed = int64(checkpoint.At)
+					}
+				}
 			}
 		}
 	}
 	if !fresh || !held {
 		t.Fatal("fresh generation confirmation or recovery hold-down not exercised", fresh, held)
 	}
+	if healthyConfirmed <= 0 || preferredApplied-healthyConfirmed < int64(10*time.Second) {
+		t.Fatal("preferred recovery preceded monotonic health hold-down")
+	}
+	report["health_hold_down_monotonic_ns"] = preferredApplied - healthyConfirmed
 	report["fresh_generation_confirmed"] = true
 	report["recovery_hysteresis_observed"] = true
 	phase("nm-restart", "NetworkManager", "p00", "maintenance", true, func() { managerCommand(t, "systemctl", "restart", "NetworkManager.service") })

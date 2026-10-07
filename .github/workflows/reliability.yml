@@ -421,7 +421,7 @@ jobs:
           fi
       - name: Host-safe sampler and evidence validation regressions
         run: |
-          go test -race -tags=integration ./tests/integration -run "^TestManagerStream" -count=1
+          go test -race -tags=integration ./tests/integration -run "^TestManager(Stream|Timeline)" -count=1
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p test_runner.py
       - name: Automatic underlay and relay failover, authority and coexistence
         env:

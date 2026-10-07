@@ -61,6 +61,11 @@ the private VM work directory and are not exported.
 All packet timestamps, fault-command beginnings, command completions and product
 execution checkpoints use the same guest boot's Linux `CLOCK_MONOTONIC` domain.
 An observation's log receipt time is separate from its recorded execution time.
+A command's start/completion brackets the injected event; the start is a
+conservative latency origin, not a claim about an exact kernel notification.
+Cycles already running at fault start retain their later checkpoints. Initial
+manager setup must settle with all candidates confirmed before measurement; its
+wait interval is recorded separately.
 This clock excludes suspend; these scenarios do not suspend. These diagnostics
 never authorize communication or replace BOOTTIME lease enforcement.
 `observation_complete`, `decision_complete`, `target_routes_applied`,

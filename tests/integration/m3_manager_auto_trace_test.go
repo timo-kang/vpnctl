@@ -396,3 +396,50 @@ func managerAutoSource(kind, source string) bool {
 	}
 	return source == "198.18.0.11" || source == "198.18.0.12"
 }
+
+func managerTimeline(packets []managerAutoEvent, cycles []managerAutoCycle, previous, desired, source string, begin int64) map[string]int64 {
+	var detected, decided, applied, firstSuccess, lastBefore, firstFailure int64
+	for _, c := range cycles {
+		if c.Target != "app" || c.Diagnostics == nil || int64(c.Diagnostics.FinishedMono) < begin {
+			continue
+		}
+		for _, candidate := range c.Candidates {
+			if candidate.PathID == previous && candidate.State != "reachable" && detected == 0 {
+				for _, m := range c.Diagnostics.Checkpoints {
+					if m.Name == "observation_complete" && int64(m.At) >= begin {
+						detected = int64(m.At)
+					}
+				}
+			}
+		}
+		if c.Path != desired || c.Applied != (desired != "") {
+			continue
+		}
+		for _, m := range c.Diagnostics.Checkpoints {
+			if int64(m.At) < begin {
+				continue
+			}
+			if m.Name == "decision_complete" && decided == 0 {
+				decided = int64(m.At)
+			}
+			if (m.Name == "target_routes_applied" || desired == "" && m.Name == "target_routes_blocked") && applied == 0 {
+				applied = int64(m.At)
+			}
+		}
+	}
+	for _, p := range packets {
+		if p.Kind != "tcp-new" {
+			continue
+		}
+		if p.OK && p.End <= begin {
+			lastBefore = p.End
+		}
+		if !p.OK && p.End >= begin && firstFailure == 0 {
+			firstFailure = p.End
+		}
+		if desired != "" && p.OK && p.Source == source && p.Begin >= begin && (applied == 0 || p.Begin >= applied) && firstSuccess == 0 {
+			firstSuccess = p.End
+		}
+	}
+	return map[string]int64{"fault_begin": begin, "detection_complete": detected, "decision_complete": decided, "routes_completed": applied, "first_success": firstSuccess, "last_success_before_fault": lastBefore, "first_failure": firstFailure}
+}

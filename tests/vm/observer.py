@@ -299,6 +299,9 @@ def validate_manager_auto_result(status, paths):
     for key in ('fresh_generation_confirmed', 'recovery_hysteresis_observed', 'foreign_policy_preserved', 'foreign_peer_preserved', 'fallback_positive_control'):
         if report.get(key) is not True:
             raise RuntimeError('missing automatic manager invariant: ' + key)
+    if (report.get('committed_dwell_monotonic_ns', 0) < 15_000_000_000
+            or report.get('health_hold_down_monotonic_ns', 0) < 10_000_000_000):
+        raise RuntimeError('missing monotonic recovery policy evidence')
     packets, cycles = report.get('packets', []), report.get('cycles', [])
     if not cycles or {p.get('kind') for p in packets} != AUTO_PACKET_KINDS:
         raise RuntimeError('missing automatic manager packet/cycle evidence')

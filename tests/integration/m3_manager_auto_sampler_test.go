@@ -11,6 +11,7 @@ import (
 	"net"
 	"testing"
 	"time"
+	"vpnctl/internal/relayobserve"
 )
 
 // Host-safe: net.Pipe uses no kernel interface or network configuration.
@@ -73,5 +74,32 @@ func TestManagerStreamRejectsCorruptNonce(t *testing.T) {
 	}
 	if _, err := stream.exchange(); !errors.Is(err, errManagerProtocol) {
 		t.Fatalf("fatal corruption not retained: %v", err)
+	}
+}
+
+func TestManagerTimelineKeepsPostFaultCheckpointsFromInflightCycle(t *testing.T) {
+	cycles := []managerAutoCycle{{Target: "app", Path: "p01", Applied: true, Diagnostics: &relayobserve.Diagnostics{
+		StartedMono: 50, FinishedMono: 130, Checkpoints: []relayobserve.Checkpoint{
+			{Name: "observation_complete", At: 100}, {Name: "decision_complete", At: 110}, {Name: "target_routes_applied", At: 120},
+		},
+	}}}
+	packets := []managerAutoEvent{
+		{Kind: "tcp-new", Begin: 70, End: 80, OK: true, Source: "198.18.0.11"},
+		{Kind: "tcp-new", Begin: 85, End: 95, OK: false},
+		{Kind: "tcp-new", Begin: 100, End: 105, OK: true, Source: "198.18.0.11"},
+		{Kind: "tcp-new", Begin: 125, End: 127, OK: true, Source: "198.18.0.11"},
+	}
+	v := managerTimeline(packets, cycles, "p00", "p01", "198.18.0.11", 90)
+	if v["decision_complete"] != 110 || v["routes_completed"] != 120 || v["first_success"] != 127 || v["first_failure"] != 95 || v["last_success_before_fault"] != 80 {
+		t.Fatal(v)
+	}
+	// Failed application and the other target's checkpoints cannot establish
+	// successful route application even when packets happen to be flowing.
+	for _, mutate := range []func(){func() { cycles[0].Applied = false }, func() { cycles[0].Applied = true; cycles[0].Target = "app2" }} {
+		mutate()
+		v = managerTimeline(packets, cycles, "p00", "p01", "198.18.0.11", 90)
+		if v["routes_completed"] != 0 || v["decision_complete"] != 0 {
+			t.Fatal("unrelated/failed cycle qualified", v)
+		}
 	}
 }

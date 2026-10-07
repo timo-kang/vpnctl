@@ -194,6 +194,7 @@ class AutoManagerEvidenceTests(unittest.TestCase):
         report = dict(schema_version=2, completed=True, paths=4, mode='automatic', trace_error='', steps=steps,
                       fresh_generation_confirmed=True, recovery_hysteresis_observed=True, foreign_policy_preserved=True,
                       foreign_peer_preserved=True, fallback_positive_control=True,
+                      committed_dwell_monotonic_ns=15_000_000_000, health_hold_down_monotonic_ns=10_000_000_000,
                       packets=[dict(sequence=i, kind=k, begin_monotonic_ns=1, end_monotonic_ns=2)
                                for i, k in enumerate(observer.AUTO_PACKET_KINDS, 1)],
                       cycles=[dict(observed_monotonic_ns=3, diagnostics=dict(monotonic_available=True,
@@ -215,7 +216,9 @@ class AutoManagerEvidenceTests(unittest.TestCase):
                      lambda r: r['cycles'][0]['diagnostics']['checkpoints'][0].update(monotonic_ns=4),
                      lambda r: r['steps'][0].update(action_completed_monotonic_ns=5),
                      lambda r: r['slo_summary'].update(p95_status='pass'),
-                     lambda r: r['steps'][0].update(traffic={})]
+                     lambda r: r['steps'][0].update(traffic={}),
+                     lambda r: r.update(committed_dwell_monotonic_ns=1),
+                     lambda r: r.update(health_hold_down_monotonic_ns=1)]
         for i, mutation in enumerate(mutations):
             status = self.valid()
             mutation(status['report'])
