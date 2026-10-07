@@ -269,7 +269,10 @@ agent that lacks this profile. `VPNCTL_VM_RACE=0|1` identifies the checkout buil
 and suite; it cannot prove how an externally supplied binary was built.
 
 Each 4/8-path matrix positions the sole healthy target path first, middle and
-last, while the other 3/7 paths time out for 2s. Both automatic actuators remain
+last, while the other 3/7 paths remain blackholed. The configured proof budget
+is 2s; an actuator stops TCP establishment at its immutable connection-latency
+ceiling (1s by default) while retaining the proof budget for pre/post evidence.
+Both automatic actuators remain
 active, and the independent target must keep passing real TCP payloads. Every
 candidate's live kernel gate is sampled. Qualification requires at least 15s
 and three additional applied cycles per app, with every successful observation
@@ -305,3 +308,43 @@ terminal diagnostics: a newer pass cannot retroactively prove its root cause.
 Whole-VM low-budget failure, role-limited success and original CI failure must
 remain separate evidence. M2's successful 24h baseline and M3's other release
 gates are not changed by these short runs.
+
+## Policy-bounded TCP establishment (2026-10-07, #185)
+
+[CI 37595610104, CPU8](https://github.com/timo-kang/vpnctl/actions/runs/37595610104/job/112707371519)
+failed all three healthy positions despite successful independent-target TCP and
+WireGuard observations. Their 10.07–11.87s gaps broke the unchanged 10s confirmation
+window and caused real application quarantine. The fixture never runs the direct
+engine. This is not a cgroup-evidence parsing failure or proof that CPU throttling
+alone caused the delay. Public diagnostics show maintenance, observation and
+admission costs; the source behavior predates this PR.
+
+A candidate connect taking over the policy's `MaxConnectTime` cannot be selected,
+yet a 2s proof timeout previously kept waiting beyond the default 1s ceiling.
+The actuator now limits only TCP establishment to that immutable policy ceiling.
+Pre-connect route/counter reads and post-connect route/counter/ownership checks
+retain their original parent budgets. Raw `ObserveTarget` has no selector policy
+and keeps its existing timeout. The selector still validates the measured
+connection duration, two consecutive proofs, 10s freshness and all authority.
+The inclusive `<=` boundary is retained; the connection context expires one
+nanosecond beyond it. This is deadline arithmetic, not a nanosecond scheduling SLO.
+
+Deterministic tests reproduce the unnecessary blackhole wait and an initially
+incorrect exclusive deadline. They cover a 900ms connect plus 200ms evidence on
+each side, exact 1s success, a custom 1.5s policy, a shorter parent deadline,
+missing WG counter growth, policy propagation, unrestricted diagnostic calls and
+cancellation that joins every worker. The recorded CPU8 timestamps separately
+reproduce lost eligibility; they are not a performance simulation.
+
+At source `3fa9aa2`, production VM tests with robot-only 0.5 CPU passed all six
+cases (4/8 candidates, healthy first/middle/last). First payload was 3.256–3.285s
+for four candidates and 4.065–4.237s for eight; the largest eligible observation
+gap was 2.056s and 2.758s respectively. Both applications and all kernel leases
+remained valid through at least 15s and three further applied cycles. Evidence:
+`/tmp/vpnctl-fix-cpu-connect-v1`. The prior failed CI stays failed; this local result
+does not replace exact-head remote CI or establish a minimum robot CPU guarantee.
+
+The same production source also passed all six robot-only 0.25 CPU cases in
+`/tmp/vpnctl-fix-cpu-connect-quarter-v1`: four-path first payload 4.590–4.680s,
+maximum gap 3.301s; eight-path first payload 6.307–6.501s, maximum gap 4.499s.
+Race instrumentation has a separate cost profile and requires its own result.
