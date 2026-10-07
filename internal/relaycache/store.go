@@ -320,6 +320,27 @@ func (s *Store) save(next diskState) error {
 	if e := s.validate(next); e != nil {
 		return e
 	}
+	return s.commitValidated(next)
+}
+
+// Only Status calls this while holding mu on a nonclosed, certain Store. No
+// mutable catalog/key references escape Store, and decode/save validate all
+// structural changes before publishing state. A shallow copy is safe because
+// this path changes only ObservedAt; it still commits every read durably.
+func (s *Store) checkpointClock() error {
+	next := s.state
+	if now := s.now().UTC(); now.After(next.ObservedAt) {
+		next.ObservedAt = now
+	}
+	if next.ObservedAt.IsZero() {
+		return ErrCorrupt
+	}
+	return s.commitValidated(next)
+}
+
+// Caller holds mu and supplies structurally validated state. Clock-only
+// checkpoints and full mutations share identical file safety and durability.
+func (s *Store) commitValidated(next diskState) error {
 	// Missing an initialized file is never an invitation to reinitialize it.
 	f, e := s.openFile(stateFile, os.O_RDONLY)
 	if e != nil {
