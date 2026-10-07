@@ -23,11 +23,6 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	report["policy"] = map[string]any{"successes": 2, "hold_down_ms": 10000, "minimum_dwell_ms": 15000, "interval_ms": 500, "probe_timeout_ms": 150}
 	report["existing_tcp_contract"] = "fresh socket before each applicable fault, no reconnect within that phase; explicit session IDs; nonce framing survives partial reads/timeouts; server idle limit 30 minutes"
 	report["slo_contract"] = "individual failover/no-uplink limit 10s; nearest-rank p95 requires at least 20 measured transitions per class/profile; incomplete samples never qualify"
-	uplinks := []string{}
-	for i := 0; i < size/2; i++ {
-		uplinks = append(uplinks, fmt.Sprint("wan", i))
-	}
-	report["roles"].(map[string]any)["uplinks"] = uplinks
 	// Below all owned application guards, above main. Preserve the VM's
 	// management default route; a foreign specific route is rightly a conflict.
 	applicationFallbackRoute(t, f, "table", "65002")

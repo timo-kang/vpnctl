@@ -268,7 +268,11 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 	})
 	startNetworkProcess(t, f.robot, filepath.Join(f.results, "kernel-events.log"), nil, "ip", "-ts", "monitor", "all")
 
-	report["roles"] = map[string]any{"uplinks": []string{"wan0", "wan1"}, "networkmanager": []string{"wan0", "shared0"}, "netplan_renderer": "networkd", "netplan_lan": []string{"rf0", "gimbal0"}, "udev_excluded": "ecat0", "robot_namespace": f.robot, "controller_separate": true, "relays": 2}
+	uplinks := []string{}
+	for i := 0; i < size/2; i++ {
+		uplinks = append(uplinks, fmt.Sprint("wan", i))
+	}
+	report["roles"] = map[string]any{"uplinks": uplinks, "networkmanager": []string{"wan0", "shared0"}, "netplan_renderer": "networkd", "netplan_lan": []string{"rf0", "gimbal0"}, "udev_excluded": "ecat0", "robot_namespace": f.robot, "controller_separate": true, "relays": 2}
 	for _, p := range f.plan.Paths {
 		enablePreparation(t, f, p.PathID)
 	}
