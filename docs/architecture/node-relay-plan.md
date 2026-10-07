@@ -23,7 +23,10 @@ vpnctl node relay plan --config node.yaml --controller-id <approved-controller-i
 cache 위치는 `--cache-dir` → `node.relay_cache_dir` → `<pki_dir>/relay-cache` 순서다.
 [기존 cache의 소유권·0700/0600·lock·시간 역행 계약](node-relay-cache.md)을 그대로 사용한다.
 plan도 cache lock을 보유하고 만료 관측 최고 시각을 저장하므로 쓰기 권한이 필요하다.
-동시 refresh는 busy로 실패한다. plan은 controller에 접속하거나 키를 새로 만들지 않는다.
+plan/status는 상주 supervisor와 같은 FIFO 대기열에서 최대 10초 기다린다. 대기 시간은
+`--timeout` 전체 기한에 포함하고, 차례를 얻은 뒤 현재 승인을 읽는다. 만료·철회를 대기 전
+상태로 되돌리지 않는다. 동시 refresh는 busy로 실패한다. plan은 controller에 접속하거나
+키를 새로 만들지 않는다.
 
 IPv4가 하나면 그 주소를 선택한다. 여러 usable IPv4 주소가 있으면 `source_ipv4`를 명시해야
 하며, 설정한 주소가 없어지면 다른 주소로 조용히 바꾸지 않는다. IPv6-only 장치는
@@ -57,7 +60,7 @@ cache 자체를 안전하게 열 수 없으면 JSON 대신 stderr와 비정상 �
 
 ## 수집 예산과 관측 의미
 
-- 전체 collection 최대 20초(`--timeout`으로 단축), `ip` 한 명령 최대 2초와 종료 정리 여유
+- 대기와 collection을 합쳐 최대 20초(`--timeout`으로 단축), `ip` 한 명령 최대 2초와 종료 정리 여유
   250ms. 한 번에 한 프로세스만 실행하고 재시도하지 않는다. SIGINT/SIGTERM은 현재 명령과
   하위 프로세스도 취소한다. cache의 파일 I/O가 kernel에서 멈추는 상황까지 취소하는 보장은 없다.
 - stdout 명령당 64KiB, stderr 4KiB, 전체 interface 목록 128개, 매핑 장치당 주소 16개,

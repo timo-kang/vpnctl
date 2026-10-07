@@ -116,7 +116,7 @@ func runNodeRelay(args []string) error {
 	path := fs.String("path-id", "", "approved candidate path ID")
 	key := fs.String("public-key", "", "node's distinct WireGuard public key for this path")
 	cacheDir := fs.String("cache-dir", "", "node's private relay cache directory (default: node.relay_cache_dir or pki_dir/relay-cache)")
-	timeout := fs.Duration("timeout", relaycache.MaxRefreshDuration, "refresh deadline, at most 2m")
+	timeout := fs.Duration("timeout", relaycache.MaxRefreshDuration, "operation deadline, at most 2m (plan: 20s); read admission waits at most 10s within this deadline")
 	if e := fs.Parse(args[1:]); e != nil {
 		return e
 	}
@@ -176,9 +176,24 @@ func runNodeRelay(args []string) error {
 		if dir == "" {
 			dir = filepath.Join(cfg.Node.PKIDir, "relay-cache")
 		}
-		cache, err := openNodeRelayCache(cfg.Node, dir, args[0] == "refresh")
+		parent, stop := signalContext()
+		defer stop()
+		ctx, cancel := context.WithTimeout(parent, *timeout)
+		defer cancel()
+		open := relaycache.Open
+		if args[0] == "plan" || args[0] == "status" {
+			// Retain one FIFO turn while supervisors are running. Read approval
+			// only after admission; waiting must not carry stale authority or
+			// reset the caller's collection deadline.
+			open = func(dir string, opts relaycache.Options) (*relaycache.Store, error) {
+				admission, release := context.WithTimeout(ctx, nodeAdmissionDuration)
+				defer release()
+				return relaycache.OpenQueued(admission, dir, opts)
+			}
+		}
+		cache, err := openNodeRelayCacheUsing(cfg.Node, dir, args[0] == "refresh", open)
 		if errors.Is(err, relaycache.ErrMissing) && args[0] == "plan" {
-			return printRelayPlan(context.Background(), cfg.Node.Name, *id, relaycache.MissingReport(cfg.Node.Name), cfg.Node.RelayUnderlays, nil)
+			return printRelayPlan(ctx, cfg.Node.Name, *id, relaycache.MissingReport(cfg.Node.Name), cfg.Node.RelayUnderlays, nil)
 		}
 		if errors.Is(err, relaycache.ErrMissing) && args[0] == "status" {
 			return json.NewEncoder(os.Stdout).Encode(relaycache.MissingReport(cfg.Node.Name))
@@ -187,16 +202,15 @@ func runNodeRelay(args []string) error {
 			return err
 		}
 		defer cache.Close()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var report relaycache.Report
 		if args[0] == "plan" {
 			report, err = cache.Status()
 			if err != nil {
 				return err
 			}
-			parent, stop := signalContext()
-			defer stop()
-			ctx, cancel := context.WithTimeout(parent, *timeout)
-			defer cancel()
 			return printRelayPlan(ctx, cfg.Node.Name, *id, report, cfg.Node.RelayUnderlays, cache)
 		}
 		if args[0] == "status" {
@@ -204,10 +218,6 @@ func runNodeRelay(args []string) error {
 		} else {
 			client := api.NewCredentialClient(cfg.Node.Controller, cfg.Node.PKIDir)
 			defer client.CloseIdleConnections()
-			parent, stop := signalContext()
-			defer stop()
-			ctx, cancel := context.WithTimeout(parent, *timeout)
-			defer cancel()
 			report, err = cache.Refresh(ctx, client)
 		}
 		if outputErr := json.NewEncoder(os.Stdout).Encode(report); outputErr != nil {

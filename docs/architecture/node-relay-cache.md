@@ -31,6 +31,9 @@ refresh는 최대 2분, CAS 충돌 재조회는 최대 256회이며 10~250ms 범
 stdout에 출력하고 0이 아닌 종료값을 반환한다. status는 읽기에 성공하면 만료·차단 상태도
 JSON과 종료값 0으로 반환하므로 자동화는 `validity`, `preparation`, `usable_cache`를 검사한다.
 손상·권한 오류처럼 cache를 안전하게 열 수 없는 경우는 stderr와 비정상 종료로 보고한다.
+status/plan은 상주 프로세스와 같은 FIFO 순서로 최대 10초 기다리며 더 짧은 `--timeout`을
+지킨다. 대기 뒤 현재 상태를 읽고, 없는 cache는 생성하지 않는다. 대기만으로 승인이나
+커널 lease를 갱신하지 않으며 전체 작업 기한을 다시 시작하지 않는다.
 
 현재 node agent의 자동 refresh나 controller의 TTL 자동 연장은 없다. 배포 저장소에서
 관리자 승인 갱신과 노드 refresh 주기를 구성해야 한다. 기본 승인 TTL은 1시간이며 binding은

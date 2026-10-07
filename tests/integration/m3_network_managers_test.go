@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relayplan"
 )
 
@@ -237,6 +236,34 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 			}
 			diagnostic[name] = string(b)
 		}
+		// Keep complete public preparation records even when large candidate
+		// reports exceed the diagnostic text tail. This also runs on bootstrap
+		// failure, before the packet/selection trace has been started.
+		b, _ := os.ReadFile(filepath.Join(f.results, "application-node-supervisor.jsonl"))
+		var preparation []json.RawMessage
+		lines := bytes.Split(b, []byte("\n"))
+		for _, line := range lines[:len(lines)-1] {
+			var r struct {
+				ObservedAt  string          `json:"observed_at"`
+				CycleMS     int64           `json:"cycle_ms"`
+				State       string          `json:"state"`
+				Reason      string          `json:"reason,omitempty"`
+				Refresh     string          `json:"refresh"`
+				Preparation json.RawMessage `json:"preparation,omitempty"`
+			}
+			if json.Unmarshal(line, &r) != nil {
+				continue
+			}
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preparation = append(preparation, raw)
+			if len(preparation) > 32 {
+				preparation = preparation[1:]
+			}
+		}
+		report["preparation_tail"] = preparation
 		report["diagnostic"] = diagnostic
 	})
 	startNetworkProcess(t, f.robot, filepath.Join(f.results, "kernel-events.log"), nil, "ip", "-ts", "monitor", "all")
@@ -267,7 +294,6 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 	for target := range pins {
 		log := filepath.Join(f.results, "manager-"+target+".jsonl")
 		logs[target] = log
-		watchers[target] = startWatch(target)
 	}
 	lanNS := map[string]string{}
 	for i, iface := range []string{"rf0", "gimbal0", "shared0"} {
@@ -317,6 +343,23 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 		configDigests[path] = managerDigest(t, path)
 	}
 	report["configuration_sha256"] = configDigests
+	// Profile activation is fixture bootstrap, before applications start. It
+	// can invalidate the earlier static underlay generation. Let the real node
+	// supervisor finish that rebuild, then contend with both app watchers in
+	// every measured fault phase. Never manually repair the owned candidates.
+	report["manager_bootstrap_started_monotonic_ns"] = managerMono()
+	eventually(t, 120*time.Second, "manager bootstrap candidate readiness", func() error {
+		for _, p := range f.plan.Paths {
+			if !applicationCandidate(t, f, p).OK {
+				return fmt.Errorf("%s awaiting supervisor rebuild", p.PathID)
+			}
+		}
+		return nil
+	})
+	report["manager_bootstrap_ready_monotonic_ns"] = managerMono()
+	for target := range pins {
+		watchers[target] = startWatch(target)
+	}
 	ready := func() error {
 		for _, log := range logs {
 			if !latestApplicationResult(log).Applied {
@@ -509,27 +552,16 @@ func managerSharedUp(t *testing.T, f *m3AuthorityFixture, ns string, report map[
 func managerFinalInventory(t *testing.T, f *m3AuthorityFixture, report map[string]any, size int) {
 	t.Helper()
 	var finalPlan relayplan.Plan
-	planReads := 0
-	eventually(t, 10*time.Second, "read final plan while supervisors retain ownership", func() error {
-		planReads++
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		b, e := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "plan", "--config", f.node).CombinedOutput()
-		// This is a read-only CLI. Its initial cache Open is intentionally
-		// nonblocking; unlike mutations, retrying this precise busy rejection
-		// neither adopts ownership nor replays a partially completed change.
-		if e != nil && strings.Contains(string(b), relaycache.ErrBusy.Error()) {
-			return fmt.Errorf("read admission busy")
-		}
-		if e != nil {
-			t.Fatal("final plan read", e, string(b))
-		}
-		if e := json.Unmarshal(b, &finalPlan); e != nil {
-			t.Fatal(e, string(b))
-		}
-		return nil
-	})
-	report["final_plan_read_attempts"] = planReads
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	b, e := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "plan", "--config", f.node, "--timeout", "10s").CombinedOutput()
+	if e != nil {
+		t.Fatal("final plan read while supervisors retain ownership", e, string(b))
+	}
+	if e := json.Unmarshal(b, &finalPlan); e != nil {
+		t.Fatal(e, string(b))
+	}
+	report["final_plan_read_attempts"] = 1
 	if len(finalPlan.Paths) != size {
 		t.Fatal("unexpected candidate inventory", len(finalPlan.Paths))
 	}
