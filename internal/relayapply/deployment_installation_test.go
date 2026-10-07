@@ -26,18 +26,11 @@ func installationWitness(t *testing.T) FreshApproval {
 }
 func installationReady(t *testing.T, e *DeploymentEngine) {
 	t.Helper()
-	for n := 0; n < 12; n++ {
-		if _, err := e.RebuildInstallations(context.Background(), installationWitness(t)); err != nil {
-			t.Fatal(err, e.installationStatus())
-		}
-		if err := validateInstallations(e.journal); err != nil {
-			t.Fatal(err)
-		}
-		if len(e.journal.Entries) == 1 && e.journal.Entries[0].Phase == "applied" {
-			return
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := awaitInstallationReady(ctx, e); err != nil {
+		t.Fatal(err, e.installationStatus())
 	}
-	t.Fatal("installation failed to converge", e.installationStatus())
 }
 func TestRelayInstallationExplicitConsentAndFreshAuthority(t *testing.T) {
 	e, k, c, f, o, dir := deploymentFixture(t, 1)
@@ -224,13 +217,14 @@ func TestRelayInstallationStorageFailureAtEveryBoundary(t *testing.T) {
 		for _, after := range []bool{false, true} {
 			t.Run(fmt.Sprintf("write%d/after%v", point, after), func(t *testing.T) {
 				e, k, c, _, o, dir := deploymentFixture(t, 1)
-				e.cache = &failingDeploymentCache{deploymentCache: e.cache, failAt: point, after: after}
+				fault := &failingDeploymentCache{deploymentCache: e.cache, failAt: point, after: after}
+				e.cache = fault
 				_, err := e.RequestInstallation(context.Background(), o)
 				for n := 0; n < 12 && err == nil; n++ {
 					_, err = e.RebuildInstallations(context.Background(), installationWitness(t))
 				}
-				if err == nil {
-					t.Fatal("write fault not reached", point)
+				if !errors.Is(err, errDeploymentStorageInjected) || fault.calls != point {
+					t.Fatalf("wrong storage boundary failure: point=%d calls=%d err=%v", point, fault.calls, err)
 				}
 				for _, v := range k.objects {
 					if v.lease.Active {

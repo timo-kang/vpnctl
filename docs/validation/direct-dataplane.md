@@ -274,6 +274,16 @@ VPNCTL_FULL_HANDSHAKE_MODEL=1 go test ./internal/directpath \
 확인한다. 경고 폭주에 lifecycle 전이가 묻히지 않도록 공개 필드만 제한된
 첫/마지막 이벤트로 내보내고, 누락·절단 수를 명시한다.
 
+최종 제품 소스 `b4a95c7`의 깨끗한 checkout으로 실행한 전체 로컬 행렬도 통과했다:
+production outer/inner 2·3·8·32 노드 8/8, race outer/inner 2·3·8 노드 6/6.
+증거는 `/tmp/vpnctl-staged-restart-prod-v2`와
+`/tmp/vpnctl-staged-restart-race-v2`다. 최대 fallback은 2.053초, 장애 중 재시도의
+최대 응답 공백은 3.063초였으며 모든 case가 15초 내 복구했다. inner 장애에는
+실패한 nonce 요청이 있었으므로 무손실 또는 무중단이라고 해석하지 않는다.
+[같은 커밋 CI](https://github.com/timo-kang/vpnctl/actions/runs/37602539188)에서도
+기존에 실패했던 production outer/inner 32노드 job이 통과했다. 별도 저장 오류
+복구 단위 검사의 실패와 전체 CI 판정은 개별 direct job 성공과 구분한다.
+
 ## 판정 범위
 
 5초는 이 격리된 node-to-node 시험의 assertion이다. 앱 서버 uplink, 실제 RF/LTE 지연,

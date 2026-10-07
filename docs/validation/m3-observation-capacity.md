@@ -356,3 +356,11 @@ eight-path values were 5.987–6.371s and 4.423s. Every position retained both
 application payloads and all candidate leases for at least 15s and four additional
 applied cycles per app. This is separate local evidence; remote CI and the
 deployment/startup/long-duration qualifications above remain required.
+
+Remote [CI 37602539188](https://github.com/timo-kang/vpnctl/actions/runs/37602539188)
+at `b4a95c7` also passed the race robot-only CPU8 profile in all three healthy
+positions. First payload was 8.201–9.026s, and the largest fresh observation gap
+was 5.906s, below the unchanged 10s boundary. Both applications and all leases
+passed through at least 15s and three further applied cycles. These values are
+rounded upward where used as bounds. The run's separate candidate lifecycle
+unit-test failure is retained; a passing CPU job does not make the entire run pass.

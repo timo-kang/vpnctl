@@ -295,6 +295,8 @@ type failingDeploymentCache struct {
 	after         bool
 }
 
+var errDeploymentStorageInjected = errors.New("disk full")
+
 func (c *failingDeploymentCache) SaveDeploymentJournal(b []byte) error {
 	c.calls++
 	if c.calls == c.failAt {
@@ -303,7 +305,7 @@ func (c *failingDeploymentCache) SaveDeploymentJournal(b []byte) error {
 				return err
 			}
 		}
-		return errors.New("disk full")
+		return errDeploymentStorageInjected
 	}
 	return c.deploymentCache.SaveDeploymentJournal(b)
 }
