@@ -4,8 +4,8 @@
 set -euo pipefail
 vm_cpus=${VPNCTL_VM_CPUS:-1}
 case "$vm_cpus" in
-    1|0.5|0.25) ;;
-    *) echo 'VPNCTL_VM_CPUS must be 1, 0.5 or 0.25 (container quota only)' >&2; exit 2 ;;
+    2|1|0.5|0.25) ;;
+    *) echo 'VPNCTL_VM_CPUS must be 2 (split capacity only), 1, 0.5 or 0.25 (container quota only)' >&2; exit 2 ;;
 esac
 vm_race=${VPNCTL_VM_RACE:-0}
 build_flags=()
