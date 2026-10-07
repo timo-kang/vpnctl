@@ -100,6 +100,11 @@ func New(policy Policy) (*Selector, error) {
 	return &Selector{policy: policy, histories: map[string]*history{}, now: time.Now, boot: bootTime}, nil
 }
 
+// MaxConnectTime is the immutable ceiling used by Decide. Actuators may stop
+// waiting for a TCP connect that could no longer qualify, while retaining their
+// full budgets for the surrounding ownership and transfer evidence.
+func (s *Selector) MaxConnectTime() time.Duration { return s.policy.MaxConnectTime }
+
 // ObservationExclusion identifies candidates that this immutable policy cannot
 // select, even with perfect health. Skipping their socket proofs grants no
 // eligibility; Decide still validates every observation and applies the policy.

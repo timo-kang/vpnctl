@@ -29,6 +29,10 @@ const targetObservationWaveDuration = 3 * time.Second
 type TargetObservation = relayobserve.TargetObservation
 type TargetReport = relayobserve.TargetReport
 
+// targetConnectLimitKey bounds only TCP establishment, not the surrounding
+// route and WireGuard evidence reads.
+type targetConnectLimitKey struct{}
+
 type targetProof struct {
 	duration  time.Duration
 	handshake int64
@@ -378,6 +382,10 @@ func (k kernel) targetCounters(ctx context.Context, entry Entry) (targetCounters
 }
 
 func (k kernel) probeTarget(ctx context.Context, entry Entry, target relaycatalog.Target) (targetProof, error) {
+	return k.probeTargetWithDial(ctx, entry, target, dialTarget)
+}
+
+func (k kernel) probeTargetWithDial(ctx context.Context, entry Entry, target relaycatalog.Target, dial func(context.Context, Entry, relaycatalog.Target) (net.Conn, error)) (targetProof, error) {
 	if err := k.targetRoute(ctx, entry, target); err != nil {
 		return targetProof{}, err
 	}
@@ -386,12 +394,20 @@ func (k kernel) probeTarget(ctx context.Context, entry Entry, target relaycatalo
 		return targetProof{}, err
 	}
 	began := time.Now()
-	conn, err := dialTarget(ctx, entry, target)
+	dialCtx := ctx
+	cancel := func() {}
+	if limit, ok := ctx.Value(targetConnectLimitKey{}).(time.Duration); ok && limit > 0 {
+		// Decide accepts ConnectTime <= limit. Expire on the first
+		// representable instant after that inclusive boundary.
+		dialCtx, cancel = context.WithDeadline(ctx, began.Add(limit+time.Nanosecond))
+	}
+	conn, err := dial(dialCtx, entry, target)
+	duration := time.Since(began)
+	cancel()
 	if err != nil {
 		return targetProof{}, classifyTargetConnect(err)
 	}
 	defer conn.Close()
-	duration := time.Since(began)
 	if err := k.targetRoute(ctx, entry, target); err != nil {
 		return targetProof{}, err
 	}
