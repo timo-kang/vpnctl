@@ -379,3 +379,41 @@ func TestRelayInstallationBudgetAndBootDomain(t *testing.T) {
 		t.Fatal("silent downgrade")
 	}
 }
+
+func TestRelayInstallationOwnedDriftAndForeignPreservation(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprint(foreign), func(t *testing.T) {
+			e, k, _, _, o, _ := deploymentFixture(t, 1)
+			if _, err := e.RequestInstallation(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			installationReady(t, e)
+			if _, err := e.Maintain(context.Background(), installationWitness(t)); err != nil {
+				t.Fatal(err)
+			}
+			old := e.journal.Entries[0].Alias
+			if foreign {
+				k.foreign = true
+			} else {
+				v := k.objects[o.EndpointID]
+				v.up = false
+				k.objects[o.EndpointID] = v
+			}
+			e.Maintain(context.Background(), installationWitness(t))
+			_, err := e.RebuildInstallations(context.Background(), installationWitness(t))
+			if foreign {
+				if err == nil || len(k.objects) != 1 || e.journal.Entries[0].Alias != old {
+					t.Fatal("foreign object altered", err)
+				}
+				return
+			}
+			if err != nil || len(k.objects) != 0 {
+				t.Fatal("owned drift not removed", err)
+			}
+			installationReady(t, e)
+			if e.journal.Entries[0].Alias == old || k.objects[o.EndpointID].lease.Active {
+				t.Fatal("drift reused owner or opened lease")
+			}
+		})
+	}
+}

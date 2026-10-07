@@ -272,7 +272,7 @@ func (e *DeploymentEngine) RebuildInstallations(parent context.Context, fresh Fr
 			}
 			return e.result("rebuilding", "interrupted_installation_removed"), nil
 		}
-		if index >= 0 && e.journal.Entries[index].Phase == "applied" {
+		if index >= 0 && e.journal.Entries[index].Phase == "applied" && e.installationReady[e.journal.Entries[index].Alias] {
 			continue
 		}
 		if err := installationFresh(fresh); err != nil {
@@ -340,6 +340,19 @@ func (e *DeploymentEngine) RebuildInstallations(parent context.Context, fresh Fr
 				return e.result("blocked", "installation_cleanup_failed"), e.installationFailure(i, "approval_changed", err)
 			}
 			return e.result("rebuilding", "obsolete_installation_removed"), nil
+		}
+		if old.Phase == "applied" {
+			ready, err := e.backend.Check(ctx, old, false)
+			if err != nil {
+				return e.result("blocked", "resource_conflict_or_unavailable"), e.installationFailure(i, "resource_conflict_or_unavailable", err)
+			}
+			if ready {
+				continue
+			} // An expired lease needs renewal, not reinstall.
+			if err := e.remove(ctx, index); err != nil {
+				return e.result("blocked", "installation_cleanup_failed"), e.installationFailure(i, "owned_configuration_drift", err)
+			}
+			return e.result("rebuilding", "owned_configuration_removed"), nil
 		}
 		if p.Step == len(deploymentInstallSteps) {
 			ready, err := e.backend.Check(ctx, old, false)

@@ -32,13 +32,14 @@ type deploymentBackend interface {
 	LeaseStatus(context.Context, DeploymentEntry) (DeploymentLease, error)
 }
 type DeploymentEngine struct {
-	mu        sync.Mutex
-	cache     deploymentCache
-	journal   deploymentJournal
-	backend   deploymentBackend
-	unlock    func()
-	uncertain bool
-	closed    bool
+	mu                sync.Mutex
+	cache             deploymentCache
+	journal           deploymentJournal
+	backend           deploymentBackend
+	unlock            func()
+	uncertain         bool
+	closed            bool
+	installationReady map[string]bool
 }
 
 func OpenDeployment(cache *relaycache.DeploymentStore) (*DeploymentEngine, error) {
@@ -381,6 +382,7 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 		return DeploymentResult{}, relaycache.ErrBusy
 	}
 	defer e.mu.Unlock()
+	e.installationReady = map[string]bool{}
 	if err := e.begin(); err != nil {
 		return e.result("blocked", "reopen_required"), err
 	}
@@ -431,6 +433,8 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 		}
 		if x != nil && !errors.Is(x, ErrLeaseExpired) {
 			x = errors.Join(x, e.backend.Down(ctx, v))
+		} else {
+			e.installationReady[v.Alias] = true
 		}
 		err = errors.Join(err, x)
 	}
