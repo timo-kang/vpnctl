@@ -331,9 +331,11 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) 
 		}
 		out.PathID, out.State = p.PathID, "rebuilding"
 		e.journal.RebuildCursor = p.PathID
-		if err = e.persist(); err != nil {
-			return out, err
-		}
+		// Commit the scheduling cursor with this unit's durable state change,
+		// failure/backoff, or pre-add InFlight marker below. A separate cursor
+		// write adds an fsync without authorizing or protecting any kernel work.
+		// Creation still cannot run before owner/InFlight persistence succeeds;
+		// removal already has a durable, idempotently recoverable releasing state.
 		if consentErr != nil {
 			return out, e.rebuildFailure(i, "preparation_consent_unavailable", consentErr)
 		}
@@ -396,7 +398,7 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) 
 			}
 			entry.Alias, entry.Metric, entry.LinkIndex, err = token()
 			if err != nil {
-				return out, err
+				return out, e.rebuildFailure(i, "preparation_identity_unavailable", err)
 			}
 			// Keep the exact terminal event identity across this explicit intent's
 			// rebuilds, including the interval with no installed entry. Other
@@ -408,7 +410,7 @@ func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) 
 				entry.Metric = p.TerminalScope.Metric
 			}
 			if err = validateEntry(entry, e.journal.Node); err != nil {
-				return out, err
+				return out, e.rebuildFailure(i, "invalid_preparation", err)
 			}
 			if _, err = e.backend.Check(ctx, entry, true); err != nil {
 				return out, e.rebuildFailure(i, "ownership_or_kernel_unavailable", err)
