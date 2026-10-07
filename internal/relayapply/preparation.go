@@ -8,6 +8,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"slices"
 	"time"
 
 	"vpnctl/internal/relaycache"
@@ -542,6 +543,7 @@ func (e *Engine) preparationApproval(ctx context.Context, p PreparationIntent) (
 		return Entry{}, time.Time{}, "inventory_unknown", err
 	}
 	var underlays []relayplan.Underlay
+	var endpoint string
 	if r.Catalog != nil {
 		for _, path := range r.Catalog.Spec.Paths {
 			if path.ID != p.PathID {
@@ -552,9 +554,19 @@ func (e *Engine) preparationApproval(ctx context.Context, p PreparationIntent) (
 					underlays = append(underlays, u)
 				}
 			}
+			for _, relay := range r.Catalog.Spec.Relays {
+				if relay.ID == path.RelayID {
+					for _, ep := range relay.Endpoints {
+						if ep.ID == path.EndpointID {
+							endpoint = ep.Address
+						}
+					}
+				}
+			}
 		}
 	}
-	plan, err := relayplan.Build(ctx, r.NodeID, p.Controller, r, underlays, e.collector)
+	collector := preparationEndpointCollector{base: e.collector, endpoint: endpoint}
+	plan, err := relayplan.Build(ctx, r.NodeID, p.Controller, r, underlays, collector)
 	if err != nil {
 		return Entry{}, time.Time{}, "inventory_unknown", err
 	}
@@ -573,6 +585,26 @@ func (e *Engine) preparationApproval(ctx context.Context, p PreparationIntent) (
 		return entry, plan.ValidUntil, "", nil
 	}
 	return Entry{}, time.Time{}, "approved_path_unavailable", ErrRecovery
+}
+
+// Narrow only the inventory request, after Build has validated the complete
+// catalog and admitted its endpoints. A different relay sharing this underlay
+// must not consume the current candidate's rebuild budget. Each unit still
+// reads the current route and both link snapshots; nothing is cached.
+type preparationEndpointCollector struct {
+	base     relayplan.Collector
+	endpoint string
+}
+
+func (c preparationEndpointCollector) Collect(ctx context.Context, u relayplan.Underlay, endpoints []string) relayplan.Inventory {
+	if c.endpoint == "" || !slices.Contains(endpoints, c.endpoint) {
+		return relayplan.Inventory{Underlay: u}
+	}
+	base := c.base
+	if base == nil {
+		base = relayplan.LinuxCollector{}
+	}
+	return base.Collect(ctx, u, []string{c.endpoint})
 }
 
 type preparationRemover interface {
