@@ -308,9 +308,14 @@ func TestNetns_M3TargetApplicationApproval(t *testing.T) {
 			f := applicationFixture(t, true, 4)
 			if fault == "expiry" {
 				grant := f.controller.apply(f.spec, 60)
-				// Explicit refresh fixes which generation is isolated before the outage.
-				f.nodeCall("refresh", "")
-				applicationReconcile(t, f, "app", true)
+				// The ordinary refresh command intentionally refuses a busy cache.
+				// Use supervised FIFO admission alongside the running supervisor,
+				// then prove which grant reached the app before isolating authority.
+				nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "supervise", "--config", f.node, "--once")
+				applied := applicationReconcile(t, f, "app", true)
+				if applied.Selection.Generation != grant.Generation {
+					t.Fatal("outage would isolate a different approval generation", applied.Selection.Generation, grant.Generation)
+				}
 				stream := applicationStream(t, f, "expiry")
 				nodeControllerOutage(t, f)
 				f.controller.apply(f.spec, 3600)
