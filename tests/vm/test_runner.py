@@ -189,7 +189,11 @@ class AutoManagerEvidenceTests(unittest.TestCase):
                        ready_observed_monotonic_ns=3, end_monotonic_ns=4,
                        traffic={k: {'ok': 1} for k in observer.AUTO_PACKET_KINDS}, metric=metrics.get(name, 'other'))
             if name in metrics:
-                row['slo'] = dict(status='pass', elapsed_ms=4, limit_ms=10000)
+                row['slo'] = dict(status='pass', elapsed_ms=0.000002, limit_ms=10000)
+                timeline = dict(decision_complete=3, routes_completed=3, first_success=3)
+                row['timeline'] = timeline.copy()
+                row['failover_timeline'] = timeline.copy()
+                row['previous_path'], row['failover_path'] = 'p00', 'p02'
             steps.append(row)
         report = dict(schema_version=2, completed=True, paths=4, mode='automatic', trace_error='', steps=steps,
                       fresh_generation_confirmed=True, recovery_hysteresis_observed=True, foreign_policy_preserved=True,
@@ -229,6 +233,10 @@ class AutoManagerEvidenceTests(unittest.TestCase):
         status = self.valid()
         row = next(s for s in status['report']['steps'] if 'slo' in s)
         row['slo'].update(status='fail', elapsed_ms=51000)
+        finish = row['begin_monotonic_ns'] + 51_000_000_000
+        key = 'failover_timeline' if row['metric'] == 'failover' else 'timeline'
+        row[key]['first_success' if row['metric'] == 'failover' else 'decision_complete'] = finish
+        row['ready_observed_monotonic_ns'], row['end_monotonic_ns'] = finish, finish + 1
         status['report']['slo_summary']['misses'] = 1
         observer.validate_manager_auto_result(status, 4)
         row['slo']['status'] = 'pass'
@@ -243,6 +251,17 @@ class AutoManagerEvidenceTests(unittest.TestCase):
         status['report']['slo_summary']['unmeasured'] = 0
         with self.assertRaisesRegex(RuntimeError, 'SLO summary'):
             observer.validate_manager_auto_result(status, 4)
+
+    def test_slo_uses_restoration_instead_of_preferred_convergence(self):
+        for change in (lambda s: s.pop('failover_timeline'),
+                       lambda s: s.update(failover_path='p00'),
+                       lambda s: s['slo'].update(elapsed_ms=1),
+                       lambda s: s['failover_timeline'].update(routes_completed=0)):
+            status = self.valid()
+            row = next(s for s in status['report']['steps'] if s['metric'] == 'failover')
+            change(row)
+            with self.assertRaisesRegex(RuntimeError, 'restoration timeline'):
+                observer.validate_manager_auto_result(status, 4)
 
 if __name__ == '__main__':
     unittest.main()

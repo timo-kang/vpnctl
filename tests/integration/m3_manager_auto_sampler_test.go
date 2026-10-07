@@ -123,3 +123,43 @@ func TestManagerTimelineKeepsQuarantineBeforeNoPathDecision(t *testing.T) {
 		t.Fatal("lost earlier safety quarantine", got)
 	}
 }
+
+func TestManagerTimelineFirstAlternativePrecedesPreferredRecovery(t *testing.T) {
+	cycles := []managerAutoCycle{
+		{Target: "app", Path: "p02", Applied: true, Diagnostics: &relayobserve.Diagnostics{StartedMono: 50, FinishedMono: 130, Checkpoints: []relayobserve.Checkpoint{{Name: "decision_complete", At: 110}, {Name: "target_routes_applied", At: 120}}}},
+		{Target: "app", Path: "p01", Applied: true, Diagnostics: &relayobserve.Diagnostics{StartedMono: 180, FinishedMono: 210, Checkpoints: []relayobserve.Checkpoint{{Name: "decision_complete", At: 190}, {Name: "target_routes_applied", At: 200}}}},
+	}
+	packets := []managerAutoEvent{
+		{Kind: "tcp-new", Begin: 100, End: 105, OK: true, Source: "198.18.0.11"}, // before a fresh apply
+		{Kind: "tcp-new", Begin: 125, End: 127, OK: true, Source: "198.18.0.11"},
+		{Kind: "tcp-new", Begin: 205, End: 207, OK: true, Source: "198.18.0.11"},
+	}
+	sources := map[string]string{"p00": "198.18.0.11", "p01": "198.18.0.11", "p02": "198.18.0.11"}
+	path, got := managerFailoverTimeline(packets, cycles, "p00", sources, 90)
+	if path != "p02" || got["first_success"] != 127 || got["routes_completed"] != 120 || got["decision_complete"] != 110 {
+		t.Fatal("preferred dwell counted as failover", path, got)
+	}
+	// A failed apply, unrelated application or unknown source/path is not proof.
+	for _, mutate := range []func([]managerAutoCycle){
+		func(c []managerAutoCycle) { c[0].Applied = false },
+		func(c []managerAutoCycle) { c[0].Target = "app2" },
+		func(c []managerAutoCycle) { c[0].Path = "unapproved" },
+	} {
+		changed := append([]managerAutoCycle(nil), cycles...)
+		mutate(changed)
+		path, got = managerFailoverTimeline(packets, changed, "p00", sources, 90)
+		if path != "p01" || got["first_success"] != 207 {
+			t.Fatal("invalid alternative qualified", path, got)
+		}
+	}
+	// p02's reply after a quarantine cannot be attributed to its earlier apply.
+	blocked := append(append([]managerAutoCycle(nil), cycles...), managerAutoCycle{Target: "app", Guarded: true, Diagnostics: &relayobserve.Diagnostics{StartedMono: 121, FinishedMono: 124, Checkpoints: []relayobserve.Checkpoint{{Name: "target_routes_blocked", At: 123}}}})
+	path, got = managerFailoverTimeline(packets, blocked, "p00", sources, 90)
+	if path != "p01" || got["first_success"] != 207 {
+		t.Fatal("reply after quarantine qualified", path, got)
+	}
+	path, got = managerFailoverTimeline(packets, cycles, "p00", map[string]string{"p01": "198.18.0.12", "p02": "198.18.0.12"}, 90)
+	if path != "" || got["first_success"] != 0 || got["routes_completed"] != 0 {
+		t.Fatal("wrong relay source qualified", path, got)
+	}
+}

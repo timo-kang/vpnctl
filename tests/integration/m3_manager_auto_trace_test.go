@@ -457,3 +457,60 @@ func managerTimeline(packets []managerAutoEvent, cycles []managerAutoCycle, prev
 	}
 	return map[string]int64{"fault_begin": begin, "detection_complete": detected, "decision_complete": decided, "routes_completed": applied, "first_success": firstSuccess, "last_success_before_fault": lastBefore, "first_failure": firstFailure}
 }
+
+// Distinguish the first restored application path from eventual preferred-path
+// convergence. Only a successful fresh apply plus a matching nonce reply within
+// that route's lifetime qualifies; a later route or quarantine closes the window.
+func managerFailoverTimeline(packets []managerAutoEvent, cycles []managerAutoCycle, previous string, sources map[string]string, begin int64) (string, map[string]int64) {
+	out := managerTimeline(packets, cycles, previous, "", "", begin)
+	out["decision_complete"], out["routes_completed"], out["first_success"] = 0, 0, 0
+	boundaries := []int64{}
+	for _, c := range cycles {
+		if c.Target != "app" || c.Diagnostics == nil {
+			continue
+		}
+		for _, m := range c.Diagnostics.Checkpoints {
+			if m.Name == "target_routes_applied" || m.Name == "target_routes_blocked" || m.Name == "rollback_routes_applied" {
+				boundaries = append(boundaries, int64(m.At))
+			}
+		}
+	}
+	path := ""
+	for _, c := range cycles {
+		source, known := sources[c.Path]
+		if c.Target != "app" || !c.Applied || c.Guarded || c.Path == previous || !known || c.Diagnostics == nil {
+			continue
+		}
+		var decision, applied int64
+		for _, m := range c.Diagnostics.Checkpoints {
+			if int64(m.At) < begin {
+				continue
+			}
+			if m.Name == "decision_complete" {
+				decision = int64(m.At)
+			}
+			if m.Name == "target_routes_applied" {
+				applied = int64(m.At)
+			}
+		}
+		if decision < begin || applied < decision {
+			continue
+		}
+		end := int64(1<<63 - 1)
+		for _, at := range boundaries {
+			if at > applied && at < end {
+				end = at
+			}
+		}
+		for _, p := range packets {
+			if p.Kind != "tcp-new" || !p.OK || p.Source != source || p.Begin < applied || p.End >= end {
+				continue
+			}
+			if out["first_success"] == 0 || p.End < out["first_success"] {
+				path = c.Path
+				out["decision_complete"], out["routes_completed"], out["first_success"] = decision, applied, p.End
+			}
+		}
+	}
+	return path, out
+}

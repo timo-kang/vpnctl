@@ -39,7 +39,10 @@ boundary, not end-to-end automatic relay reinstallation qualification.
 
 No failure is repaired by manually selecting the application's path. Selection
 uses two fresh confirmations, a 10-second recovery hold-down and 15-second
-minimum dwell; unhealthy paths can be left immediately. These are the matrix's
+minimum dwell; unhealthy paths can be left immediately. Candidate probes use the
+product default one-second timeout. An earlier 150ms experiment produced a
+transient timeout on an unchanged path and correctly triggered fail-closed
+quarantine; it is retained as failed evidence, not the production profile. These are the matrix's
 explicit policy parameters, not changed production defaults. Recreated underlay
 generations must re-confirm eligibility. LAN/EtherCAT links remain excluded.
 
@@ -91,7 +94,13 @@ never authorize communication or replace BOOTTIME lease enforcement.
 completed boundaries. Candidate/application revalidation failures also have
 explicit checkpoints. Safety quarantine can precede the next no-path selection
 decision; the timeline preserves this order. Rollback checkpoints are separately named. Successful
-route installation alone is not first-payload success. The approval cutoff
+route installation alone is not first-payload success. Failover SLO uses the
+first successfully applied approved alternative with a matching ordinary nonce
+reply within that route's lifetime (`failover_path`/`failover_timeline`). Later
+return to the preferred candidate after dwell/hold-down remains separately
+recorded in `timeline`. Intermediate healthy paths must not be counted as
+outage until preferred-path convergence. The observer checks the reported SLO
+duration against the corresponding monotonic timestamps. The approval cutoff
 conversion from wall expiry to monotonic is explicitly an estimate.
 
 - `tcp-new`: a new ordinary socket and random nonce for every attempt.

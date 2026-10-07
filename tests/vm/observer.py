@@ -334,6 +334,18 @@ def validate_manager_auto_result(status, paths):
             raise RuntimeError('missing SLO classification')
         if state != 'unmeasured' and (state == 'pass') != (0 <= slo.get('elapsed_ms', -1) <= 10000):
             raise RuntimeError('false SLO classification')
+        if state != 'unmeasured':
+            failover = step['metric'] == 'failover'
+            timeline = step.get('failover_timeline' if failover else 'timeline', {})
+            begin = step['begin_monotonic_ns']
+            finish = timeline.get('first_success' if failover else 'decision_complete', 0)
+            if (not begin < finish <= step['end_monotonic_ns']
+                    or timeline.get('decision_complete', 0) < begin
+                    or (failover and (timeline.get('routes_completed', 0) < begin
+                                      or not step.get('failover_path')
+                                      or step['failover_path'] == step.get('previous_path')))
+                    or abs(slo['elapsed_ms'] - (finish - begin) / 1e6) > 1e-6):
+                raise RuntimeError('SLO does not match measured restoration timeline')
         samples.append(slo)
     summary = report.get('slo_summary', {})
     if (len(samples) != 5 or summary.get('samples') != len(samples)

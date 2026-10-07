@@ -20,7 +20,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	t.Helper()
 	report["clock"] = "CLOCK_MONOTONIC; same guest boot; excludes suspend; not authorization evidence"
 	report["mode"] = "automatic"
-	report["policy"] = map[string]any{"successes": 2, "hold_down_ms": 10000, "minimum_dwell_ms": 15000, "interval_ms": 500, "probe_timeout_ms": 150}
+	report["policy"] = map[string]any{"successes": 2, "hold_down_ms": 10000, "minimum_dwell_ms": 15000, "interval_ms": 500, "probe_timeout_ms": 1000}
 	report["existing_tcp_contract"] = "fresh socket before each applicable fault, no reconnect within that phase; explicit session IDs; nonce framing survives partial reads/timeouts; server idle limit 30 minutes"
 	report["slo_contract"] = "individual failover/no-uplink limit 10s; nearest-rank p95 requires at least 20 measured transitions per class/profile; incomplete samples never qualify"
 	// Below all owned application guards, above main. Preserve the VM's
@@ -86,6 +86,10 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			return "198.18.0.12"
 		}
 		return "198.18.0.11"
+	}
+	pathSources := map[string]string{}
+	for _, p := range f.plan.Paths {
+		pathSources[p.PathID] = sourceFor(p.PathID)
 	}
 	integrity := func() {
 		for path, digest := range configDigests {
@@ -265,6 +269,14 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		// Selection/route command completion are separate from verified payload.
 		timeline := managerTimeline(packets, cycles, before.Selection.DesiredPathID, desired, sourceFor(desired), begin)
 		row["timeline"] = timeline
+		if metric == "failover" {
+			// Any freshly applied approved alternative can restore service.
+			// Returning to the fixture's preferred path may happen much later
+			// after minimum dwell/hold-down; keep that convergence separately.
+			path, restored := managerFailoverTimeline(packets, cycles, before.Selection.DesiredPathID, pathSources, begin)
+			row["failover_path"], row["failover_timeline"] = path, restored
+			timeline = restored
+		}
 		firstSuccess, decided, applied := timeline["first_success"], timeline["decision_complete"], timeline["routes_completed"]
 		if metric == "failover" || metric == "no-uplink" {
 			finish := firstSuccess

@@ -291,7 +291,7 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 			args = append(args, "--mode", "manual", "--path-id", pins[target])
 		}
 		if automatic {
-			args = append(args, "--probe-timeout", "150ms", "--hold-down", "10s", "--minimum-dwell", "15s")
+			args = append(args, "--probe-timeout", "1s", "--hold-down", "10s", "--minimum-dwell", "15s")
 		}
 		return startNetworkProcess(t, f.robot, logs[target], nil, args...)
 	}
