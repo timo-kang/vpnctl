@@ -242,6 +242,8 @@ func (e *Engine) RebuildCandidates(parent context.Context) (Result, error) {
 // A one-unit call lets fault tests stop at every persisted boundary; production
 // always uses the bounded entry point above.
 func (e *Engine) rebuildCandidates(parent context.Context, units int) (out Result, err error) {
+	parent, done := relayobserve.Phase(parent, "rebuild")
+	defer done()
 	out = result("idle", "", "")
 	defer func() {
 		e.maintained = nil
@@ -309,6 +311,8 @@ func (e *Engine) rebuildCandidates(parent context.Context, units int) (out Resul
 }
 
 func (e *Engine) rebuildCandidateUnit(ctx context.Context, budget func() error) (out Result, err error) {
+	ctx, done := relayobserve.Phase(ctx, "rebuild_unit")
+	defer done()
 	out = result("idle", "", "")
 	start, err := e.rebuildNow()
 	if err != nil {
@@ -515,11 +519,34 @@ func (e *Engine) syncTerminalScopes(ctx context.Context) error {
 }
 
 func (e *Engine) preparationApproval(ctx context.Context, p PreparationIntent) (Entry, time.Time, string, error) {
+	ctx, done := relayobserve.Phase(ctx, "rebuild_inventory")
+	defer done()
 	r, err := e.cache.Status()
 	if err != nil {
 		return Entry{}, time.Time{}, "approval_unavailable", err
 	}
-	plan, err := relayplan.Build(ctx, r.NodeID, p.Controller, r, e.underlays, e.collector)
+	// A work unit changes one candidate. Collect its current underlay, not
+	// every unrelated network again at each durable step. Keep the complete
+	// catalog: resource slots depend on the original path order. Build still
+	// validates all authority/bindings, and the full configuration is checked
+	// before narrowing collection. No inventory survives this work unit.
+	if err := relayplan.ValidateUnderlays(e.underlays); err != nil {
+		return Entry{}, time.Time{}, "inventory_unknown", err
+	}
+	var underlays []relayplan.Underlay
+	if r.Catalog != nil {
+		for _, path := range r.Catalog.Spec.Paths {
+			if path.ID != p.PathID {
+				continue
+			}
+			for _, u := range e.underlays {
+				if u.ID == path.UnderlayID {
+					underlays = append(underlays, u)
+				}
+			}
+		}
+	}
+	plan, err := relayplan.Build(ctx, r.NodeID, p.Controller, r, underlays, e.collector)
 	if err != nil {
 		return Entry{}, time.Time{}, "inventory_unknown", err
 	}

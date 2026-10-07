@@ -141,3 +141,23 @@ that SLO. This matrix alone does not close M3 or #24.
 Physical Wi-Fi/AP/roaming, LTE modem behavior, DHCP uplink renewal, other Netplan
 renderers, EtherCAT frames/deadlines and fleet operating SLOs need separate
 hardware/deployment evidence.
+
+## Rebuild cost under contention
+
+A failed post-merge 8-candidate run (CI 37563690087) recovered traffic through
+p01 but exceeded the unchanged 120-second preferred-path convergence limit.
+Increasing the maximum work count alone did not help when each preparation unit
+spent its budget collecting all four underlays. Preparation now collects fresh
+inventory for the requested candidate's underlay, including the approved endpoints
+on that underlay, while retaining the complete catalog and its original resource
+slots. Full underlay configuration validation, current approval checks, kernel
+ownership checks and per-unit persistence remain required. Inventory is never
+reused between work units. Lease maintenance still checks every installed path
+before rebuilding.
+
+Node supervision reports include bounded `diagnostics.phases` for admission,
+maintenance, rebuild, rebuild units and rebuild inventory, with elapsed time and
+external command counts. Phase times are nested and must not be summed as wall
+time. These fields are cost evidence only, never authorization or SLO proof.
+The rebuild's 750ms shared wall/BOOTTIME budget, 500ms next-unit reserve, maximum
+eight units and outer 5-second maintenance limit are unchanged.

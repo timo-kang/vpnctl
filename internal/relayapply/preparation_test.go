@@ -752,3 +752,84 @@ func TestPreparationAmbiguousWaitingScopeDoesNotDeadlockReplan(t *testing.T) {
 		t.Fatal("current scope not restored", capture.scopes)
 	}
 }
+
+// A partial collector view must not renumber catalog slots or hide a change
+// to the requested candidate. Repeated full-fleet collection previously spent
+// the rebuild quantum querying unrelated networks at every installation step.
+type preparationCollectFunc func(context.Context, relayplan.Underlay, []string) relayplan.Inventory
+
+func (f preparationCollectFunc) Collect(ctx context.Context, u relayplan.Underlay, endpoints []string) relayplan.Inventory {
+	return f(ctx, u, endpoints)
+}
+
+func TestPreparationInventoryIsLocalAndRetainsCatalogSlots(t *testing.T) {
+	e, _, _, _ := preparationFixture(t)
+	r, err := e.cache.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := relayplan.Build(context.Background(), r.NodeID, r.ControllerID, r, e.underlays, e.collector)
+	if err != nil || len(full.Paths) != 8 {
+		t.Fatal(full, err)
+	}
+	for _, want := range full.Paths {
+		calls := 0
+		e.collector = preparationCollectFunc(func(ctx context.Context, u relayplan.Underlay, eps []string) relayplan.Inventory {
+			calls++
+			if u.ID != want.UnderlayID {
+				t.Fatal("unrelated underlay collected", u.ID, want.PathID)
+			}
+			return (&inventory{}).Collect(ctx, u, eps)
+		})
+		got, until, reason, err := e.preparationApproval(context.Background(), PreparationIntent{PathID: want.PathID, Controller: r.ControllerID})
+		if err != nil || reason != "" || !time.Now().Before(until) || !reflect.DeepEqual(got.Candidate, want) || calls != 1 {
+			t.Fatal("candidate identity, freshness or collection scope changed", want.PathID, got, until, reason, err, calls)
+		}
+	}
+	// Collect again on every unit; a changed current source must not reuse
+	// the previous unit's eligible pin or another candidate's inventory.
+	e.collector = &preparationInventory{source: "192.0.2.11"}
+	got, _, _, err := e.preparationApproval(context.Background(), PreparationIntent{PathID: "p7", Controller: r.ControllerID})
+	if err != nil || got.Candidate.Pin.Source != "192.0.2.11" || got.Candidate.Pin.Table != full.Paths[7].Pin.Table {
+		t.Fatal("stale inventory or catalog slot", got, err)
+	}
+	e.collector = &preparationInventory{state: "down"}
+	if _, _, reason, err := e.preparationApproval(context.Background(), PreparationIntent{PathID: "p7", Controller: r.ControllerID}); err == nil || reason != "link_down" {
+		t.Fatal("current underlay failure ignored", reason, err)
+	}
+}
+
+func TestPreparationScopedInventoryPreservesFailClosedValidation(t *testing.T) {
+	for _, kind := range []string{"denied", "missing-path", "unmapped", "invalid-unrelated-config", "foreign-controller"} {
+		t.Run(kind, func(t *testing.T) {
+			e, _, _, _ := preparationFixture(t)
+			r, err := e.cache.Status()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := PreparationIntent{PathID: "p0", Controller: r.ControllerID}
+			switch kind {
+			case "denied":
+				if _, err := e.cache.Refresh(context.Background(), deniedIssuer{}); err == nil {
+					t.Fatal("denial missing")
+				}
+			case "missing-path":
+				p.PathID = "missing"
+			case "unmapped":
+				e.underlays = e.underlays[1:]
+			case "invalid-unrelated-config":
+				e.underlays[3].Interface = e.underlays[2].Interface
+			case "foreign-controller":
+				p.Controller = "foreign"
+			}
+			e.collector = preparationCollectFunc(func(context.Context, relayplan.Underlay, []string) relayplan.Inventory {
+				t.Fatal("invalid input triggered inventory collection", kind)
+				return relayplan.Inventory{}
+			})
+			got, _, _, err := e.preparationApproval(context.Background(), p)
+			if err == nil || got.Candidate.Pin != nil {
+				t.Fatal("invalid authority/configuration produced a candidate", got, err)
+			}
+		})
+	}
+}
