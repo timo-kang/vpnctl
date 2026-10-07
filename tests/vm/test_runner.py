@@ -635,6 +635,136 @@ class DirectInnerEvidenceTests(unittest.TestCase):
         vm.start_fixture.assert_not_called()
 
 class DirectGuestTests(unittest.TestCase):
+    def lifecycle_line(self, state='handshaking', reason='relay_route_preserved', suffix=''):
+        return ('time=2026-10-07T09:06:58.445Z level=INFO msg="direct dataplane" '
+                f'peer=node-1 state={state} reason="{reason}" generation={"a" * 32}{suffix}\n')
+
+    def test_lifecycle_export_preserves_initial_transition_after_warning_noise(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(guest_agent, 'ROOT', Path(root)), \
+             mock.patch.object(guest_agent, 'guard'), mock.patch.object(guest_agent, 'DIRECT_NODES', 2), \
+             mock.patch.object(guest_agent, 'WORKER') as worker:
+            worker.poll.return_value = 1
+            fixture = Path(root) / 'results/direct-dataplane-2-12345'
+            fixture.mkdir(parents=True)
+            (fixture / 'report.json').write_text('{"completed": false}')
+            (fixture / 'agent-0.log').write_text(self.lifecycle_line() + 'controller offline warning\n' * 4000 +
+                                                self.lifecycle_line('active', ''))
+            result = guest_agent.direct_result({'nodes': 2})['reports'][0]
+            self.assertNotIn('state=handshaking', result['logs']['agent-0.log'])
+            lifecycle = result['lifecycle']['agent-0.log']
+            self.assertEqual([e['state'] for e in lifecycle['events']], ['handshaking', 'active'])
+            self.assertFalse(lifecycle['scan_truncated'])
+            self.assertFalse(lifecycle['events_truncated'])
+            self.assertEqual(lifecycle['scanned_bytes'], lifecycle['source_bytes'])
+
+    def test_lifecycle_export_whitelists_fields_and_rejects_secret_lines(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(guest_agent, 'ROOT', Path(root)):
+            log = Path(root) / 'results/direct-dataplane-2-12345/agent-0.log'
+            log.parent.mkdir(parents=True)
+            log.write_text(self.lifecycle_line() + self.lifecycle_line(suffix=' token=secret-token') +
+                           self.lifecycle_line(reason='private_secret') + self.lifecycle_line(suffix=' unexpected=secret') +
+                           self.lifecycle_line().replace('peer=node-1', 'peer=secret-name'))
+            result = guest_agent.direct_lifecycle(log)
+            self.assertEqual(len(result['events']), 1)
+            self.assertEqual(set(result['events'][0]), {'time', 'peer', 'state', 'reason', 'generation'})
+            self.assertNotIn('secret', json.dumps(result))
+            self.assertEqual(result['redacted_lines'], 2)
+            self.assertEqual(result['malformed_lines'], 2)
+
+    def test_lifecycle_skips_entire_oversize_line_and_resumes(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(guest_agent, 'ROOT', Path(root)):
+            log = Path(root) / 'results/direct-dataplane-2-12345/agent-0.log'
+            log.parent.mkdir(parents=True)
+            log.write_bytes(self.lifecycle_line().rstrip().encode() + b'x' * 20000 + b' token=secret\n' +
+                            self.lifecycle_line('active', '').encode() + b'\xff malformed\n')
+            result = guest_agent.direct_lifecycle(log)
+            self.assertEqual([e['state'] for e in result['events']], ['active'])
+            self.assertEqual(result['long_lines_skipped'], 1)
+            self.assertNotIn('secret', json.dumps(result))
+
+    def test_lifecycle_scan_bound_is_explicit_and_discards_cut_line(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(guest_agent, 'ROOT', Path(root)), \
+             mock.patch.object(guest_agent, 'DIRECT_LIFECYCLE_SCAN_BYTES', 500):
+            log = Path(root) / 'results/direct-dataplane-2-12345/agent-0.log'
+            log.parent.mkdir(parents=True)
+            log.write_text(self.lifecycle_line() + 'x' * 1000 + '\n' + self.lifecycle_line('active', ''))
+            result = guest_agent.direct_lifecycle(log)
+            self.assertTrue(result['scan_truncated'])
+            self.assertEqual(result['scanned_bytes'], 500)
+            self.assertEqual([e['state'] for e in result['events']], ['handshaking'])
+
+    def test_lifecycle_event_bound_preserves_first_and_last_transitions(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(guest_agent, 'ROOT', Path(root)), \
+             mock.patch.object(guest_agent, 'DIRECT_LIFECYCLE_EVENTS', 4):
+            log = Path(root) / 'results/direct-dataplane-2-12345/agent-0.log'
+            log.parent.mkdir(parents=True)
+            states = ['handshaking', 'probing', 'active', 'relay_unverified', 'cooldown', 'handshaking']
+            log.write_text(''.join(self.lifecycle_line(s) for s in states))
+            result = guest_agent.direct_lifecycle(log)
+            self.assertEqual([e['state'] for e in result['events']], states[:2] + states[-2:])
+            self.assertTrue(result['events_truncated'])
+            self.assertEqual(result['events_omitted'], 2)
+
+    def test_lifecycle_tiny_line_flood_has_a_scan_work_bound(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(guest_agent, 'ROOT', Path(root)), \
+             mock.patch.object(guest_agent, 'DIRECT_LIFECYCLE_SCAN_LINES', 4):
+            log = Path(root) / 'results/direct-dataplane-2-12345/agent-0.log'
+            log.parent.mkdir(parents=True)
+            log.write_text('\n' * 10 + self.lifecycle_line())
+            result = guest_agent.direct_lifecycle(log)
+            self.assertEqual(result['lines_scanned'], 4)
+            self.assertEqual(result['scanned_bytes'], 4)
+            self.assertTrue(result['scan_truncated'])
+            self.assertEqual(result['events'], [])
+
+    def test_lifecycle_handles_unquoted_reasons_missing_generation_and_final_line(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(guest_agent, 'ROOT', Path(root)):
+            log = Path(root) / 'results/direct-dataplane-2-12345/agent-0.log'
+            log.parent.mkdir(parents=True)
+            log.write_text('time=2026-10-07T09:06:58Z level=INFO msg="direct dataplane" '
+                           'peer=node-31 state=pending reason=candidate_changed\n' +
+                           self.lifecycle_line().replace('reason="relay_route_preserved"',
+                                                         'reason=relay_route_preserved').rstrip())
+            result = guest_agent.direct_lifecycle(log)
+            self.assertEqual(len(result['events']), 2)
+            self.assertNotIn('generation', result['events'][0])
+            self.assertEqual(result['events'][1]['reason'], 'relay_route_preserved')
+            self.assertFalse(result['scan_truncated'])
+
+    def test_lifecycle_default_output_is_bounded_and_nonregular_files_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(guest_agent, 'ROOT', Path(root)):
+            fixture = Path(root) / 'results/direct-dataplane-2-12345'
+            fixture.mkdir(parents=True)
+            log = fixture / 'agent-0.log'
+            log.write_text(self.lifecycle_line(reason='x' * 64) * 2000)
+            result = guest_agent.direct_lifecycle(log)
+            self.assertEqual(len(result['events']), 512)
+            self.assertLessEqual(len(json.dumps(result).encode()), 160 * 1024)
+            directory = fixture / 'agent-1.log'
+            directory.mkdir()
+            with self.assertRaisesRegex(RuntimeError, 'regular file'):
+                guest_agent.direct_lifecycle(directory)
+            fifo = fixture / 'agent-2.log'
+            guest_agent.os.mkfifo(fifo)
+            with self.assertRaisesRegex(RuntimeError, 'regular file'):
+                guest_agent.direct_lifecycle(fifo)
+
+    def test_lifecycle_rejects_symlinks_and_nonpublic_names(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(guest_agent, 'ROOT', Path(root)):
+            fixture = Path(root) / 'results/direct-dataplane-2-12345'
+            fixture.mkdir(parents=True)
+            private = Path(root) / 'private.log'
+            private.write_text('token=secret')
+            log = fixture / 'agent-0.log'
+            log.symlink_to(private)
+            for path in (log, private, fixture / 'node.yaml'):
+                with self.subTest(path=path.name), self.assertRaises(RuntimeError):
+                    guest_agent.direct_lifecycle(path)
+            linked = Path(root) / 'results/direct-dataplane-2-linked'
+            linked.symlink_to(fixture, target_is_directory=True)
+            with self.assertRaises(RuntimeError):
+                guest_agent.direct_lifecycle(linked / 'agent-0.log')
+
     def test_requires_one_explicit_supported_size_before_launch(self):
         with mock.patch.object(guest_agent, 'guard'), mock.patch.object(guest_agent.subprocess, 'Popen') as launch:
             for req in ({}, {'nodes': True}, {'nodes': 4}, {'nodes': '2'}, {'nodes': '2,8'}, {'nodes': [2, 8]}):

@@ -5,11 +5,14 @@ import hashlib
 import errno
 import signal
 import os
+import re
+import stat
 import subprocess
 import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -190,12 +193,15 @@ def start_direct(req):
     return {'started': True, 'fixture_id': direct_fixture_id(nodes, fault),
             'nodes': nodes, 'fault_mode': fault, 'test': 'TestVMDirectDataplane'}
 
-def direct_artifact(path, limit, tail=False):
+def direct_artifact_guard(path, tail=False):
     # Never follow a named public artifact back into the fixture's private tree.
     allowed_root = ROOT if tail and path == ROOT / 'worker.log' else ROOT / 'results'
     if (path.is_symlink() or path.parent.is_symlink() or allowed_root.is_symlink()
             or not path.resolve().is_relative_to(allowed_root.resolve())):
         raise RuntimeError('unexpected direct artifact path')
+
+def direct_artifact(path, limit, tail=False):
+    direct_artifact_guard(path, tail)
     with path.open('rb') as stream:
         offset = max(0, path.stat().st_size - limit) if tail else 0
         stream.seek(offset)
@@ -212,6 +218,84 @@ def direct_artifact(path, limit, tail=False):
         # Replacement markers and invalid UTF-8 can expand the bounded input.
         text = text.encode()[-limit:].decode(errors='ignore')
     return text
+
+DIRECT_LIFECYCLE_SCAN_BYTES = 2 * 1024 * 1024
+DIRECT_LIFECYCLE_SCAN_LINES = 65536
+DIRECT_LIFECYCLE_EVENTS = 512
+DIRECT_LIFECYCLE_LINE_BYTES = 8192
+DIRECT_LIFECYCLE_PATTERN = re.compile(
+    r'time=(?P<time>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,18}(?:Z|[+-][0-9]{2}:[0-9]{2})) '
+    r'level=(?:INFO|WARN) msg="direct dataplane" '
+    r'peer=(?P<peer>node-(?:[0-9]|[12][0-9]|3[01])) '
+    r'state=(?P<state>pending|blocked|relay_unverified|cooldown|handshaking|probing|active) '
+    r'reason=(?P<reason>""|[a-z_]{1,64}|"[a-z_]{1,64}")'
+    r'(?: generation=(?P<generation>[a-f0-9]{32}))?')
+
+def direct_lifecycle(path):
+    # Warning floods can evict all transitions from the ordinary 32 KiB tail.
+    # Scan a bounded prefix separately and export only the lifecycle schema.
+    # Keep both early and late transitions within that scan, with explicit loss
+    # counts; this diagnostic never supplies evidence for a PASS verdict.
+    if not re.fullmatch(r'agent-(?:[0-9]|[12][0-9]|3[01])\.log', path.name):
+        raise RuntimeError('unexpected direct lifecycle artifact name')
+    direct_artifact_guard(path)
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    finally:
+        os.close(parent)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(fd)
+        raise RuntimeError('direct lifecycle artifact must be a regular file')
+    first, last = [], deque(maxlen=DIRECT_LIFECYCLE_EVENTS // 2)
+    count, scanned, lines = 0, 0, 0
+    out = dict(events=[], source_bytes=0, scanned_bytes=0, scan_truncated=False,
+               lines_scanned=0,
+               events_truncated=False, events_omitted=0, long_lines_skipped=0,
+               redacted_lines=0, malformed_lines=0)
+    with os.fdopen(fd, 'rb') as stream:
+        out['source_bytes'] = info.st_size
+        budget = min(info.st_size, DIRECT_LIFECYCLE_SCAN_BYTES)
+        dropping = False
+        while scanned < budget and lines < DIRECT_LIFECYCLE_SCAN_LINES:
+            raw = stream.readline(min(DIRECT_LIFECYCLE_LINE_BYTES + 1, budget - scanned))
+            if not raw:
+                break
+            scanned += len(raw)
+            if not dropping:
+                lines += 1
+            if dropping:
+                dropping = not raw.endswith(b'\n')
+                continue
+            if len(raw) > DIRECT_LIFECYCLE_LINE_BYTES:
+                out['long_lines_skipped'] += 1
+                dropping = not raw.endswith(b'\n')
+                continue
+            if not raw.endswith(b'\n') and scanned < info.st_size:
+                # A scan boundary must not turn a partial line into a record.
+                break
+            line = raw.decode(errors='replace').strip()
+            if 'msg="direct dataplane"' not in line:
+                continue
+            if any(word in line.lower() for word in ('token', 'private', 'key', 'credential')):
+                out['redacted_lines'] += 1
+                continue
+            match = DIRECT_LIFECYCLE_PATTERN.fullmatch(line)
+            if not match:
+                out['malformed_lines'] += 1
+                continue
+            event = {k: v.strip('"') for k, v in match.groupdict().items() if v is not None}
+            count += 1
+            if len(first) < DIRECT_LIFECYCLE_EVENTS - last.maxlen:
+                first.append(event)
+            else:
+                last.append(event)
+    out.update(events=first + list(last), scanned_bytes=scanned, lines_scanned=lines,
+               scan_truncated=scanned < out['source_bytes'],
+               events_truncated=count > DIRECT_LIFECYCLE_EVENTS,
+               events_omitted=max(0, count - DIRECT_LIFECYCLE_EVENTS))
+    return out
 
 def direct_result(req):
     guard()
@@ -233,7 +317,7 @@ def direct_result(req):
             if len(result['reports']) >= 4:
                 raise RuntimeError('too many direct fixture reports')
             row = {'fixture': report.parent.name,
-                   'report': json.loads(direct_artifact(report, 8 * 1024 * 1024)), 'logs': {}}
+                   'report': json.loads(direct_artifact(report, 8 * 1024 * 1024)), 'logs': {}, 'lifecycle': {}}
             packets = report.parent / 'retry-packets.jsonl'
             if packets.exists() or packets.is_symlink():
                 row['logs'][packets.name] = direct_artifact(packets, 512 * 1024)
@@ -241,6 +325,8 @@ def direct_result(req):
                 path = report.parent / name
                 if path.exists() or path.is_symlink():
                     row['logs'][name] = direct_artifact(path, 32768, tail=True)
+                    if name.startswith('agent-'):
+                        row['lifecycle'][name] = direct_lifecycle(path)
             result['reports'].append(row)
     return result
 
