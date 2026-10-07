@@ -7,6 +7,14 @@ network namespaces in an identity-guarded guest. Four/eight candidates mean two
 relays × two/four approved virtual Ethernet underlays. The independent second
 application is pinned to relay 1 / underlay 1 to detect unintended disruption.
 
+The pinned application's reconcile loop probes only candidates its immutable
+selection policy permits. Its other seven candidates in the eight-path profile
+remain visible as policy exclusions, and every candidate still receives lease
+maintenance and revocation enforcement. Probing all eight for a manual pin held
+the shared FIFO lock long enough to reset an unaffected application's 10-second
+health history on a slower runner (#183). The full automatic candidate sweep,
+freshness thresholds, lease deadlines and all traffic assertions are unchanged.
+
 ```sh
 VPNCTL_ARTIFACT_DIR=/absolute/new-empty-results ./scripts/test-manager-auto.sh
 # Independent repeats: each case boots a fresh disposable VM.

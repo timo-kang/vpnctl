@@ -97,6 +97,19 @@ func New(policy Policy) (*Selector, error) {
 	return &Selector{policy: policy, histories: map[string]*history{}, now: time.Now, boot: bootTime}, nil
 }
 
+// ObservationExclusion identifies candidates that this immutable policy cannot
+// select, even with perfect health. Skipping their socket proofs grants no
+// eligibility; Decide still validates every observation and applies the policy.
+func (s *Selector) ObservationExclusion(path string, cost int) string {
+	if s.policy.Mode == "manual" && path != s.policy.ManualPin {
+		return "manual_pin"
+	}
+	if s.policy.MaxCost >= 0 && cost > s.policy.MaxCost {
+		return "cost_limit"
+	}
+	return ""
+}
+
 // RecordApplied anchors dwell to the actual verified change, including rollback.
 // It grants no eligibility: the next Decide still needs fresh candidate evidence.
 func (s *Selector) RecordApplied(path string, changedAt time.Time) {

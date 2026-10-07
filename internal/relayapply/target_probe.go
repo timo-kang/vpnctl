@@ -51,6 +51,14 @@ func (e *Engine) candidateProbe() func(context.Context, Entry, relaycatalog.Targ
 }
 
 func (e *Engine) observeTarget(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) (out TargetReport, err error) {
+	return e.observeTargetFiltered(parent, targetID, controller, timeout, probe, nil)
+}
+
+// A reconcile cycle can omit proofs for candidates its immutable policy cannot
+// select. Keep their diagnostic rows and maintain ALL candidate leases before
+// probing; a target-specific exclusion must never exempt another candidate from
+// approval, consent, inventory or kernel enforcement.
+func (e *Engine) observeTargetFiltered(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), exclude func(string, int) string) (out TargetReport, err error) {
 	parent, recorder := relayobserve.Start(parent)
 	defer func() { out.Diagnostics = recorder.Snapshot() }()
 	out = TargetReport{SchemaVersion: 1, TargetID: targetID, StartedAt: time.Now(), Paths: []TargetObservation{}}
@@ -123,11 +131,17 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 			continue
 		}
 		observation := TargetObservation{PathID: path.ID, RelayID: path.RelayID, UnderlayID: path.UnderlayID, Priority: path.Priority, Cost: path.Cost, State: "unknown", ObservedAt: time.Now()}
+		policyExclusion := ""
+		if exclude != nil {
+			policyExclusion = exclude(path.ID, path.Cost)
+		}
 		switch {
 		case path.Disabled:
 			observation.State, observation.Reason = "excluded", "disabled"
 		case path.Drain:
 			observation.State, observation.Reason = "excluded", "draining"
+		case policyExclusion != "":
+			observation.State, observation.Reason = "excluded", policyExclusion
 		default:
 			i := e.index(path.ID)
 			if i < 0 {
