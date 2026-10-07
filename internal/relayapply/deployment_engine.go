@@ -203,12 +203,12 @@ func (e *DeploymentEngine) Apply(ctx context.Context, o DeploymentOptions) (Depl
 	}
 	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
 	defer cancel()
-	if e.installationIndex(o.EndpointID) >= 0 {
-		return e.result("blocked", "release_automatic_intent_first"), ErrConflict
-	}
 	r, err := e.enforce(ctx)
 	if err != nil {
 		return e.result("blocked", "approval_or_cleanup_failed"), err
+	}
+	if e.installationIndex(o.EndpointID) >= 0 {
+		return e.result("blocked", "release_automatic_intent_first"), ErrConflict
 	}
 	v, err := desiredDeployment(r, o.EndpointID, o.ListenPort)
 	if err != nil {
@@ -407,7 +407,7 @@ func (e *DeploymentEngine) Maintain(ctx context.Context, authenticatedAt FreshAp
 	checked := make(map[string]bool, len(e.journal.Entries))
 	for _, v := range e.journal.Entries {
 		want, approvalErr := desiredDeployment(r, v.Endpoint, v.ListenPort)
-		if approvalErr != nil || !sameDeployment(v, want) {
+		if approvalErr != nil || e.installationAuthorized(v.Endpoint, want) != nil || !sameDeployment(v, want) {
 			continue // enforce has already attempted to quiesce this entry.
 		}
 		// Opt-in preparation advances behind closed kernel guards. Do not

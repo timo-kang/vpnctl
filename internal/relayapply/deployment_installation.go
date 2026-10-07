@@ -23,19 +23,20 @@ var deploymentInstallSteps = []string{"guard", "link", "tag", "wg", "up", "route
 // or proof of kernel ownership. KeyFile is only a reference to an external key;
 // it is never included in public reports. Version 2 refuses old-binary adoption.
 type deploymentInstallation struct {
-	Endpoint      string `json:"endpoint_id"`
-	Controller    string `json:"controller_id"`
-	PublicKey     string `json:"public_key"`
-	KeyGeneration uint64 `json:"key_generation"`
-	ListenPort    int    `json:"listen_port"`
-	KeyFile       string `json:"key_file"`
-	Revision      string `json:"revision"`
-	Step          int    `json:"step"`
-	InFlight      bool   `json:"in_flight,omitempty"`
-	Failures      int    `json:"failures,omitempty"`
-	RetryBootNS   uint64 `json:"retry_boot_ns,omitempty"`
-	Attempts      uint64 `json:"attempts,omitempty"`
-	Reason        string `json:"reason,omitempty"`
+	Endpoint          string `json:"endpoint_id"`
+	Controller        string `json:"controller_id"`
+	PublicKey         string `json:"public_key"`
+	KeyGeneration     uint64 `json:"key_generation"`
+	ListenPort        int    `json:"listen_port"`
+	KeyFile           string `json:"key_file"`
+	Revision          string `json:"revision"`
+	Step              int    `json:"step"`
+	InFlight          bool   `json:"in_flight,omitempty"`
+	Failures          int    `json:"failures,omitempty"`
+	RetryBootNS       uint64 `json:"retry_boot_ns,omitempty"`
+	Attempts          uint64 `json:"attempts,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	LastAttemptReason string `json:"last_attempt_reason,omitempty"`
 }
 
 type DeploymentInstallationStatus struct {
@@ -118,13 +119,13 @@ func (e *DeploymentEngine) installationStatus() []DeploymentInstallationStatus {
 		if i := e.index(p.Endpoint); i >= 0 {
 			phase = e.journal.Entries[i].Phase
 		}
-		reason := p.Reason
+		reason := ""
 		if err != nil {
 			reason = "installation_consent_unavailable"
 		} else if !allowed {
 			reason = "installation_consent_revoked"
 		}
-		out = append(out, DeploymentInstallationStatus{EndpointID: p.Endpoint, Revision: p.Revision, ControllerID: p.Controller, KeyGeneration: p.KeyGeneration, ListenPort: p.ListenPort, Enabled: allowed && err == nil, Phase: phase, Step: p.Step, InFlight: p.InFlight, Attempts: p.Attempts, RetryBootNS: p.RetryBootNS, Reason: reason})
+		out = append(out, DeploymentInstallationStatus{EndpointID: p.Endpoint, Revision: p.Revision, ControllerID: p.Controller, KeyGeneration: p.KeyGeneration, ListenPort: p.ListenPort, Enabled: allowed && err == nil, Phase: phase, Step: p.Step, InFlight: p.InFlight, Attempts: p.Attempts, RetryBootNS: p.RetryBootNS, Reason: reason, LastAttemptReason: p.Reason})
 	}
 	return out
 }
@@ -139,6 +140,8 @@ func (e *DeploymentEngine) RequestInstallation(ctx context.Context, o Deployment
 	if err := e.begin(); err != nil {
 		return e.result("blocked", "reopen_required"), err
 	}
+	ctx, cancel := context.WithTimeout(ctx, MaxDuration)
+	defer cancel()
 	if ctx.Err() != nil {
 		return e.result("blocked", "deadline"), ctx.Err()
 	}
@@ -146,9 +149,9 @@ func (e *DeploymentEngine) RequestInstallation(ctx context.Context, o Deployment
 	if err != nil || o.KeyFile == "" || !validInstallKeyReference(path) {
 		return e.result("blocked", "invalid_key_reference"), ErrConflict
 	}
-	r, err := e.cache.Status()
+	r, err := e.enforce(ctx)
 	if err != nil {
-		return e.result("blocked", "approval_unavailable"), err
+		return e.result("blocked", "approval_or_cleanup_failed"), err
 	}
 	want, err := desiredDeployment(r, o.EndpointID, o.ListenPort)
 	if err != nil {

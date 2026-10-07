@@ -417,3 +417,38 @@ func TestRelayInstallationOwnedDriftAndForeignPreservation(t *testing.T) {
 		})
 	}
 }
+
+type failedInstallationDown struct {
+	deploymentBackend
+	renewals int
+}
+
+func (b *failedInstallationDown) Down(context.Context, DeploymentEntry) error {
+	return errors.New("temporary cleanup failure")
+}
+func (b *failedInstallationDown) Lease(ctx context.Context, entry DeploymentEntry, until time.Time, fresh FreshApproval) (DeploymentLease, error) {
+	b.renewals++
+	return b.deploymentBackend.Lease(ctx, entry, until, fresh)
+}
+func TestRelayInstallationRevokedConsentCannotRenewAfterCleanupFailure(t *testing.T) {
+	e, k, c, _, o, _ := deploymentFixture(t, 1)
+	if _, err := e.RequestInstallation(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	installationReady(t, e)
+	if _, err := e.Maintain(context.Background(), installationWitness(t)); err != nil {
+		t.Fatal(err)
+	}
+	before := k.objects[o.EndpointID].lease.Deadline
+	if err := c.RevokeInstallation(o.EndpointID); err != nil {
+		t.Fatal(err)
+	}
+	b := &failedInstallationDown{deploymentBackend: e.backend}
+	e.backend = b
+	if _, err := e.Maintain(context.Background(), installationWitness(t)); err == nil {
+		t.Fatal("cleanup failure hidden")
+	}
+	if b.renewals != 0 || !k.objects[o.EndpointID].lease.Deadline.Equal(before) {
+		t.Fatal("revoked consent extended traffic after failed cleanup")
+	}
+}

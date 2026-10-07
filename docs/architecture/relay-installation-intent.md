@@ -57,7 +57,7 @@ after accepted opt-out cannot restore that consent. A failed unlink/directory
 sync is reported as an uncommitted release, never a successful opt-out.
 
 Public `installations` reports distinguish consent, configuration phase, cursor,
-attempt count, bounded retry deadline and blocking reason from actual endpoints
+attempt count, bounded retry deadline, consent failure and last attempt reason from actual endpoints
 and `kernel_ready`. Neither an empty inventory nor configured peers prove uplink
 reachability; the node's actual target probes and application traffic remain the
 data-plane evidence.
