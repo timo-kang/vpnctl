@@ -35,6 +35,12 @@ type targetProof struct {
 	rx, tx    uint64
 }
 
+func entryFingerprint(entry Entry) string {
+	b, _ := json.Marshal(entry)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 // ObserveTarget holds the same cache and namespace locks as prepare. No route,
 // peer, interface or policy-routing rule is changed. Protected candidates cooperatively renew
 // their leases before a bounded probe wave while holding the shared lock. Each TCP socket pins both the approved
@@ -222,6 +228,11 @@ func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target r
 		defer cancel()
 	}
 	check := e.backend.Check
+	if k, ok := e.backend.(nodeKernel); ok {
+		// This function checks the live lease at both proof boundaries itself,
+		// including single-candidate revalidation outside a shared wave.
+		check = k.kernel.Check
+	}
 	if shared, ok := ctx.Value(observationCheckerKey{}).(observationChecker); ok {
 		check = shared
 	}
@@ -256,9 +267,7 @@ func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target r
 		return finish("unknown", "lease_inactive")
 	}
 	// Bind evidence to the installed resource generation, not a reusable path ID.
-	b, _ := json.Marshal(entry)
-	sum := sha256.Sum256(b)
-	out.Fingerprint = hex.EncodeToString(sum[:])
+	out.Fingerprint = entryFingerprint(entry)
 	ready, err := check(ctx, entry, false)
 	if err != nil || !ready {
 		return finish("unknown", "kernel_conflict_or_unavailable")

@@ -28,6 +28,12 @@ networkd, udev, nft and route commands affect only the guest. The host's Wi-Fi,
 kernel modules, network, clocks and power state are never test targets. Each
 invocation gets a new artifact directory; failed experiments remain available.
 
+`VPNCTL_VM_CPUS=0.5` or `0.25` reduces only the test container's CPU quota for
+contention experiments; the default remains one CPU. Both the source manifest
+and isolation report record the quota. Guest clocks, lease deadlines, probe
+timeouts and convergence limits are unchanged. This is CPU pressure testing,
+not a claim that throttling reproduces a particular runner's instruction speed.
+
 ## Scenarios and functional requirements
 
 The matrix performs NM profile down/up, relay uplink loss, all-relay loss,
@@ -111,6 +117,14 @@ its existing 750ms shared budget and 500ms reserve for each additional unit.
 This avoids rejoining two busy application watchers after every pair of tiny
 operations; slow operations retain the same deadline and yielding conditions.
 The 120-second convergence watchdog is unchanged.
+
+Keeping an already active route uses its exact current decision fingerprint and
+underlay generation followed by a fresh unbound application TCP proof, with
+live approval/lease/inventory/ownership/routes checked before and after it. It
+does not run a second bound candidate TCP proof after the observation wave.
+Changing or rolling back a route retains bound candidate revalidation before
+mutation. Duplicate middle lease reads are removed; every proof boundary still
+reads the live gates. This reduces lock contention without extending authority.
 This clock excludes suspend; these scenarios do not suspend. These diagnostics
 never authorize communication or replace BOOTTIME lease enforcement.
 `observation_complete`, `decision_complete`, `target_routes_applied`,
