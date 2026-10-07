@@ -468,3 +468,111 @@ confirmation gap. The intermediate native-read-only result and its marginal
 local hardware, not a guaranteed minimum CPU specification or p95 estimate.
 Final remote CI uses its original whole-VM 1 CPU / robot 0.5 CPU profile, including
 separate four- and eight-candidate cases. Its pass is required independently.
+
+## Observation ordering investigation (2026-10-08, #193)
+
+A separate deterministic scheduling counterexample runs the actual observation
+and default selector paths with fake kernel/transport boundaries. With eight
+100ms prechecks, a 900ms healthy TCP proof, seven 1s failures, and cycle starts
+9.5s apart, all proofs overlap and each wave completes within 3s. Moving the
+healthy candidate from first to last precheck admission in the third wave changes
+its proof interval from 9.5s to 10.2s. The unchanged selector correctly resets its
+confirmation count from two to one and clears the desired path. Merely launching
+goroutines in catalog order does not control their admission order.
+
+The reproduction, including a race RED run, is preserved in
+`/tmp/vpnctl-observation-order-repro`. This proves an independent source of
+confirmation jitter; it does not identify the missing failure cycle of #186.
+Nor does it explain away the 6.083s second admission and 22.007s first payload
+recorded in the final PR #192 remote CPU8 run. Stabilizing local precheck order
+cannot remove CPU saturation, filesystem delays, long admission waits, or
+changes in the candidate population or actual transport timing.
+
+### Measurements and rejected alternatives
+
+Diagnostic builds based on main `9fe6147` ran the eight-path/two-application race
+fixture with both the whole VM and robot quota at 0.5 CPU on the same local
+hardware. `/tmp/vpnctl-startup-profile-v1` records parent Go CPU profiles;
+`/tmp/vpnctl-startup-profile-v2` also records child user/system CPU, without
+arguments, command input, or secrets. All three healthy positions passed in
+both baseline runs. The latter first-payload samples were 12.832/11.204/13.305s
+(positions 0/3/7); app/app2 maximum fresh-observation gaps were
+8.792/9.149s, 7.471/7.803s and 8.815/9.524s. They are individual observations,
+not percentile estimates or deployment minimum specifications.
+
+Parent Go CPU profiles omit child CPU. For example, position 3's first watcher
+used 1.78s of Go CPU over 34.29s in the first diagnostic. In the second diagnostic,
+the same role issued 300 nft reads totaling 0.545s child CPU and 2.185s summed
+command wall time. Other positions/roles issued 300–380 nft reads. Summed child
+wall durations can overlap and are not total elapsed time.
+
+Two proposed optimizations were rejected before commit:
+
+- Decoded ownership-inventory reuse: a realistic eight-candidate benchmark cost
+  only 25.08–25.49ms for 16 race snapshots, or 87.51–89.60ms for 56. This isolated
+  JSON parsing measurement cannot explain seconds of admission delay; it does
+  not justify another cache. Source/overlay/profiles are preserved in
+  `/tmp/vpnctl-inventory-parse-profile-fj4eryvb`.
+- Combining `nft list flowtables` and a table-scoped lease read in one invocation:
+  actual nft 1.0.9 emits two JSON documents, and more seriously **omits foreign
+  flowtables from the first document** when combined with the scoped table read.
+  Standalone reads see the installed object in each of `inet`, `ip`, and `ip6`.
+  The real protocol test rejected the candidate in
+  `/tmp/vpnctl-startup-profile-v4`; its bounded worker failure is in
+  `observer.jsonl` under `failure-diagnostics`. Standalone/batch comparisons are
+  in `/tmp/vpnctl-nft-protocol-diagnostic-v4`. These short protocol probes are
+  diagnostic only, not capacity passes. The earlier malformed candidate run
+  `/tmp/vpnctl-startup-profile-v3` and all intermediate diagnostics remain
+  preserved. The experimental source is archived in
+  `/tmp/vpnctl-rejected-nft-batch`. Main retains independent fresh nft reads;
+  no lease/flowtable cache or combined invocation is shipped.
+
+### Ordered precheck admission
+
+Each wave now links its actual jobs in catalog order. A job's precheck waits for
+its predecessor's precheck to finish, including failure or cancellation; then
+both prechecks and postchecks use the existing shared check gate. Releasing a
+precheck lets the next candidate proceed without waiting for TCP. All workers
+are still joined before releasing cache/namespace ownership. Policy-excluded
+candidates retain their diagnostic rows and lease maintenance but do not create
+holes in the admission chain. A single-candidate revalidation remains unchanged.
+
+This adds no approval, timer or kernel-state cache. It does not change the 3s
+wave, 10s freshness, TCP limit, selector thresholds, or kernel enforcement.
+Candidates late in catalog order still need sufficient budget; order is not a
+substitute for capacity qualification. Population/catalog changes and differing
+postcheck or transport costs may still shift proof timestamps.
+
+The original forced-arrival selector counterexample now retains a 9.5s proof
+gap, two confirmations and the same healthy desired path even when goroutines
+arrive in reverse position. Both versions retain eight overlapping proofs. The
+fixed-source overlay and evidence are preserved separately under
+`/tmp/vpnctl-observation-order-repro-fixed`; the original RED is untouched.
+Permanent tests exercise actual multi-wave admission with all eight and six
+policy-included candidates, reverse arrivals independent of runtime scheduling,
+reversed proof completion, first-precheck failure, cancellation and the exact
+wave deadline. These are scheduling/functional assertions, not CPU benchmarks.
+
+Self-review also found a deadline-reporting race in synthetic time: a candidate
+could finish at exactly 3s with all paths unknown and all workers joined, while
+the shared context had not yet published its deadline error. The batch omitted
+`observation_budget_exhausted`. The final check now also compares the actual
+shared deadline after joining workers. The strict test requires the reason as
+well as the unchanged hard deadline and zero healthy evidence; it does not
+accept a missing diagnostic as a successful deadline check.
+
+The ordered-admission diagnostic build (before the final deadline-reporting
+adjustment) passed all three eight-path positions with the same whole-VM 0.5 CPU,
+robot 0.5 CPU, race and profiling setup as the baseline above. Evidence:
+`/tmp/vpnctl-startup-order-profile-v1`.
+
+| Healthy index | First payload | Maximum app gap | Maximum app2 gap |
+| --- | ---: | ---: | ---: |
+| 0 | 11.462s | 7.164s | 7.663s |
+| 3 | 12.104s | 7.295s | 7.707s |
+| 7 | 11.119s | 8.194s | 8.018s |
+
+The position-3 startup is slower than its single baseline sample; these samples
+show functional success and preserved freshness under this local profile, not a
+statistically established performance gain. Final uninstrumented source and
+remote CI evidence are required separately before merging.

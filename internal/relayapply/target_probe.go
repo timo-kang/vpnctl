@@ -175,9 +175,13 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 		// lease/guard/timer data is shared or cached.
 		wave = context.WithValue(wave, observationCheckerKey{}, observationChecker(k.kernel.Check))
 	}
-	gate := make(chan struct{}, 1)
+	checks := make(chan struct{}, 1)
+	ready := make(chan struct{})
+	close(ready)
 	var workers sync.WaitGroup
 	for _, job := range jobs {
+		gate := &observationGate{checks: checks, ready: ready, next: make(chan struct{})}
+		ready = gate.next
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -185,7 +189,10 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 		}()
 	}
 	workers.Wait() // No probe may outlive the cache/namespace ownership.
-	if errors.Is(wave.Err(), context.DeadlineExceeded) {
+	// A candidate's deadline callback can finish its worker before the shared
+	// context publishes Err. Report exhaustion from the deadline itself too.
+	deadline, _ := wave.Deadline() // WithTimeout above always supplies one.
+	if errors.Is(wave.Err(), context.DeadlineExceeded) || !time.Now().Before(deadline) {
 		out.Reason = "observation_budget_exhausted"
 	}
 
@@ -229,7 +236,7 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 
 // Only the socket proof may overlap. Approval/cache, inventory, kernel checks
 // and any fail-closed lease mutation use the shared, context-bounded gate.
-func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), gate chan struct{}) TargetObservation {
+func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), gate *observationGate) TargetObservation {
 	if entry.LeaseVersion != 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, targetObservationWaveDuration)
@@ -483,15 +490,35 @@ func (k kernel) targetRoute(ctx context.Context, entry Entry, target relaycatalo
 	return nil
 }
 
-func observationStage(ctx context.Context, phase string, gate chan struct{}) (context.Context, func(), error) {
+// All checks remain serialized. Prechecks additionally wait for their preceding
+// catalog job, so goroutine arrival order cannot move a healthy proof from the
+// front to the back between waves. Releasing a precheck admits the next job
+// before TCP begins; it never waits for that TCP to finish. Postchecks can still
+// acquire the shared checks gate while other candidates are probing.
+type observationGate struct {
+	checks chan struct{}
+	ready  <-chan struct{}
+	next   chan struct{}
+}
+
+func observationStage(ctx context.Context, phase string, gate *observationGate) (context.Context, func(), error) {
 	ctx, done := relayobserve.Phase(ctx, phase)
 	if gate == nil {
 		return ctx, done, ctx.Err()
 	}
+	if phase == "precheck" {
+		finish := done
+		done = func() { finish(); close(gate.next) }
+		select {
+		case <-ctx.Done():
+			return ctx, done, ctx.Err()
+		case <-gate.ready:
+		}
+	}
 	select {
 	case <-ctx.Done():
 		return ctx, done, ctx.Err()
-	case gate <- struct{}{}:
-		return ctx, func() { <-gate; done() }, ctx.Err()
+	case gate.checks <- struct{}{}:
+		return ctx, func() { <-gate.checks; done() }, ctx.Err()
 	}
 }
