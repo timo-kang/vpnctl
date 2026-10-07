@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """External monotonic observer for one disposable VM in a bounded container."""
 import argparse
+import contextlib
 import datetime
 import hashlib
 import json
@@ -862,6 +863,40 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5'):
     result['final'] = vm.call('fixture/snapshot')
     return result
 
+def container_resource_sample(root):
+    # Read this QEMU container only. Guest robot counters have a different scope;
+    # neither scope establishes a per-role CPU rate without an elapsed interval.
+    sample = {'started_monotonic_ns': time.monotonic_ns(), 'unavailable': []}
+    for name in ('cpu.max', 'cpu.stat', 'cpu.pressure'):
+        try:
+            with (root / name).open('rb') as file:
+                raw = file.read(4097)
+            if len(raw) > 4096:
+                raise ValueError('oversized resource evidence')
+            value = raw.decode('utf-8').strip()
+            if not value:
+                raise ValueError('empty resource evidence')
+            sample[name.replace('.', '_')] = value
+        except (OSError, UnicodeError, ValueError):
+            # Diagnostic failure must not hide the original test result or stop
+            # VM cleanup. Missing data is explicit, never a zero-usage sample.
+            sample['unavailable'].append(name)
+    sample['finished_monotonic_ns'] = time.monotonic_ns()
+    return sample
+
+
+@contextlib.contextmanager
+def record_container_resources(verdict, root=Path('/sys/fs/cgroup')):
+    evidence = {'scope': 'qemu-and-observer-container',
+                'interval': 'exercise-including-boot-and-setup',
+                'before': container_resource_sample(root)}
+    verdict['container_resources'] = evidence
+    try:
+        yield
+    finally:
+        evidence['after'] = container_resource_sample(root)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
@@ -909,7 +944,8 @@ def main():
         vm = VM('/work/vm-' + uuid.uuid4().hex[:8], '/results/' + label + '-' + uuid.uuid4().hex[:8], rtc)
         verdict = {'schema_version': 1, 'case': case, 'mode': mode, 'delta': delta, 'rtc': rtc, 'completed': False, 'qualified': False}
         try:
-            exercise(vm, case, mode, delta, verdict, args.robot_cpus)
+            with record_container_resources(verdict):
+                exercise(vm, case, mode, delta, verdict, args.robot_cpus)
             verdict['completed'] = True
             if 'unsupported_reason' not in verdict and 'defect_reason' not in verdict:
                 verdict['qualified'] = True

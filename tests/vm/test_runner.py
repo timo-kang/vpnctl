@@ -44,6 +44,59 @@ class IsolationTests(unittest.TestCase):
     def test_accepts_only_matching_isolated_guest_identity(self):
         self.guard('guest-boot', 'guest-uuid')
 
+class ContainerResourceTests(unittest.TestCase):
+    def files(self, root):
+        for name, value in [('cpu.max', '50000 100000\n'),
+                            ('cpu.stat', 'usage_usec 100\nnr_throttled 1\nthrottled_usec 10\n'),
+                            ('cpu.pressure', 'some avg10=12.00 avg60=3.00 avg300=1.00 total=100\n')]:
+            (root / name).write_text(value)
+
+    def test_records_fresh_case_samples_even_when_exercise_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.files(root)
+            verdict = {'completed': False, 'qualified': False}
+            with self.assertRaisesRegex(RuntimeError, 'original failure'):
+                with observer.record_container_resources(verdict, root):
+                    (root / 'cpu.stat').write_text('usage_usec 200\nnr_throttled 2\nthrottled_usec 20\n')
+                    (root / 'cpu.pressure').unlink()
+                    raise RuntimeError('original failure')
+            evidence = verdict['container_resources']
+            self.assertEqual(evidence['scope'], 'qemu-and-observer-container')
+            self.assertIn('usage_usec 100', evidence['before']['cpu_stat'])
+            self.assertIn('usage_usec 200', evidence['after']['cpu_stat'])
+            self.assertEqual(evidence['before']['cpu_max'], '50000 100000')
+            self.assertLessEqual(evidence['before']['finished_monotonic_ns'], evidence['after']['started_monotonic_ns'])
+            self.assertEqual(evidence['before']['unavailable'], [])
+            self.assertEqual(evidence['after']['unavailable'], ['cpu.pressure'])
+            self.assertFalse(verdict['qualified'])
+            self.assertFalse(verdict['completed'])
+
+    def test_missing_oversized_and_malformed_evidence_cannot_mask_result(self):
+        for mode in ('missing', 'empty', 'oversized', 'encoding'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.files(root)
+                path = root / 'cpu.pressure'
+                if mode == 'missing':
+                    path.unlink()
+                elif mode == 'empty':
+                    path.write_text(' \n')
+                elif mode == 'oversized':
+                    path.write_text('x' * 4097)
+                else:
+                    path.write_bytes(b'\xff')
+                verdict = {'completed': True, 'qualified': True}
+                with observer.record_container_resources(verdict, root):
+                    pass
+                evidence = verdict['container_resources']
+                for phase in ('before', 'after'):
+                    self.assertEqual(evidence[phase]['unavailable'], ['cpu.pressure'])
+                    self.assertNotIn('cpu_pressure', evidence[phase])
+                    self.assertIn('cpu_stat', evidence[phase])
+                self.assertTrue(verdict['qualified'])
+                self.assertTrue(verdict['completed'])
+
 class ObserverTests(unittest.TestCase):
     def test_permissive_gate_is_detected_even_when_tcp_is_blocked_elsewhere(self):
         rows = [{'table': {'name': 'vltest'}},

@@ -704,3 +704,53 @@ The 750ms budget, 500ms creation reserve and live ownership/authority checks are
 unchanged. This removes a demonstrated wasted admission; it does not prove that
 the original remote 120-second bound now holds under arbitrary contention.
 The broader recovery and deployment-capacity work remain in #195 and #185.
+
+
+## Repeated remote CPU8 failure and outer-container evidence (2026-10-08)
+
+The combined `c77faaf` revision failed [CPU8 run 37658075568](https://github.com/timo-kang/vpnctl/actions/runs/37658075568/job/112918231410)
+on EPYC 9V74, with the unchanged race build, one guest vCPU, whole-VM 1 CPU,
+and robot-only 0.5 CPU profile. Positions 0 and 3 passed. Position 7 recorded
+successful app proofs 10.656s and 10.776s apart and one exhausted 3s wave;
+app2 subsequently had an 11.437s interval and was quarantined. The 10s
+freshness rule correctly rejected the lost continuity. The raw failure is
+preserved in `/tmp/vpnctl-final-cpu8-failure`; this is a real execution failure,
+separate from earlier GitHub runner-acquisition errors. PR #200 was not merged.
+
+Robot cgroup throttled time grew by only about 0.168s during the failed
+position. Long ownership waits and increased maintenance/proof times remain
+visible, but the original artifact has no outer QEMU-container usage/pressure
+interval. Robot quota exhaustion, whole-guest competition, and outer-container
+throttling cannot be treated as interchangeable explanations.
+
+The observer now records `container_resources` on every case, including a
+failed exercise. Its scope is **QEMU plus observer in the bounded outer
+container**. Before/after samples contain `cpu.max`, `cpu.stat`, `cpu.pressure`,
+and monotonic start/end timestamps surrounding each sample. The interval
+includes guest boot and fixture setup; it excludes failure diagnostics and VM
+teardown. It is neither per-position nor robot-only accounting. Read errors,
+empty/oversized files and invalid text mark that file unavailable instead of
+inventing zero usage. Diagnostic availability does not change the original
+completed/qualified result or mask its exception. Unit regressions verify both
+success/failure preservation and missing-data handling.
+
+Two unchanged local `c77faaf` race baselines used the same cached image,
+Ryzen 9800X3D, whole-VM 0.5 CPU and robot 0.5 CPU. Both passed all three
+positions. Their largest fresh gaps were respectively 7.792s and 8.621s;
+first payload ranged from 11.319s to 12.381s. Artifacts are
+`/tmp/vpnctl-precheck-barrier-baseline` and
+`/tmp/vpnctl-precheck-barrier-baseline-2`. These samples demonstrate local
+variation, not a fix or reproduction of the remote capacity failure.
+
+A separate deterministic scheduling counterexample uses eight 180ms
+prechecks, eight 160ms postchecks, seven 10ms failed TCP attempts and a final
+900ms healthy TCP. Early postchecks delay the final TCP start to 2.4s, so the
+existing 3s wave expires. Prioritizing all prechecks could fit this workload in
+2.72s, but would block an earlier healthy candidate's postcheck behind a late
+stalled precheck. That unconditional barrier was rejected; no scheduler or
+freshness policy change is included. The independent RED and safety controls
+are preserved in `/tmp/vpnctl-postcheck-priority-repro-vgraht0s`.
+
+The deployment resource envelope and separation of controller/relay/measurement
+CPU from the robot remain open under #185. Additional diagnostic data is not a
+capacity pass or an M3 deployment qualification.
