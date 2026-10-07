@@ -28,7 +28,11 @@ The supervisor first enforces current approval and maintains existing endpoint
 leases. Rebuilding then advances at most one durable work unit within a 750ms
 wall/BOOTTIME budget and the existing five-second cycle. It never gets the manual
 CLI's independent cleanup deadline. The durable round-robin cursor prevents one
-endpoint from monopolizing successful creation. Failures back off for 1, 2, 4, 8,
+endpoint from monopolizing creation, including when its consent cannot be read,
+its key is unavailable, or revoked-consent cleanup fails. A failed endpoint and
+its retry deadline are recorded together; the next cycle starts at the next
+intent even after a restart or an elapsed retry deadline. A journal failure
+blocks further work until reopen. Failures back off for 1, 2, 4, 8,
 16, then 30 seconds in BOOTTIME; at most eight intents and endpoints are stored.
 
 Every creation unit requires the current cycle's authenticated request-start

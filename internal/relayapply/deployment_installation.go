@@ -205,7 +205,10 @@ func installationFresh(fresh FreshApproval) error {
 	return nil
 }
 func (e *DeploymentEngine) installationFailure(i int, reason string, cause error) error {
+	// Persist the failed endpoint with its backoff so a later cycle (or
+	// restart after the deadline) starts at the next independent intent.
 	p := &e.journal.Installations[i]
+	e.journal.InstallCursor = p.Endpoint
 	p.Reason = reason
 	p.Failures = min(p.Failures+1, 6)
 	now, err := leaseBootTime()
@@ -256,12 +259,12 @@ func (e *DeploymentEngine) RebuildInstallations(parent context.Context, fresh Fr
 		allowed, consentErr := e.cache.InstallationConsent(p.Endpoint, p.Revision)
 		index := e.index(p.Endpoint)
 		if consentErr != nil {
-			return e.result("blocked", "installation_consent_unavailable"), consentErr
+			return e.result("blocked", "installation_consent_unavailable"), e.installationFailure(i, "installation_consent_unavailable", consentErr)
 		}
 		if !allowed {
 			if index >= 0 {
 				if err := e.remove(ctx, index); err != nil {
-					return e.result("blocked", "installation_cleanup_failed"), err
+					return e.result("blocked", "installation_cleanup_failed"), e.installationFailure(i, "installation_cleanup_failed", err)
 				}
 			}
 			e.journal.Installations = append(e.journal.Installations[:i], e.journal.Installations[i+1:]...)
