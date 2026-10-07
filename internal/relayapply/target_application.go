@@ -298,10 +298,10 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 	}
 	ctx, cancel := context.WithTimeout(parent, MaxDuration)
 	defer cancel()
-	report, _ := e.ObserveTarget(ctx, id, controller, timeout)
+	report, _ := e.observeTargetFiltered(ctx, id, controller, timeout, e.candidateProbe(), selector.ObservationExclusion)
 	for j := range report.Paths {
 		k := e.index(report.Paths[j].PathID)
-		if k >= 0 && (e.journal.Entries[k].LeaseVersion != 3 || e.journal.Entries[k].ProbeScope != 1) {
+		if report.Paths[j].State != "excluded" && k >= 0 && (e.journal.Entries[k].LeaseVersion != 3 || e.journal.Entries[k].ProbeScope != 1) {
 			report.Paths[j].State, report.Paths[j].Reason = "unknown", "application_preparation_required"
 		}
 	}
