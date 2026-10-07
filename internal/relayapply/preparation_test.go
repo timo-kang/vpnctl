@@ -232,7 +232,26 @@ func TestPreparationRevocationDuringEveryStage(t *testing.T) {
 }
 
 func TestPreparationCleanupJournalFailures(t *testing.T) {
-	for point := 1; point <= 16; point++ {
+	// Include entry into releasing and every removal commit, without counting
+	// a fixed number of cursor-only writes or drifting into a new installation.
+	boundaries := 0
+	t.Run("trace", func(t *testing.T) {
+		e, k, _, now := preparationFixture(t)
+		if _, err := e.RequestPreparation(context.Background(), "p0", ""); err != nil {
+			t.Fatal(err)
+		}
+		readyPreparation(t, e, now, "p0")
+		k.objects["p0"] = k.objects["p0"][:9]
+		save := e.save
+		e.save = func(b []byte) error { boundaries++; return save(b) }
+		for i := 0; i < len(preparationRemovalSteps)+2 && e.journal.Preparations[0].Phase != "waiting"; i++ {
+			tickPreparation(t, e, now)
+		}
+		if e.journal.Preparations[0].Phase != "waiting" || boundaries == 0 {
+			t.Fatal("cleanup boundary trace incomplete")
+		}
+	})
+	for point := 1; point <= boundaries; point++ {
 		for _, committed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("write%d/committed%v", point, committed), func(t *testing.T) {
 				e, k, dir, now := preparationFixture(t)
@@ -241,10 +260,6 @@ func TestPreparationCleanupJournalFailures(t *testing.T) {
 				}
 				readyPreparation(t, e, now, "p0")
 				k.objects["p0"] = k.objects["p0"][:9]
-				tickPreparation(t, e, now)
-				if e.journal.Preparations[0].Phase != "removing" {
-					t.Fatal("cleanup not entered")
-				}
 				save := e.save
 				writes := 0
 				e.save = func(b []byte) error {
@@ -259,7 +274,7 @@ func TestPreparationCleanupJournalFailures(t *testing.T) {
 					}
 					return save(b)
 				}
-				for i := 0; i < 9 && !e.uncertain; i++ {
+				for i := 0; i < len(preparationRemovalSteps)+2 && !e.uncertain && e.journal.Preparations[0].Phase != "waiting"; i++ {
 					tickPreparation(t, e, now)
 				}
 				if !e.uncertain {
