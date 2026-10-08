@@ -237,14 +237,7 @@ func TestTargetPrecheckGateOrdersReverseArrivals(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), targetObservationWaveDuration)
 		defer cancel()
-		checks := make(chan struct{}, 1)
-		ready := make(chan struct{})
-		close(ready)
-		gates := make([]*observationGate, 3)
-		for i := range gates {
-			gates[i] = &observationGate{checks: checks, ready: ready, next: make(chan struct{})}
-			ready = gates[i].next
-		}
+		gates := newObservationGates(3)
 		order := []int{}
 		prechecked := make(chan int, len(gates))
 		release := make(chan struct{})

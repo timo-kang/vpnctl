@@ -175,13 +175,10 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 		// lease/guard/timer data is shared or cached.
 		wave = context.WithValue(wave, observationCheckerKey{}, observationChecker(k.kernel.Check))
 	}
-	checks := make(chan struct{}, 1)
-	ready := make(chan struct{})
-	close(ready)
+	gates := newObservationGates(len(jobs))
 	var workers sync.WaitGroup
-	for _, job := range jobs {
-		gate := &observationGate{checks: checks, ready: ready, next: make(chan struct{})}
-		ready = gate.next
+	for i, job := range jobs {
+		gate := gates[i]
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -488,37 +485,4 @@ func (k kernel) targetRoute(ctx context.Context, entry Entry, target relaycatalo
 		return errors.New("target route does not use approved candidate")
 	}
 	return nil
-}
-
-// All checks remain serialized. Prechecks additionally wait for their preceding
-// catalog job, so goroutine arrival order cannot move a healthy proof from the
-// front to the back between waves. Releasing a precheck admits the next job
-// before TCP begins; it never waits for that TCP to finish. Postchecks can still
-// acquire the shared checks gate while other candidates are probing.
-type observationGate struct {
-	checks chan struct{}
-	ready  <-chan struct{}
-	next   chan struct{}
-}
-
-func observationStage(ctx context.Context, phase string, gate *observationGate) (context.Context, func(), error) {
-	ctx, done := relayobserve.Phase(ctx, phase)
-	if gate == nil {
-		return ctx, done, ctx.Err()
-	}
-	if phase == "precheck" {
-		finish := done
-		done = func() { finish(); close(gate.next) }
-		select {
-		case <-ctx.Done():
-			return ctx, done, ctx.Err()
-		case <-gate.ready:
-		}
-	}
-	select {
-	case <-ctx.Done():
-		return ctx, done, ctx.Err()
-	case gate.checks <- struct{}{}:
-		return ctx, func() { <-gate.checks; done() }, ctx.Err()
-	}
 }
