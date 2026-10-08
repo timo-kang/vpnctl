@@ -447,11 +447,19 @@ jobs:
           retention-days: 14
 
   robot-capacity-split:
-    name: M3 separate robot and server CPUs (${{ matrix.paths }} candidates)
+    name: M3 separate robot and server CPUs (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
-        paths: [4, 8]
+        include:
+          - profile: '4'
+            label: '4 candidates'
+          - profile: '8'
+            label: '8 candidates'
+          - profile: rebuild-4
+            label: '4 candidates, rebuild'
+          - profile: rebuild-8
+            label: '8 candidates, rebuild'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -475,11 +483,11 @@ jobs:
           VPNCTL_VM_RACE: '1'
           VPNCTL_VM_CPUS: '2'
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-robot-capacity-split
-        run: ./scripts/test-vm.sh --case application-capacity-${{ matrix.paths }} --robot-cpus 0.5 --cpu-layout split
+        run: ./scripts/test-vm.sh --case application-capacity-${{ matrix.profile }} --robot-cpus 0.5 --cpu-layout split
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: m3-robot-capacity-split-${{ matrix.paths }}
+          name: m3-robot-capacity-split-${{ matrix.profile }}
           path: ${{ runner.temp }}/vpnctl-robot-capacity-split
           if-no-files-found: warn
           retention-days: 14

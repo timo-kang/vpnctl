@@ -220,10 +220,13 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		}
 	})
 	secondLog := filepath.Join(f.results, "capacity-app2.jsonl")
+	secondMode := "auto"
 	secondArgs := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app2", "--watch", "--interval", "500ms"}
 	if rebuild {
+		secondMode = "manual"
 		secondArgs = append(secondArgs, "--mode", "manual", "--path-id", f.plan.Paths[healthy].PathID)
 	}
+	report["actuator_modes"] = map[string]string{"app": "auto", "app2": secondMode}
 	second := startNetworkProcessInGroup(t, groupFD, f.robot, secondLog, nil, secondArgs...)
 	eventually(t, 45*time.Second, "independent app activated", func() error {
 		r := latestApplicationResult(secondLog)
@@ -392,10 +395,14 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	cycles1, cycles2 := 0, 0
 	var gap1, gap2 time.Duration
 	limit := 45 * time.Second
+	minimum := 15 * time.Second
 	if rebuild {
 		limit = 120 * time.Second
+		if robotCPU != "" {
+			minimum = 60 * time.Second
+		}
 	}
-	for time.Since(steadyStart) < 15*time.Second || cycles1 < 3 || cycles2 < 3 || !repaired {
+	for time.Since(steadyStart) < minimum || cycles1 < 3 || cycles2 < 3 || !repaired {
 		if time.Since(steadyStart) > limit {
 			t.Fatalf("steady qualification did not converge: app=%d app2=%d rebuilt=%t", cycles1, cycles2, repaired)
 		}
@@ -411,6 +418,9 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 						repaired = applicationCandidateTarget(t, f, p, "198.18.0.3").OK
 					}
 				}
+			}
+			if repaired {
+				report["rebuild_seconds"] = time.Since(steadyStart).Seconds()
 			}
 		}
 		if repaired {

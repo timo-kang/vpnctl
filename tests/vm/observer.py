@@ -447,10 +447,28 @@ def validate_application_mixed_result(status, preparation=False, paths=8, robot_
         if robot_cpu is not None:
             validate_robot_capacity(row, paths, robot_cpu, cpu_layout)
         if preparation:
-            path_ids = ('p00', 'p01', 'p02', 'p03', 'p10', 'p11', 'p12', 'p13')
+            path_ids = [f'p{relay}{underlay}' for relay in range(2) for underlay in range(paths // 2)]
             if (row.get('automatic_rebuild') is not True or row.get('rebuild_completed') is not True
-                    or row.get('rebuilt_path') != path_ids[(row['healthy_index'] + 1) % 8]):
+                    or row.get('rebuilt_path') != path_ids[(row['healthy_index'] + 1) % paths]):
                 raise RuntimeError('mixed application rebuild evidence incomplete')
+            if robot_cpu is not None:
+                validate_capacity_rebuild(row)
+
+
+def validate_capacity_rebuild(row):
+    durations = {key: row.get(key) for key in ('steady_seconds', 'rebuild_seconds', 'first_payload_seconds')}
+    if (any(type(n) not in (int, float) or not math.isfinite(n) for n in durations.values())
+            or not 60 <= durations['steady_seconds'] <= 120
+            or not 0 < durations['rebuild_seconds'] <= durations['steady_seconds']
+            or not 0 < durations['first_payload_seconds'] <= 45
+            or row.get('actuator_modes') != {'app': 'auto', 'app2': 'manual'}):
+        raise RuntimeError('bounded capacity rebuild evidence incomplete')
+    peaks = row.get('worker_resource_peaks', {})
+    if (set(peaks) != {'supervisor', 'app', 'app2'}
+            or any(type(p.get('fd')) is not int or not 0 < p['fd'] <= 128
+                   or type(p.get('rss_kb')) is not int or not 0 < p['rss_kb'] <= 512 * 1024
+                   for p in peaks.values())):
+        raise RuntimeError('capacity rebuild worker resource evidence incomplete')
 
 
 
@@ -650,9 +668,10 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
         raise RuntimeError('direct fixture timed out')
     if case in ('application-mixed', 'application-preparation', 'application-approval') or case.startswith('application-capacity-'):
         capacity = case.startswith('application-capacity-')
+        preparation = case == 'application-preparation' or case.startswith('application-capacity-rebuild-')
         action = 'application-capacity' if capacity else case
         paths = int(case.rsplit('-', 1)[1]) if capacity else 8
-        vm.call(action + '-start', {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout} if capacity else {})
+        vm.call(action + '-start', {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout, 'rebuild': preparation} if capacity else {})
         until = time.monotonic() + 16 * 60
         while time.monotonic() < until:
             status = vm.call(action + '-result')
@@ -660,7 +679,7 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
                 result[case] = status
                 vm.record(case + '-result', status)
                 if capacity or case in ('application-mixed', 'application-preparation'):
-                    validate_application_mixed_result(status, preparation=case == 'application-preparation', paths=paths, robot_cpu=robot_cpus if capacity else None, cpu_layout=cpu_layout)
+                    validate_application_mixed_result(status, preparation=preparation, paths=paths, robot_cpu=robot_cpus if capacity else None, cpu_layout=cpu_layout)
                 else:
                     validate_application_approval_result(status)
                 return result
@@ -932,7 +951,7 @@ def capacity_vcpus(layout, cases, quota, period):
     if layout == 'shared' and quota <= period:
         return 1
     if (layout == 'split' and cases
-            and set(cases) <= {'application-capacity-4', 'application-capacity-8'}
+            and set(cases) <= {'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8'}
             and quota == 2 * period):
         return 2
     raise RuntimeError('shared layout requires <=1 outer CPU; split requires capacity cases and exactly 2 outer CPUs')
@@ -940,7 +959,7 @@ def capacity_vcpus(layout, cases, quota, period):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])

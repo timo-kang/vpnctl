@@ -1,0 +1,73 @@
+# M3 배포 용량 검증 (#185)
+
+## 현재 판정 범위
+
+CPU quota는 해당 CPU에서 사용할 수 있는 실행 시간의 비율이다. `0.25`
+성공을 임의 로봇의 최소 CPU 사양으로 변환하지 않는다. CPU 모델, 빌드의
+race 사용 여부, 역할 배치, 경로·앱 수, 시험 구간을 함께 기록한다.
+실제 배포 하드웨어 사양과 장기 시험이 확정되기 전까지 #185와 M3 배포
+용량 판정은 열어 둔다.
+
+| 시험 | 범위 | 아직 검증하지 않는 부분 |
+| --- | --- | --- |
+| `application-capacity-4/8` | 두 자동 actuator, 정상 경로 위치 3개, 15초 이상 유지 | 초기 준비, CPU 제한 중 재구축 |
+| `application-capacity-rebuild-4/8` | 자동 actuator 1개 + 수동 고정 actuator 1개, 비활성 후보 재구축, 60초 이상 유지 | 초기 준비, 활성 경로 failover, LAN 보존, 장기 부하 |
+| `manager-auto/install-4/8` | 실제 NetworkManager·Netplan 공존 및 전환 | 로봇만의 CPU 한도 |
+
+서로 다른 시험의 성공을 합쳐 모든 조건이 동시에 검증됐다고 판정하지 않는다.
+재구축 시험의 수동 앱은 독립 통신 보존을 확인한다. 두 앱 모두 자동인
+조건의 재구축 용량을 증명하지 않는다.
+
+## CPU 제한 중 재구축
+
+```sh
+VPNCTL_VM_CPUS=2 VPNCTL_VM_RACE=1 \
+  VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-capacity-rebuild-new-run \
+  ./scripts/test-vm.sh \
+  --case application-capacity-rebuild-4 application-capacity-rebuild-8 \
+  --robot-cpus 0.5 --cpu-layout split
+```
+
+각 실행에는 새 빈 결과 디렉터리를 사용한다. 과거 실패나 실행 중인 실험은
+덮어쓰거나 중단하지 않는다. 게스트 실행기 변경 시 기존 `VPNCTL_VM_IMAGE`를
+재사용하지 말고 새 이미지를 빌드한다.
+
+- 로봇 supervisor·actuator 2개와 명령 자식은 CPU 0의 합산 quota를 사용한다.
+  컨트롤러·릴레이 2개·측정기는 CPU 1 / 1 CPU를 사용한다. 초기 enrollment,
+  preparation 및 재구축 활성화 설정은 로봇 quota 밖이다.
+- 정상 경로는 4경로에서 0/1/3, 8경로에서 0/3/7 위치를 각각 사용한다.
+  다른 후보의 첫 번째 앱 TCP는 blackhole 처리한다. 두 번째 앱은 정상
+  경로에 고정하고 실제 payload를 계속 확인한다.
+- 두 앱이 통신하는 동안 다음 비활성 후보의 endpoint route를 삭제한다.
+  재구축은 제한된 로봇 supervisor가 수행한다. 이전과 다른 소유 세대,
+  인증된 lease 재활성화와 해당 후보의 실제 TCP 성공을 모두 확인한다.
+- 준비된 후보에서 첫 번째 앱의 통신 시작은 45초 이내, 삭제 후 재구축 및
+  유지 검증은 120초 이내여야 한다. 최소 60초 동안 두 앱의 실제 통신,
+  각각 3회 이상의 적용 주기와 10초 이내 최신 관측 간격을 확인한다.
+  복구 전에는 손상 후보를 제외한 모든 lease, 복구 후에는 전체 lease가
+  활성 상태여야 한다. 한 번 관측된 통신/lease 실패는 이후 복구로 지우지 않는다.
+- supervisor·두 actuator의 표본 FD는 128 이하, RSS는 각 512 MiB 이하여야
+  한다. 표본 최대치이며 자식 프로세스 전체 RSS나 누수 부재를 뜻하지 않는다.
+- 시작·종료 CPU quota, 사용량, throttling, pressure, 실제 CPU 마스크와
+  역할별 모든 관측 스레드 배치를 검증한다. 증거가 누락되거나 시간 기준,
+  실제 앱 모드 또는 4/8경로 식별자가 맞지 않으면 통과시키지 않는다.
+
+외부 컨테이너는 network-none, capability 없음, 메모리 2 GiB / 게스트
+768 MiB 한도를 유지한다. 호스트 네트워크·커널·시간·전원은 변경하지 않는다.
+split도 동일 물리 CPU와 게스트 커널/IRQ를 공유하므로 물리 서버 분리를
+완전히 재현하는 것은 아니다. 운영 관측 3초 예산, 승인·철회, nft 및
+BOOTTIME 보호 기준은 변경하지 않는다.
+
+## 남은 완료 조건
+
+1. 실제 배포 CPU·RAM·저장장치 및 앱 수를 고정하고 production 빌드로
+   동일 시험을 반복한다. race 빌드는 별도 회귀 결과로 기록한다.
+2. 초기 준비부터 CPU 제한을 적용한 startup 및 두 자동 앱 재구축을 확인한다.
+3. 자원 포화 시 진단과 readiness, 차단 및 예산 복구 후 재확인을 검증한다.
+4. 실제 관리자 공존, 활성 경로 전환, 독립 LAN 보존을 동일 역할 예산에서
+   검증하고 장기 부하를 추가한다. 부족한 표본으로 p95나 no-uplink SLO
+   성공을 선언하지 않는다.
+
+기존 전체 VM 0.25 CPU 실패와 이후 역할 분리 시험 결과는 서로 다른
+범위의 증거다. 과거 실패는 [관측 용량 기록](m3-observation-capacity.md)에
+그대로 보존한다.
