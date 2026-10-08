@@ -21,12 +21,15 @@ func TestM3TCPProbeDiagnostics(t *testing.T) {
 	for _, stage := range []string{"connect", "write_nonce", "read_source", "read_nonce", "parse_source", "verify_nonce", "complete"} {
 		t.Run(stage, func(t *testing.T) {
 			client, server := net.Pipe()
-			defer client.Close()
-			defer server.Close()
 			tracked := &m3DeadlineConn{Conn: client}
 			done := make(chan struct{})
 			peerDone := make(chan struct{})
-			defer func() { close(done); <-peerDone }()
+			defer func() {
+				client.Close()
+				server.Close()
+				close(done)
+				<-peerDone
+			}()
 			go func() {
 				defer close(peerDone)
 				if stage == "connect" || stage == "write_nonce" {
