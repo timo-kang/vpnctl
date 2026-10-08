@@ -114,6 +114,7 @@ func newM3AuthorityFixtureWithOptions(t *testing.T, opts m3AuthorityOptions) *m3
 	}
 	f := &m3AuthorityFixture{t: t, robot: robot, target: target, private: private, results: results, worker: worker, startup: opts.startup}
 	if f.startup != nil {
+		prepareApplicationRobotNetwork(t, robot)
 		f.nodeGroup = f.startup.group.file
 		f.startup.begin(t, results)
 	}

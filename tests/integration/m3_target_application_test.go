@@ -58,9 +58,9 @@ func applicationFixtureWithStartup(t *testing.T, separate bool, size int, guestR
 	if startup == nil {
 		f.releaseNodeCandidates()
 	}
-	// Only this fixture-owned robot namespace; physical interfaces keep their own
-	// reverse-path policy. No host/global sysctl is changed.
-	netOutput(t, f.robot, "sh", "-c", "mount -t proc proc /proc && printf 0 > /proc/sys/net/ipv4/conf/all/rp_filter && printf 0 > /proc/sys/net/ipv4/conf/default/rp_filter")
+	if startup == nil {
+		prepareApplicationRobotNetwork(t, f.robot)
+	}
 	f.plan.Paths = f.plan.Paths[:size]
 	if startup == nil {
 		for _, p := range f.plan.Paths {
@@ -76,6 +76,14 @@ func applicationFixtureWithStartup(t *testing.T, separate bool, size int, guestR
 		startup.ready(t, len(f.plan.Paths))
 	}
 	return f
+}
+
+// Deployment setup must precede the first --app-routes prepare, including the
+// startup profile that deliberately omits generic candidate installation.
+func prepareApplicationRobotNetwork(t *testing.T, robot string) {
+	t.Helper()
+	// Only this fixture-owned robot namespace; no host/global sysctl is changed.
+	netOutput(t, robot, "sh", "-c", "mount -t proc proc /proc && printf 0 > /proc/sys/net/ipv4/conf/all/rp_filter && printf 0 > /proc/sys/net/ipv4/conf/default/rp_filter")
 }
 func applicationPayload(t *testing.T, f *m3AuthorityFixture, target string) m3Probe {
 	t.Helper()
