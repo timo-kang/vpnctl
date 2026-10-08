@@ -131,7 +131,7 @@ jobs:
           test "$excluded" -eq 2
           test "${#packages[@]}" -gt 0
           go test -race -p 1 "${packages[@]}" -skip '^TestPathChurn|^TestMonitorAndDirectRealProducersVariableScale$|^TestWireGuardByteBudgetReclaimsRealPayloadAndDetectsCorruption$'
-      - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic|DirectDiagnostics)|^TestCATransition|^TestApplicationContinuity|^TestLatestApplication' -count=1
+      - run: go test -race -tags=integration ./tests/integration -run '^TestSoak(Readiness|PeerDiagnostic|DirectDiagnostics)|^TestCATransition|^TestApplicationContinuity|^TestLatestApplication|^TestM3TCPProbe' -count=1
       - name: VM runner isolation and evidence regressions (no guest power actions)
         run: python3 -m unittest discover -s tests/vm -p 'test_*.py' -v
       - run: go vet ./...
