@@ -138,7 +138,11 @@ func TestRelayPlanCLIRejectsUnusableApprovals(t *testing.T) {
 printf . >> "$VPNCTL_TEST_INVENTORY_MARKER"
 sleep 1
 if [ "$2" = "address" ]; then
- printf '%s\n' '[{"ifindex":7,"ifname":"wan0","flags":["UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"192.0.2.10","prefixlen":24,"scope":"global"}]},{"ifindex":8,"ifname":"wan1","flags":["UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"198.51.100.10","prefixlen":24,"scope":"global"}]}]'
+ case "$5" in
+ wan0) printf '%s\n' '[{"ifindex":7,"ifname":"wan0","flags":["UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"192.0.2.10","prefixlen":24,"scope":"global"}]}]' ;;
+ wan1) printf '%s\n' '[{"ifindex":8,"ifname":"wan1","flags":["UP","LOWER_UP"],"addr_info":[{"family":"inet","local":"198.51.100.10","prefixlen":24,"scope":"global"}]}]' ;;
+ *) exit 1 ;;
+ esac
 else
  printf '[{"dst":"%s","from":"%s","dev":"%s"}]\n' "$5" "$7" "$9"
 fi
