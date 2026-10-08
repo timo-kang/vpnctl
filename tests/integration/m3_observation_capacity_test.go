@@ -377,6 +377,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		sampleResources()
 		requireLiveApplicationLeases(t, f)
 		if p := applicationPayload(t, f, "198.18.0.3"); !p.OK {
+			report["payload_failure"] = map[string]any{"target": "198.18.0.3", "probe": p}
 			t.Fatal("mixed observation interrupted independent app", p)
 		}
 		samples++
@@ -453,6 +454,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		}
 		for _, target := range []string{m3Target, "198.18.0.3"} {
 			if p := applicationPayload(t, f, target); !p.OK {
+				report["payload_failure"] = map[string]any{"target": target, "probe": p}
 				t.Fatal("steady mixed app failed", target, p)
 			}
 		}

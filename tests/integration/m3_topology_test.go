@@ -27,10 +27,22 @@ import (
 const m3Target = "198.18.0.2"
 
 type m3Probe struct {
-	OK      bool    `json:"ok"`
-	Source  string  `json:"server_observed_source,omitempty"`
-	Failure string  `json:"failure,omitempty"`
-	MS      float64 `json:"duration_ms"`
+	OK      bool        `json:"ok"`
+	Source  string      `json:"server_observed_source,omitempty"`
+	Failure string      `json:"failure,omitempty"`
+	MS      float64     `json:"duration_ms"`
+	TCP     *m3TCPTrace `json:"tcp,omitempty"`
+}
+
+// Keep fixed phase labels and timestamps, never payloads or raw socket errors.
+// Wall timestamps align with supervisor logs; durations use Go's monotonic clock.
+type m3TCPTrace struct {
+	StartedAt      time.Time  `json:"started_at"`
+	ConnectedAt    *time.Time `json:"connected_at,omitempty"`
+	FinishedAt     time.Time  `json:"finished_at"`
+	Phase          string     `json:"phase"`
+	PhaseStartedAt time.Time  `json:"phase_started_at"`
+	PhaseMS        float64    `json:"phase_duration_ms"`
 }
 
 func serveM3Echo() error {
@@ -68,40 +80,69 @@ func runM3Probe() error {
 	if os.Getenv("VPNCTL_PROBE_UDP_ERROR") == "1" {
 		return runM3UDPError()
 	}
+	r, err := measureM3TCPProbe(m3Dial)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(r)
+}
+
+func measureM3TCPProbe(dial func(time.Duration) (net.Conn, error)) (r m3Probe, err error) {
 	began := time.Now()
-	r := m3Probe{}
+	r.TCP = &m3TCPTrace{StartedAt: began}
+	phase := func(name string) {
+		r.TCP.Phase, r.TCP.PhaseStartedAt = name, time.Now()
+	}
+	defer func() {
+		r.TCP.FinishedAt = time.Now()
+		r.MS = float64(r.TCP.FinishedAt.Sub(began).Microseconds()) / 1000
+		r.TCP.PhaseMS = float64(r.TCP.FinishedAt.Sub(r.TCP.PhaseStartedAt).Microseconds()) / 1000
+	}()
 	probe := func() error {
-		c, e := m3Dial(time.Second)
+		phase("connect")
+		c, e := dial(time.Second)
 		if e != nil {
 			return e
 		}
 		defer c.Close()
-		c.SetDeadline(time.Now().Add(time.Second))
+		connected := time.Now()
+		r.TCP.ConnectedAt = &connected
+		phase("deadline")
+		if e = c.SetDeadline(connected.Add(time.Second)); e != nil {
+			return e
+		}
+		phase("nonce")
 		b := make([]byte, 16)
 		if _, e = rand.Read(b); e != nil {
 			return e
 		}
+		phase("write_nonce")
 		if _, e = c.Write(b); e != nil {
 			return e
 		}
 		reader := bufio.NewReader(io.LimitReader(c, 256))
+		phase("read_source")
 		line, e := reader.ReadString('\n')
 		if e != nil {
 			return e
 		}
+		phase("parse_source")
 		source, _, e := net.SplitHostPort(strings.TrimSpace(line))
 		if e != nil {
 			return e
 		}
 		got := make([]byte, 16)
+		phase("read_nonce")
 		if _, e = io.ReadFull(reader, got); e != nil {
 			return e
 		}
+		phase("verify_nonce")
 		if !bytes.Equal(got, b) {
 			return fmt.Errorf("nonce mismatch")
 		}
 		r.OK = true
 		r.Source = source
+		phase("complete")
 		return nil
 	}
 	if e := probe(); e != nil {
@@ -116,11 +157,10 @@ func runM3Probe() error {
 		case errors.Is(e, syscall.ECONNREFUSED):
 			r.Failure = "refused"
 		default:
-			return e
+			return r, e
 		}
 	}
-	r.MS = float64(time.Since(began).Microseconds()) / 1000
-	return json.NewEncoder(os.Stdout).Encode(r)
+	return r, nil
 }
 
 // A closed UDP service produces a related ICMP port-unreachable. An authorized
