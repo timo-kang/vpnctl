@@ -28,6 +28,7 @@ type m3AuthorityFixture struct {
 	recipients                                    []*m3Recipient
 	nodeSupervisor                                *networkProcess
 	nodeGroup                                     *os.File
+	startup                                       *capacityStartup
 	plan                                          relayplan.Plan
 	spec                                          relaycatalog.Spec
 }
@@ -84,6 +85,7 @@ type m3AuthorityOptions struct {
 	underlays             int
 	extraTarget           bool
 	robotInGuestRoot      bool
+	startup               *capacityStartup
 }
 
 func newM3AuthorityFixture(t *testing.T) *m3AuthorityFixture {
@@ -110,12 +112,16 @@ func newM3AuthorityFixtureWithOptions(t *testing.T, opts m3AuthorityOptions) *m3
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &m3AuthorityFixture{t: t, robot: robot, target: target, private: private, results: results, worker: worker}
+	f := &m3AuthorityFixture{t: t, robot: robot, target: target, private: private, results: results, worker: worker, startup: opts.startup}
+	if f.startup != nil {
+		f.nodeGroup = f.startup.group.file
+		f.startup.begin(t, results)
+	}
 	t.Cleanup(func() {
 		writeM3Report(t, filepath.Join(results, "outcome.json"), map[string]any{"test": t.Name(), "completed": !t.Failed(), "final_kernel": f.snapshot()})
 	})
 	f.controller = newM3Controller(t, layout.controller, layout.controllerAddress, private, results)
-	f.node = f.controller.enroll(robot, "robot")
+	f.node = f.controller.enrollWithStartup(robot, "robot", f.startup)
 	agent := ""
 	if !opts.independentRecipients {
 		agent = f.controller.enroll(relays[0], "agent")
@@ -193,7 +199,13 @@ func nodeAdmissionOutput(t *testing.T, f *m3AuthorityFixture, args ...string) st
 	}
 	defer log.Close()
 	for {
-		b, err := netCommand(ctx, f.robot, args...).CombinedOutput()
+		var b []byte
+		var err error
+		if f.startup != nil {
+			b, err = f.startup.run(t, ctx, f.robot, startupPhase(args), args...)
+		} else {
+			b, err = netCommand(ctx, f.robot, args...).CombinedOutput()
+		}
 		if _, writeErr := log.Write(b); writeErr != nil {
 			t.Fatal(writeErr)
 		}
@@ -213,6 +225,9 @@ func nodeAdmissionOutput(t *testing.T, f *m3AuthorityFixture, args ...string) st
 		if ctx.Err() != nil || json.Unmarshal([]byte(first), &out) != nil || out.SchemaVersion != 1 || out.State != "blocked" || out.Reason != "ownership_unavailable" || out.KernelReady || out.Activated || out.Guarded || len(out.Reservation) != 0 {
 			t.Fatalf("node operation failed: %v %s (attempts: %s)", err, b, log.Name())
 		}
+		if f.startup != nil {
+			f.startup.commands[len(f.startup.commands)-1]["retryable"] = true
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -230,7 +245,11 @@ func (f *m3AuthorityFixture) install() {
 		f.t.Fatal(err)
 	}
 	for _, p := range f.plan.Paths {
-		f.nodeCall("prepare", p.PathID)
+		if f.startup != nil {
+			nodeAdmissionOutput(f.t, f, integrationBinary(f.t), "node", "relay", "prepare", "--config", f.node, "--path-id", p.PathID, "--app-routes")
+		} else {
+			f.nodeCall("prepare", p.PathID)
+		}
 	}
 	for _, r := range f.recipients {
 		r.require("refresh", -1, 0)
@@ -265,6 +284,9 @@ func (f *m3AuthorityFixture) install() {
  oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr { %s } tcp dport 9192 snat to 198.18.0.%d
  }
 }`, strings.Join(ifaces, ", "), strings.Join(targets, ", "), strings.Join(ifaces, ", "), strings.Join(targets, ", "), 11+r))
+	}
+	if f.startup != nil {
+		return
 	}
 	for i, p := range f.plan.Paths {
 		source := strings.TrimSuffix(p.InnerAddress, "/32")

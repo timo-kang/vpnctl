@@ -101,6 +101,9 @@ func (f *m3Controller) grant(relay, principal string) {
 	f.admin(api.AdminRequest{Operation: "relay.recipient.set", RelayRecipient: &relaycatalog.RecipientUpdate{ControllerID: s.ControllerID, ExpectedGeneration: s.Generation, RelayID: relay, PrincipalID: principal}})
 }
 func (f *m3Controller) enroll(ns, id string) string {
+	return f.enrollWithStartup(ns, id, nil)
+}
+func (f *m3Controller) enrollWithStartup(ns, id string, startup *capacityStartup) string {
 	f.t.Helper()
 	key, public := wgKeyPair(f.t)
 	path := filepath.Join(f.private, id+".yaml")
@@ -114,10 +117,17 @@ func (f *m3Controller) enroll(ns, id string) string {
 	// Do not expose command arguments or raw bootstrap output on failure.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := netCommand(ctx, ns, integrationBinary(f.t), "node", "join", "--config", path, "--token", token, "--ca-cert", ca).Run(); err != nil {
+	runJoin := func(phase string, args ...string) error {
+		if startup == nil {
+			return netCommand(ctx, ns, args...).Run()
+		}
+		_, err := startup.run(f.t, ctx, ns, phase, args...)
+		return err
+	}
+	if err := runJoin("enroll", integrationBinary(f.t), "node", "join", "--config", path, "--token", token, "--ca-cert", ca); err != nil {
 		f.t.Fatal("identity enrollment failed", id, err)
 	}
-	if err := netCommand(ctx, ns, integrationBinary(f.t), "node", "join", "--config", path).Run(); err != nil {
+	if err := runJoin("register", integrationBinary(f.t), "node", "join", "--config", path); err != nil {
 		f.t.Fatal("identity registration failed", id, err)
 	}
 	return path

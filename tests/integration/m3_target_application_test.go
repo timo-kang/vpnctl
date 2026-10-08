@@ -28,11 +28,15 @@ func applicationFixtureWithGuestRobot(t *testing.T, separate bool, size int, gue
 
 func applicationFixtureWithGroup(t *testing.T, separate bool, size int, guestRoot bool, group *os.File) *m3AuthorityFixture {
 	t.Helper()
+	return applicationFixtureWithStartup(t, separate, size, guestRoot, group, nil)
+}
+func applicationFixtureWithStartup(t *testing.T, separate bool, size int, guestRoot bool, group *os.File, startup *capacityStartup) *m3AuthorityFixture {
+	t.Helper()
 	underlays := 2
 	if size == 8 {
 		underlays = 4
 	}
-	f := newM3AuthorityFixtureWithOptions(t, m3AuthorityOptions{separateController: separate, independentRecipients: true, underlays: underlays, extraTarget: true, robotInGuestRoot: guestRoot})
+	f := newM3AuthorityFixtureWithOptions(t, m3AuthorityOptions{separateController: separate, independentRecipients: true, underlays: underlays, extraTarget: true, robotInGuestRoot: guestRoot, startup: startup})
 	f.nodeGroup = group
 	cpuBefore, _ := os.ReadFile("/sys/fs/cgroup/cpu.stat")
 	memoryBefore, _ := os.ReadFile("/sys/fs/cgroup/memory.events")
@@ -51,18 +55,25 @@ func applicationFixtureWithGroup(t *testing.T, separate bool, size int, guestRoo
 			"counters":          netOutput(t, f.robot, "cat", "/proc/net/netstat"),
 		})
 	})
-	f.releaseNodeCandidates()
+	if startup == nil {
+		f.releaseNodeCandidates()
+	}
 	// Only this fixture-owned robot namespace; physical interfaces keep their own
 	// reverse-path policy. No host/global sysctl is changed.
 	netOutput(t, f.robot, "sh", "-c", "mount -t proc proc /proc && printf 0 > /proc/sys/net/ipv4/conf/all/rp_filter && printf 0 > /proc/sys/net/ipv4/conf/default/rp_filter")
 	f.plan.Paths = f.plan.Paths[:size]
-	for _, p := range f.plan.Paths {
-		netOutput(t, f.robot, integrationBinary(t), "node", "relay", "prepare", "--config", f.node, "--path-id", p.PathID, "--app-routes")
+	if startup == nil {
+		for _, p := range f.plan.Paths {
+			netOutput(t, f.robot, integrationBinary(t), "node", "relay", "prepare", "--config", f.node, "--path-id", p.PathID, "--app-routes")
+		}
 	}
 	f.nodeSupervisor = startNodeLeaseWatch(t, f, "application-node-supervisor")
 	awaitApplicationCandidates(t, f)
 	for _, target := range []string{"app", "app2"} {
 		nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "target", "reserve", "--config", f.node, "--target-id", target)
+	}
+	if startup != nil {
+		startup.ready(t, len(f.plan.Paths))
 	}
 	return f
 }
