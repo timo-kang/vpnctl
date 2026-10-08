@@ -93,11 +93,34 @@ func readLatestApplicationResult(r io.ReaderAt, size int64) (out relayapply.Targ
 // later recovery can hide it. Payload alone can pass while an observer stalls.
 func applicationContinuity(t *testing.T, path string, baseline int) (cycles int, maxGap time.Duration) {
 	t.Helper()
-	results := applicationResults(path)
+	cycles, maxGap, err := evaluateApplicationContinuity(applicationResults(path), baseline, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cycles, maxGap
+}
+
+func evaluateApplicationContinuity(results []relayapply.TargetReconcileResult, baseline int, now time.Time) (cycles int, maxGap time.Duration, err error) {
+	if baseline < 1 || baseline > len(results) {
+		return 0, 0, fmt.Errorf("missing application continuity baseline")
+	}
+	// Consecutive record gaps cannot detect an observer that stops writing.
+	// Leases and payload may remain live while its final observation expires.
+	latest := results[len(results)-1].Selection
+	fresh := false
+	for _, c := range latest.Candidates {
+		if c.PathID == latest.DesiredPathID && c.Eligible && c.State == "reachable" && !c.ObservedAt.IsZero() {
+			age := now.Sub(c.ObservedAt)
+			fresh = age >= 0 && age <= 10*time.Second
+		}
+	}
+	if !fresh {
+		return 0, 0, fmt.Errorf("latest selected-path observation missing or stale: target=%s", latest.TargetID)
+	}
 	for i := max(0, baseline-1); i < len(results); i++ {
 		r := results[i]
 		if !r.Applied || r.Selection.Policy.MaxAge != 10*time.Second || r.Selection.Policy.Successes != 2 {
-			t.Fatalf("application lost fresh continuous eligibility: target=%s reason=%s state=%s", r.Selection.TargetID, r.Selection.Reason, r.Application.State)
+			return cycles, maxGap, fmt.Errorf("application lost fresh continuous eligibility: target=%s reason=%s state=%s", r.Selection.TargetID, r.Selection.Reason, r.Application.State)
 		}
 		if i < baseline {
 			continue
@@ -113,7 +136,7 @@ func applicationContinuity(t *testing.T, path string, baseline int) (cycles int,
 					gap := c.ObservedAt.Sub(old.ObservedAt)
 					maxGap = max(maxGap, gap)
 					if gap <= 0 || gap > 10*time.Second {
-						t.Fatalf("freshness gap %s in %s", gap, c.PathID)
+						return cycles, maxGap, fmt.Errorf("freshness gap %s in %s", gap, c.PathID)
 					}
 				}
 			}
@@ -436,6 +459,8 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		samples++
 		time.Sleep(200 * time.Millisecond)
 	}
+	cycles1, gap1 = applicationContinuity(t, logfile, baseline1)
+	cycles2, gap2 = applicationContinuity(t, secondLog, baseline2)
 	report["steady_seconds"] = time.Since(steadyStart).Seconds()
 	report["steady_applied_cycles"] = map[string]int{"app": cycles1, "app2": cycles2}
 	report["maximum_fresh_observation_gap_seconds"] = map[string]float64{"app": gap1.Seconds(), "app2": gap2.Seconds()}
