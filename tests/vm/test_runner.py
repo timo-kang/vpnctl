@@ -573,6 +573,85 @@ class ApplicationPreparationEvidenceTests(ApplicationMixedEvidenceTests):
                 observer.validate_application_mixed_result(status, preparation=True)
 
 
+class CapacityRebuildEvidenceTests(unittest.TestCase):
+    def valid(self, paths):
+        status = ApplicationRobotCapacityEvidenceTests().valid(paths)
+        ids = [f'p{relay}{underlay}' for relay in range(2) for underlay in range(paths // 2)]
+        for item in status['reports']:
+            row = item['report']
+            row.update(automatic_rebuild=True, rebuild_completed=True,
+                       rebuilt_path=ids[(row['healthy_index'] + 1) % paths],
+                       steady_seconds=60, rebuild_seconds=12, first_payload_seconds=8,
+                       actuator_modes=dict(app='auto', app2='manual'),
+                       worker_resource_peaks={role: dict(fd=20, rss_kb=32000)
+                                              for role in ('supervisor', 'app', 'app2')})
+        return status
+
+    def test_four_and_eight_paths_rebuild_under_robot_budget(self):
+        for paths in (4, 8):
+            observer.validate_application_mixed_result(self.valid(paths), preparation=True,
+                                                       paths=paths, robot_cpu='0.5')
+
+    def test_short_missing_unbounded_or_mislabeled_evidence_fails(self):
+        changes = [lambda r: r.update(steady_seconds=59.9),
+                   lambda r: r.update(steady_seconds=float('nan')),
+                   lambda r: r.pop('rebuild_seconds'),
+                   lambda r: r.update(rebuild_seconds=120.1),
+                   lambda r: r.update(rebuild_seconds=float('inf')),
+                   lambda r: r.update(rebuild_seconds=61),
+                   lambda r: r.update(first_payload_seconds=45.1),
+                   lambda r: r.update(first_payload_seconds=0),
+                   lambda r: r['actuator_modes'].update(app2='auto'),
+                   lambda r: r.pop('worker_resource_peaks'),
+                   lambda r: r['worker_resource_peaks'].pop('supervisor'),
+                   lambda r: r['worker_resource_peaks']['app'].update(fd=129),
+                   lambda r: r['worker_resource_peaks']['app2'].update(rss_kb=524289)]
+        for change in changes:
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                status = self.valid(8)
+                change(status['reports'][0]['report'])
+                observer.validate_application_mixed_result(status, preparation=True, paths=8, robot_cpu='0.5')
+
+    def test_rebuild_case_dispatch_cannot_silently_run_steady_profile(self):
+        for paths in (4, 8):
+            case = f'application-capacity-rebuild-{paths}'
+            self.assertEqual(observer.capacity_vcpus('split', [case], '200000', '100000'), 2)
+            vm = mock.Mock()
+            vm.call.side_effect = [{}, {'started': True}, self.valid(paths)]
+            observer.exercise(vm, case, 'stopped', 0, {}, robot_cpus='0.5')
+            self.assertIn(mock.call('application-capacity-start',
+                                   dict(paths=paths, robot_cpus='0.5', cpu_layout='shared', rebuild=True)),
+                          vm.call.call_args_list)
+            # Existing steady evidence must not qualify for this new case.
+            vm.call.side_effect = [{}, {'started': True}, ApplicationRobotCapacityEvidenceTests().valid(paths)]
+            with self.assertRaises(RuntimeError):
+                observer.exercise(vm, case, 'stopped', 0, {}, robot_cpus='0.5')
+
+    def test_guest_dispatch_preserves_boolean_profile_before_launch(self):
+        for rebuild in (False, True, 'false', 'true', 0, 1, None):
+            with self.subTest(rebuild=rebuild), tempfile.TemporaryDirectory() as root, \
+                 mock.patch.object(guest_agent, 'ROOT', Path(root)), \
+                 mock.patch.object(guest_agent, 'guard'), \
+                 mock.patch.object(guest_agent, 'WORKER', None), \
+                 mock.patch.object(guest_agent.subprocess, 'Popen') as launch:
+                req = json.dumps(dict(paths=4, robot_cpus='0.5', cpu_layout='split', rebuild=rebuild)).encode()
+                handler = object.__new__(guest_agent.Handler)
+                handler.path = '/application-capacity-start'
+                handler.headers = {'Authorization': 'Bearer ' + guest_agent.TOKEN, 'Content-Length': str(len(req))}
+                handler.rfile, handler.wfile = io.BytesIO(req), io.BytesIO()
+                handler.send_response = mock.Mock()
+                handler.send_header = mock.Mock()
+                handler.end_headers = mock.Mock()
+                handler.do_POST()
+                if type(rebuild) is bool:
+                    handler.send_response.assert_called_once_with(200)
+                    env = launch.call_args.kwargs['env']
+                    self.assertEqual(env['VPNCTL_CAPACITY_REBUILD'], '1' if rebuild else '0')
+                else:
+                    handler.send_response.assert_called_once_with(500)
+                    launch.assert_not_called()
+
+
 class ApplicationApprovalEvidenceTests(unittest.TestCase):
     def valid(self):
         return dict(exit=0, reports=[dict(report=dict(fault=fault, completed=True,

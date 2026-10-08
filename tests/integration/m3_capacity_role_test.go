@@ -25,6 +25,10 @@ func TestVMApplicationCapacity(t *testing.T) {
 	}
 	requireIsolatedGuest(t)
 	cpu := os.Getenv("VPNCTL_CAPACITY_ROBOT_CPU")
+	rebuild := os.Getenv("VPNCTL_CAPACITY_REBUILD")
+	if rebuild != "0" && rebuild != "1" {
+		t.Fatal("explicit steady or rebuild profile required")
+	}
 	layout := os.Getenv("VPNCTL_CAPACITY_CPU_LAYOUT")
 	if layout != "shared" && layout != "split" {
 		t.Fatal("explicit CPU layout required")
@@ -42,7 +46,7 @@ func TestVMApplicationCapacity(t *testing.T) {
 	}
 	for _, healthy := range []int{0, paths/2 - 1, paths - 1} {
 		t.Run(fmt.Sprint(healthy), func(t *testing.T) {
-			applicationMixedCandidatesProfile(t, healthy, false, paths, cpu, layout)
+			applicationMixedCandidatesProfile(t, healthy, rebuild == "1", paths, cpu, layout)
 		})
 	}
 }

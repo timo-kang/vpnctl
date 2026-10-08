@@ -93,11 +93,34 @@ func readLatestApplicationResult(r io.ReaderAt, size int64) (out relayapply.Targ
 // later recovery can hide it. Payload alone can pass while an observer stalls.
 func applicationContinuity(t *testing.T, path string, baseline int) (cycles int, maxGap time.Duration) {
 	t.Helper()
-	results := applicationResults(path)
+	cycles, maxGap, err := evaluateApplicationContinuity(applicationResults(path), baseline, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cycles, maxGap
+}
+
+func evaluateApplicationContinuity(results []relayapply.TargetReconcileResult, baseline int, now time.Time) (cycles int, maxGap time.Duration, err error) {
+	if baseline < 1 || baseline > len(results) {
+		return 0, 0, fmt.Errorf("missing application continuity baseline")
+	}
+	// Consecutive record gaps cannot detect an observer that stops writing.
+	// Leases and payload may remain live while its final observation expires.
+	latest := results[len(results)-1].Selection
+	fresh := false
+	for _, c := range latest.Candidates {
+		if c.PathID == latest.DesiredPathID && c.Eligible && c.State == "reachable" && !c.ObservedAt.IsZero() {
+			age := now.Sub(c.ObservedAt)
+			fresh = age >= 0 && age <= 10*time.Second
+		}
+	}
+	if !fresh {
+		return 0, 0, fmt.Errorf("latest selected-path observation missing or stale: target=%s", latest.TargetID)
+	}
 	for i := max(0, baseline-1); i < len(results); i++ {
 		r := results[i]
 		if !r.Applied || r.Selection.Policy.MaxAge != 10*time.Second || r.Selection.Policy.Successes != 2 {
-			t.Fatalf("application lost fresh continuous eligibility: target=%s reason=%s state=%s", r.Selection.TargetID, r.Selection.Reason, r.Application.State)
+			return cycles, maxGap, fmt.Errorf("application lost fresh continuous eligibility: target=%s reason=%s state=%s", r.Selection.TargetID, r.Selection.Reason, r.Application.State)
 		}
 		if i < baseline {
 			continue
@@ -113,7 +136,7 @@ func applicationContinuity(t *testing.T, path string, baseline int) (cycles int,
 					gap := c.ObservedAt.Sub(old.ObservedAt)
 					maxGap = max(maxGap, gap)
 					if gap <= 0 || gap > 10*time.Second {
-						t.Fatalf("freshness gap %s in %s", gap, c.PathID)
+						return cycles, maxGap, fmt.Errorf("freshness gap %s in %s", gap, c.PathID)
 					}
 				}
 			}
@@ -220,10 +243,13 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		}
 	})
 	secondLog := filepath.Join(f.results, "capacity-app2.jsonl")
+	secondMode := "auto"
 	secondArgs := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app2", "--watch", "--interval", "500ms"}
 	if rebuild {
+		secondMode = "manual"
 		secondArgs = append(secondArgs, "--mode", "manual", "--path-id", f.plan.Paths[healthy].PathID)
 	}
+	report["actuator_modes"] = map[string]string{"app": "auto", "app2": secondMode}
 	second := startNetworkProcessInGroup(t, groupFD, f.robot, secondLog, nil, secondArgs...)
 	eventually(t, 45*time.Second, "independent app activated", func() error {
 		r := latestApplicationResult(secondLog)
@@ -392,10 +418,14 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	cycles1, cycles2 := 0, 0
 	var gap1, gap2 time.Duration
 	limit := 45 * time.Second
+	minimum := 15 * time.Second
 	if rebuild {
 		limit = 120 * time.Second
+		if robotCPU != "" {
+			minimum = 60 * time.Second
+		}
 	}
-	for time.Since(steadyStart) < 15*time.Second || cycles1 < 3 || cycles2 < 3 || !repaired {
+	for time.Since(steadyStart) < minimum || cycles1 < 3 || cycles2 < 3 || !repaired {
 		if time.Since(steadyStart) > limit {
 			t.Fatalf("steady qualification did not converge: app=%d app2=%d rebuilt=%t", cycles1, cycles2, repaired)
 		}
@@ -412,6 +442,9 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 					}
 				}
 			}
+			if repaired {
+				report["rebuild_seconds"] = time.Since(steadyStart).Seconds()
+			}
 		}
 		if repaired {
 			requireLiveApplicationLeases(t, f)
@@ -426,6 +459,8 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		samples++
 		time.Sleep(200 * time.Millisecond)
 	}
+	cycles1, gap1 = applicationContinuity(t, logfile, baseline1)
+	cycles2, gap2 = applicationContinuity(t, secondLog, baseline2)
 	report["steady_seconds"] = time.Since(steadyStart).Seconds()
 	report["steady_applied_cycles"] = map[string]int{"app": cycles1, "app2": cycles2}
 	report["maximum_fresh_observation_gap_seconds"] = map[string]float64{"app": gap1.Seconds(), "app2": gap2.Seconds()}

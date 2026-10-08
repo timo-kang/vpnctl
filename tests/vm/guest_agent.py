@@ -375,9 +375,11 @@ class Handler(BaseHTTPRequestHandler):
                     if action == 'application-capacity-start':
                         paths, cpu = req.get('paths'), req.get('robot_cpus')
                         layout = req.get('cpu_layout', 'shared')
-                        if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25') or layout not in ('shared', 'split'):
+                        rebuild = req.get('rebuild', False)
+                        if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25') or layout not in ('shared', 'split') or type(rebuild) is not bool:
                             raise ValueError('explicit bounded robot CPU and path profile required')
-                        env.update(VPNCTL_CAPACITY_PATHS=str(paths), VPNCTL_CAPACITY_ROBOT_CPU=cpu, VPNCTL_CAPACITY_CPU_LAYOUT=layout)
+                        env.update(VPNCTL_CAPACITY_PATHS=str(paths), VPNCTL_CAPACITY_ROBOT_CPU=cpu, VPNCTL_CAPACITY_CPU_LAYOUT=layout,
+                                   VPNCTL_CAPACITY_REBUILD='1' if rebuild else '0')
                     with (ROOT / 'worker.log').open('wb') as log:
                         test = {'application-mixed-start': 'TestNetns_M3TargetApplicationMixedCandidates',
                                 'application-preparation-start': 'TestNetns_M3PreparationCapacity',
