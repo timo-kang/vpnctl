@@ -488,6 +488,67 @@ class ApplicationRobotCapacityEvidenceTests(unittest.TestCase):
             observer.validate_application_mixed_result(self.valid(8), paths=8, robot_cpu='0.25')
 
 
+class SplitCapacityEvidenceTests(unittest.TestCase):
+    def valid(self):
+        status = ApplicationRobotCapacityEvidenceTests().valid(8)
+        for item in status['reports']:
+            row = item['report']
+            for suffix in ('', '_after'):
+                robot = row['resource_profile' + suffix]
+                robot.update(guest_vcpus=2, cpuset_cpus_effective='0')
+                row['server_resource_profile' + suffix] = dict(
+                    robot, scope='controller-relays-and-measurement',
+                    initial_preparation_limited=True, controller_relay_measurement_limited=True,
+                    cpu_max='100000 100000', cpuset_cpus_effective='1')
+                row['role_cpu_placement' + suffix] = {
+                    role: dict(cpus='0' if role in ('supervisor', 'app', 'app2') else '1', threads=2)
+                    for role in ('supervisor', 'app', 'app2', 'controller', 'relay0', 'relay1', 'measurement')}
+        return status
+
+    def test_complete_split_profile(self):
+        observer.validate_application_mixed_result(self.valid(), paths=8, robot_cpu='0.5', cpu_layout='split')
+
+    def test_cannot_claim_separation_from_labels_or_requested_masks(self):
+        changes = [
+            lambda r: r.pop('server_resource_profile_after'),
+            lambda r: r['resource_profile'].update(guest_vcpus=1),
+            lambda r: r['resource_profile_after'].update(cpuset_cpus_effective='0-1'),
+            lambda r: r['server_resource_profile'].update(cpuset_cpus_effective='0'),
+            lambda r: r['server_resource_profile_after'].update(cpu_max='max 100000'),
+            lambda r: r['server_resource_profile_after'].update(cpu_stat=r['server_resource_profile']['cpu_stat']),
+            lambda r: r['server_resource_profile'].update(cpu_model='other-cpu'),
+            lambda r: r['server_resource_profile'].update(initial_preparation_limited=False),
+            lambda r: r['server_resource_profile_after'].update(controller_relay_measurement_limited=False),
+            lambda r: r.pop('role_cpu_placement_after'),
+            lambda r: r['role_cpu_placement'].pop('relay1'),
+            lambda r: r['role_cpu_placement_after']['app'].update(cpus='1'),
+            lambda r: r['role_cpu_placement_after']['measurement'].update(threads=0),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                status = self.valid()
+                change(status['reports'][0]['report'])
+                with self.assertRaises(RuntimeError):
+                    observer.validate_application_mixed_result(status, paths=8, robot_cpu='0.5', cpu_layout='split')
+        with self.assertRaises(RuntimeError):
+            observer.validate_application_mixed_result(self.valid(), paths=8, robot_cpu='0.5')
+
+    def test_split_requires_capacity_cases_and_exact_outer_budget(self):
+        self.assertEqual(observer.capacity_vcpus('shared', ['boot'], '50000', '100000'), 1)
+        self.assertEqual(observer.capacity_vcpus('split', ['application-capacity-4', 'application-capacity-8'], '200000', '100000'), 2)
+        for layout, cases, quota, period in (
+                ('split', ['boot'], '200000', '100000'),
+                ('split', ['application-capacity-8', 'lease'], '200000', '100000'),
+                ('split', ['application-capacity-8'], '100000', '100000'),
+                ('shared', ['application-capacity-8'], '200000', '100000'),
+                ('unknown', ['application-capacity-8'], '200000', '100000'),
+                ('split', [], '200000', '100000'),
+                ('split', ['application-capacity-8'], 'max', '100000'),
+                ('shared', ['boot'], '0', '100000')):
+            with self.subTest(layout=layout, cases=cases, quota=quota), self.assertRaises(RuntimeError):
+                observer.capacity_vcpus(layout, cases, quota, period)
+
+
 class ApplicationPreparationEvidenceTests(ApplicationMixedEvidenceTests):
     def valid(self):
         status = super().valid()

@@ -60,7 +60,10 @@ def open_lease_guards(snapshot):
     return opened
 
 class VM:
-    def __init__(self, work, results, rtc='host'):
+    def __init__(self, work, results, rtc='host', vcpus=1):
+        if type(vcpus) is not int or vcpus not in (1, 2):
+            raise ValueError('unsupported guest CPU count')
+        self.vcpus = vcpus
         self.work, self.results = Path(work), Path(results)
         self.token, self.uuid = uuid.uuid4().hex, str(uuid.uuid4())
         self.boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
@@ -83,7 +86,7 @@ class VM:
             subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', str(state_disk), '32M'], check=True)
         qmp = str(self.work / 'qmp.sock')
         Path(qmp).unlink(missing_ok=True)
-        args = ['qemu-system-x86_64', '-enable-kvm', '-machine', 'pc', '-cpu', 'host', '-smp', '1', '-m', '768',
+        args = ['qemu-system-x86_64', '-enable-kvm', '-machine', 'pc', '-cpu', 'host', '-smp', str(self.vcpus), '-m', '768',
                 '-uuid', self.uuid, '-display', 'none', '-monitor', 'none', '-no-shutdown',
                 '-qmp', 'unix:' + qmp + ',server=on,wait=off',
                 '-serial', 'file:' + str(self.results / 'console.log'),
@@ -374,37 +377,59 @@ def validate_application_approval_result(status):
                 raise RuntimeError('application expiry did not isolate the intended grant')
 
 
-def validate_robot_capacity(row, paths, cpu):
+def validate_robot_capacity(row, paths, cpu, cpu_layout='shared'):
     quota = {'1': '100000 100000', '0.5': '50000 100000', '0.25': '25000 100000'}.get(cpu)
     if not quota or row.get('paths') != paths or row.get('role_placement_verified') is not True:
         raise RuntimeError('missing role capacity configuration or placement')
+    if cpu_layout not in ('shared', 'split'):
+        raise RuntimeError('unsupported CPU layout')
+    validate_capacity_accounting(row, 'resource_profile', quota,
+                                 'robot-supervisor-and-two-actuators', 2 if cpu_layout == 'split' else 1,
+                                 '0' if cpu_layout == 'split' else None)
+    if cpu_layout == 'split':
+        validate_capacity_accounting(row, 'server_resource_profile', '100000 100000',
+                                     'controller-relays-and-measurement', 2, '1')
+        roles = {'supervisor': '0', 'app': '0', 'app2': '0', 'controller': '1',
+                 'relay0': '1', 'relay1': '1', 'measurement': '1'}
+        for suffix in ('', '_after'):
+            placement = row.get('role_cpu_placement' + suffix, {})
+            if (set(placement) != set(roles)
+                    or any(placement[k].get('cpus') != cpus
+                           or type(placement[k].get('threads')) is not int
+                           or placement[k]['threads'] <= 0 for k, cpus in roles.items())
+                    or row['server_resource_profile' + suffix]['cpu_model'] != row['resource_profile' + suffix]['cpu_model']):
+                raise RuntimeError('incomplete or overlapping role CPU placement')
+
+
+def validate_capacity_accounting(row, prefix, quota, scope, vcpus, cpus):
     stats = []
     models = set()
-    for name in ('resource_profile', 'resource_profile_after'):
+    for name in (prefix, prefix + '_after'):
         profile = row.get(name, {})
-        if (profile.get('scope') != 'robot-supervisor-and-two-actuators'
+        if (profile.get('scope') != scope
                 or profile.get('cpu_max') != quota
-                or profile.get('initial_preparation_limited') is not False
-                or profile.get('controller_relay_measurement_limited') is not False
+                or profile.get('initial_preparation_limited') is not (scope == 'controller-relays-and-measurement')
+                or profile.get('controller_relay_measurement_limited') is not (scope == 'controller-relays-and-measurement')
                 or not isinstance(profile.get('cpu_model'), str) or not profile['cpu_model'].strip()
-                or type(profile.get('guest_vcpus')) is not int or profile['guest_vcpus'] != 1
+                or type(profile.get('guest_vcpus')) is not int or profile['guest_vcpus'] != vcpus
+                or cpus is not None and profile.get('cpuset_cpus_effective') != cpus
                 or not profile.get('cpu_pressure', '').startswith('some ')):
-            raise RuntimeError('incorrect robot-only resource profile')
+            raise RuntimeError('incorrect role resource profile')
         models.add(profile['cpu_model'])
         try:
             values = dict(line.split() for line in profile['cpu_stat'].splitlines())
             values = {k: int(values[k]) for k in ('usage_usec', 'nr_periods', 'nr_throttled', 'throttled_usec')}
         except (KeyError, ValueError, AttributeError) as error:
-            raise RuntimeError('incomplete robot CPU accounting') from error
+            raise RuntimeError('incomplete role CPU accounting') from error
         if any(v < 0 for v in values.values()):
-            raise RuntimeError('invalid robot CPU accounting')
+            raise RuntimeError('invalid role CPU accounting')
         stats.append(values)
     if (len(models) != 1 or stats[1]['usage_usec'] <= stats[0]['usage_usec']
             or any(stats[1][k] < stats[0][k] for k in stats[0])):
-        raise RuntimeError('robot CPU accounting did not advance')
+        raise RuntimeError('role CPU accounting did not advance')
 
 
-def validate_application_mixed_result(status, preparation=False, paths=8, robot_cpu=None):
+def validate_application_mixed_result(status, preparation=False, paths=8, robot_cpu=None, cpu_layout='shared'):
     reports = [row.get('report', {}) for row in status.get('reports', [])]
     if (status.get('exit') != 0 or len(reports) != 3
             or paths not in (4, 8)
@@ -420,7 +445,7 @@ def validate_application_mixed_result(status, preparation=False, paths=8, robot_
                 or row.get('steady_seconds', 0) < 15):
             raise RuntimeError('mixed application continuity evidence incomplete')
         if robot_cpu is not None:
-            validate_robot_capacity(row, paths, robot_cpu)
+            validate_robot_capacity(row, paths, robot_cpu, cpu_layout)
         if preparation:
             path_ids = ('p00', 'p01', 'p02', 'p03', 'p10', 'p11', 'p12', 'p13')
             if (row.get('automatic_rebuild') is not True or row.get('rebuild_completed') is not True
@@ -603,7 +628,7 @@ def validate_manager_auto_result(status, paths, installation=False):
             or summary.get('required_samples_per_class') != 20):
         raise RuntimeError('incomplete or misleading SLO summary')
 
-def exercise(vm, case, mode, delta, result, robot_cpus='0.5'):
+def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared'):
     vm.launch()
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
@@ -627,7 +652,7 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5'):
         capacity = case.startswith('application-capacity-')
         action = 'application-capacity' if capacity else case
         paths = int(case.rsplit('-', 1)[1]) if capacity else 8
-        vm.call(action + '-start', {'paths': paths, 'robot_cpus': robot_cpus} if capacity else {})
+        vm.call(action + '-start', {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout} if capacity else {})
         until = time.monotonic() + 16 * 60
         while time.monotonic() < until:
             status = vm.call(action + '-result')
@@ -635,7 +660,7 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5'):
                 result[case] = status
                 vm.record(case + '-result', status)
                 if capacity or case in ('application-mixed', 'application-preparation'):
-                    validate_application_mixed_result(status, preparation=case == 'application-preparation', paths=paths, robot_cpu=robot_cpus if capacity else None)
+                    validate_application_mixed_result(status, preparation=case == 'application-preparation', paths=paths, robot_cpu=robot_cpus if capacity else None, cpu_layout=cpu_layout)
                 else:
                     validate_application_approval_result(status)
                 return result
@@ -897,6 +922,22 @@ def record_container_resources(verdict, root=Path('/sys/fs/cgroup')):
         evidence['after'] = container_resource_sample(root)
 
 
+def capacity_vcpus(layout, cases, quota, period):
+    try:
+        quota, period = int(quota), int(period)
+    except ValueError as error:
+        raise RuntimeError('finite outer CPU quota required') from error
+    if quota <= 0 or period <= 0:
+        raise RuntimeError('positive outer CPU quota required')
+    if layout == 'shared' and quota <= period:
+        return 1
+    if (layout == 'split' and cases
+            and set(cases) <= {'application-capacity-4', 'application-capacity-8'}
+            and quota == 2 * period):
+        return 2
+    raise RuntimeError('shared layout requires <=1 outer CPU; split requires capacity cases and exactly 2 outer CPUs')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
@@ -904,6 +945,7 @@ def main():
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
     parser.add_argument('--robot-cpus', default='0.5', choices=['1', '0.5', '0.25'])
+    parser.add_argument('--cpu-layout', default='shared', choices=['shared', 'split'])
     args = parser.parse_args()
     if not Path('/.dockerenv').exists() or set(os.listdir('/sys/class/net')) != {'lo'}:
         raise SystemExit('run only inside the dedicated network-none container')
@@ -913,8 +955,9 @@ def main():
     quota, period = Path('/sys/fs/cgroup/cpu.max').read_text().split()
     memory = Path('/sys/fs/cgroup/memory.max').read_text().strip()
     swap = Path('/sys/fs/cgroup/memory.swap.max').read_text().strip()
-    if quota == 'max' or int(quota) > int(period) or memory == 'max' or int(memory) > 2 * 1024**3 or swap != '0':
-        raise SystemExit('bounded CPU=1, memory<=2GiB, no-swap cgroup v2 required')
+    vcpus = capacity_vcpus(args.cpu_layout, args.case, quota, period)
+    if memory == 'max' or int(memory) > 2 * 1024**3 or swap != '0':
+        raise SystemExit('bounded CPU layout, memory<=2GiB, no-swap cgroup v2 required')
     image = json.loads(Path('/input/image.json').read_text())
     if set(image['sha256']) != {'vmlinuz', 'initrd', 'guest.qcow2'}:
         raise SystemExit('incomplete guest image manifest')
@@ -925,7 +968,7 @@ def main():
             if hashlib.file_digest(f, 'sha256').hexdigest() != expected:
                 raise SystemExit('guest image digest mismatch: ' + name)
     Path('/results/runner.json').write_text(json.dumps({'qemu': subprocess.check_output(['qemu-system-x86_64', '--version'], text=True),
-        'cpu_max': [quota, period], 'memory_max': memory, 'swap_max': swap, 'cap_eff': caps, 'image': image}, indent=2) + '\n')
+        'cpu_max': [quota, period], 'cpu_layout': args.cpu_layout, 'guest_vcpus': vcpus, 'memory_max': memory, 'swap_max': swap, 'cap_eff': caps, 'image': image}, indent=2) + '\n')
     cases = [(case, args.mode, args.delta, args.rtc) for case in args.case]
     if 'matrix' in args.case:
         if args.case != ['matrix']:
@@ -941,11 +984,11 @@ def main():
     host_before = host_clock()
     for case, mode, delta, rtc in cases:
         label = f'{case}-{mode}-{delta}-{rtc}'
-        vm = VM('/work/vm-' + uuid.uuid4().hex[:8], '/results/' + label + '-' + uuid.uuid4().hex[:8], rtc)
+        vm = VM('/work/vm-' + uuid.uuid4().hex[:8], '/results/' + label + '-' + uuid.uuid4().hex[:8], rtc, vcpus)
         verdict = {'schema_version': 1, 'case': case, 'mode': mode, 'delta': delta, 'rtc': rtc, 'completed': False, 'qualified': False}
         try:
             with record_container_resources(verdict):
-                exercise(vm, case, mode, delta, verdict, args.robot_cpus)
+                exercise(vm, case, mode, delta, verdict, args.robot_cpus, args.cpu_layout)
             verdict['completed'] = True
             if 'unsupported_reason' not in verdict and 'defect_reason' not in verdict:
                 verdict['qualified'] = True

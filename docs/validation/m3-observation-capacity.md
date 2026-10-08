@@ -754,3 +754,46 @@ are preserved in `/tmp/vpnctl-postcheck-priority-repro-vgraht0s`.
 The deployment resource envelope and separation of controller/relay/measurement
 CPU from the robot remain open under #185. Additional diagnostic data is not a
 capacity pass or an M3 deployment qualification.
+
+### 역할별 CPU 분리 비교 시험
+
+기존 `application-capacity-4/8` 기본 프로필은 유지한다. 전체 VM 1 vCPU,
+외부 컨테이너 1 CPU, 로봇 supervisor·두 actuator의 합산 0.5 CPU라는
+동일 CPU 경쟁 조건도 계속 CI 필수 검사로 실행한다.
+
+추가 프로필은 다음과 같이 별도로 실행한다.
+
+```sh
+VPNCTL_VM_CPUS=2 VPNCTL_VM_RACE=1 \
+  ./scripts/test-vm.sh --case application-capacity-4 application-capacity-8 \
+  --robot-cpus 0.5 --cpu-layout split
+```
+
+- QEMU 2 vCPU, 외부 컨테이너 합산 2 CPU, 메모리 2 GiB / 게스트 768 MiB.
+- 로봇 supervisor·두 actuator와 명령 자식: 게스트 CPU 0, 합산 0.5 CPU.
+- 컨트롤러·릴레이 2개·측정기 및 초기 enrollment/preparation:
+  게스트 CPU 1, 합산 1 CPU. 초기 준비가 로봇 예산에 포함되지 않는 기존
+  범위는 유지하며 서버 프로필에는 포함 여부를 명시한다.
+- `split`은 4/8경로 capacity 사례와 외부 2 CPU에서만 허용한다. 기존
+  lease/power/manager 사례는 기본 공유 CPU 조건을 유지한다.
+
+서버 역할은 별도 cgroup으로 이동한 측정 프로세스에서 상속된다. 로봇
+프로세스는 기존 `CLONE_INTO_CGROUP` 실행으로 해당 로봇 그룹에 직접
+배치한다. 게스트 안에서만 `cpu`·`cpuset`을 사용하며 호스트 affinity,
+네트워크, 커널 설정이나 전원 상태는 변경하지 않는다.
+
+요청한 CPU 마스크와 실제 부여된 CPU가 다를 수 있으므로
+[`cpuset.cpus.effective`](https://docs.kernel.org/admin-guide/cgroup-v2.html#cpuset)
+및 각 역할의 실제 cgroup 소속과 모든 관측된 스레드의 `Cpus_allowed_list`를
+검사한다. 사전·사후 CPU 사용량, throttling, pressure, CPU 모델과 vCPU 수를
+보존하며 증거 누락·마스크 겹침·사용량 역행·잘못된 역할 범위를 거부한다.
+사후 배치는 워커 종료 전에 수집한다. 정리 시 측정 프로세스를 원래 cgroup으로
+복구한 뒤 이 실행이 생성한 그룹만 정리하며, 현재 프로세스의 그룹인지
+판단할 수 없으면 강제 종료를 거부하고 시험을 실패시킨다.
+
+두 프로필 모두 기존 3개 healthy 위치, 2개 actuator 실제 payload,
+활성 lease, 15초 이상 steady / 각 3회 이상 적용 주기, 10초 이내 관측
+간격 기준을 사용한다. split 성공은 기존 공유 CPU 실패를 소급해 통과시키거나
+#185/#202를 해결한 것으로 취급하지 않는다. 동일 호스트 CPU와 게스트 커널,
+IRQ·네트워크 처리를 공유하므로 별도 물리 서버 배치를 완전히 재현하지도 않는다.
+최소 배포 CPU·장기 안정성·성능 향상은 이 짧은 비교 시험만으로 판정하지 않는다.

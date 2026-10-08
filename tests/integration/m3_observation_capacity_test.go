@@ -173,14 +173,21 @@ func TestNetns_M3PreparationCapacity(t *testing.T) {
 }
 
 func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
-	applicationMixedCandidatesProfile(t, healthy, rebuild, 8, "")
+	applicationMixedCandidatesProfile(t, healthy, rebuild, 8, "", "shared")
 }
 
-func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, paths int, robotCPU string) {
-	var group *capacityGroup
+func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, paths int, robotCPU, layout string) {
+	var group, serverGroup *capacityGroup
+	robotCPUs := ""
+	if layout == "split" {
+		serverGroup = newCapacityGroup(t, "1", "1")
+		serverGroup.scope = "controller-relays-and-measurement"
+		serverGroup.moveWorker(t)
+		robotCPUs = "0"
+	}
 	var groupFD *os.File
 	if robotCPU != "" {
-		group = newCapacityGroup(t, robotCPU)
+		group = newCapacityGroup(t, robotCPU, robotCPUs)
 		groupFD = group.file
 	}
 	f := applicationFixtureWithGroup(t, true, paths, false, groupFD)
@@ -195,14 +202,22 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	if group != nil {
 		report["resource_profile"] = group.evidence(t)
 	}
+	if serverGroup != nil {
+		report["server_resource_profile"] = serverGroup.evidence(t)
+	}
 	t.Cleanup(func() {
-		report["completed"] = !t.Failed()
+		defer func() {
+			report["completed"] = !t.Failed()
+			writeM3Report(t, filepath.Join(f.results, "application-mixed-candidates.json"), report)
+		}()
 		report["cpu_stat_after"] = cgroup("cpu.stat")
 		report["memory_events_after"] = cgroup("memory.events")
 		if group != nil {
 			report["resource_profile_after"] = group.evidence(t)
 		}
-		writeM3Report(t, filepath.Join(f.results, "application-mixed-candidates.json"), report)
+		if serverGroup != nil {
+			report["server_resource_profile_after"] = serverGroup.evidence(t)
+		}
 	})
 	secondLog := filepath.Join(f.results, "capacity-app2.jsonl")
 	secondArgs := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app2", "--watch", "--interval", "500ms"}
@@ -229,6 +244,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	report["fault_installed_at"] = started
 	logfile := filepath.Join(f.results, "capacity-app.jsonl")
 	watcher := startNetworkProcessInGroup(t, groupFD, f.robot, logfile, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "500ms", "--probe-timeout", "2s")
+	var placement func() map[string]any
 	if group != nil {
 		for _, p := range []*networkProcess{f.nodeSupervisor, watcher, second} {
 			group.requireMembership(t, p.cmd.Process.Pid, true)
@@ -237,6 +253,27 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		group.requireMembership(t, f.controller.process.cmd.Process.Pid, false)
 		for _, r := range f.recipients {
 			group.requireMembership(t, r.watch.cmd.Process.Pid, false)
+		}
+		if serverGroup != nil {
+			placement = func() map[string]any {
+				roles := map[string]any{}
+				for name, p := range map[string]*networkProcess{"supervisor": f.nodeSupervisor, "app": watcher, "app2": second} {
+					roles[name] = group.placement(t, p.cmd.Process.Pid)
+				}
+				roles["measurement"] = serverGroup.placement(t, os.Getpid())
+				roles["controller"] = serverGroup.placement(t, f.controller.process.cmd.Process.Pid)
+				for i, r := range f.recipients {
+					roles[fmt.Sprintf("relay%d", i)] = serverGroup.placement(t, r.watch.cmd.Process.Pid)
+				}
+				return roles
+			}
+			report["role_cpu_placement"] = placement()
+			// Runs before process cleanup so every live role can be checked.
+			t.Cleanup(func() {
+				if report["role_cpu_placement_after"] == nil {
+					report["role_cpu_placement_after"] = placement()
+				}
+			})
 		}
 		report["role_placement_verified"] = true
 	}
@@ -410,6 +447,9 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		t.Fatal("not all slow paths exercised", counters)
 	}
 	report["fault_counters"] = counters
+	if placement != nil {
+		report["role_cpu_placement_after"] = placement()
+	}
 	watcher.terminate(t)
 	second.terminate(t)
 }
