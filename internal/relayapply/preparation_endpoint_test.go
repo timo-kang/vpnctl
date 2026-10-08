@@ -36,7 +36,7 @@ func (r *preparationEndpointReader) read(ctx context.Context, args ...string) ([
 		return nil, err
 	}
 	encode := func(value any) ([]byte, error) { return json.Marshal(value) }
-	if strings.Join(args, " ") == "-j address show" {
+	if strings.Join(args, " ") == "-j address show dev "+r.underlay.Interface {
 		r.addresses++
 		index := 7
 		if r.changeLink && r.addresses > 1 {
