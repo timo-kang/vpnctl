@@ -20,6 +20,7 @@ race 사용 여부, 역할 배치, 경로·앱 수, 시험 구간을 함께 기�
 | --- | --- | --- |
 | `application-capacity-4/8` | 두 자동 actuator, 정상 경로 위치 3개, 15초 이상 유지 | 초기 준비, CPU 제한 중 재구축 |
 | `application-capacity-rebuild-4/8` | 자동 actuator 1개 + 수동 고정 actuator 1개, 비활성 후보 재구축, 60초 이상 유지 | 초기 준비, 활성 경로 failover, LAN 보존, 장기 부하 |
+| `application-capacity-startup-4/8` | 인증 등록·앱용 경로 준비·앱 예약부터 로봇 quota 적용, 두 자동 앱, 정상 경로 위치 3개 | 전원 부팅·키 생성, 재구축, 활성 전환, 장기 부하 |
 | `manager-auto/install-4/8` | 실제 NetworkManager·Netplan 공존 및 전환 | 로봇만의 CPU 한도 |
 
 서로 다른 시험의 성공을 합쳐 모든 조건이 동시에 검증됐다고 판정하지 않는다.
@@ -68,12 +69,41 @@ split도 동일 물리 CPU와 게스트 커널/IRQ를 공유하므로 물리 서
 완전히 재현하는 것은 아니다. 운영 관측 3초 예산, 승인·철회, nft 및
 BOOTTIME 보호 기준은 변경하지 않는다.
 
+## 초기 등록·준비부터 CPU 제한
+
+```sh
+VPNCTL_VM_CPUS=2 VPNCTL_VM_RACE=1 \
+  VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-capacity-startup-new-run \
+  ./scripts/test-vm.sh \
+  --case application-capacity-startup-4 application-capacity-startup-8 \
+  --robot-cpus 0.5 --cpu-layout split
+```
+
+`startup`은 별도의 split 프로필이다. 네트워크 namespace, 사전 공급된
+WireGuard 키와 설정 파일은 시험 구성에 해당한다. 이후 실제 node join의
+인증 등록과 재등록, catalog refresh/plan, 각 앱용 경로의 최초 prepare,
+두 앱 reserve 명령을 처음부터 로봇 cgroup에서 실행한다. 임시 일반 경로를
+미리 설치했다가 해제하는 기존 fixture 절차는 사용하지 않는다.
+
+각 단기 명령은 clone3로 로봇 그룹에서 시작한다. 실행 직전 실제 cgroup과
+CPU 마스크를 확인한 뒤 exec하며, 자식도 같은 제한을 상속한다. 공개 보고서는
+단계명·시간·배치 검증 결과만 담으며 bootstrap token이나 인증서 키는 담지 않는다.
+모든 필수 단계의 순서와 성공, 명시적 ownership admission 재시도만 허용한다.
+
+초기 준비 시간은 컨트롤러 시작 직전부터 모든 후보의 실제 TCP 확인 및 두 앱
+예약 완료까지 120초 이내다. 중간의 서버 준비와 측정 시간도 포함하므로
+로봇 연산 시간이나 전원 부팅 시간으로 해석하지 않는다. 로봇 CPU 누적 사용량은
+그 초기 구간부터 측정한다. 컨트롤러·릴레이·측정기는 계속 CPU 1에 둔다.
+그 뒤 두 자동 actuator의 실제 통신, 최소 15초/각 3주기 이상 유지와 10초
+최신 관측 기준을 동일 quota에서 검사한다. 이 성공으로 재구축이나 실제
+NetworkManager·Netplan 공존까지 통과했다고 판정하지 않는다.
+
 ## 남은 완료 조건
 
 1. 로봇·조종기 대표 하드웨어군별로 시험 머신과 경로·앱 수를 정하고
    production 빌드로 동일 시험을 반복한다. race 빌드는 별도 회귀 결과로
    기록한다. 현재 x86 샌드박스 성공으로 다른 아키텍처나 장비까지 판정하지 않는다.
-2. 초기 준비부터 CPU 제한을 적용한 startup 및 두 자동 앱 재구축을 확인한다.
+2. 초기 준비 제한 프로필의 대표 장비 검증과 두 자동 앱 재구축을 확인한다.
 3. 자원 포화 시 진단과 readiness, 차단 및 예산 복구 후 재확인을 검증한다.
 4. 실제 관리자 공존, 활성 경로 전환, 독립 LAN 보존을 동일 역할 예산에서
    검증하고 장기 부하를 추가한다. 부족한 표본으로 p95나 no-uplink SLO

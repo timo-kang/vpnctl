@@ -16,9 +16,9 @@ import (
 )
 
 // The outer VM quota measures all colocated roles. This distinct profile limits
-// just the live robot supervisor and both actuators, including command children.
-// Initial enrollment/preparation, controller, relays and measurement stay outside
-// the robot quota. The opt-in split layout also gives these roles guest CPU 1.
+// the robot supervisor and both actuators, including command children. The
+// explicit startup variant includes initial enrollment and preparation. Other
+// profiles leave initial setup outside. Split assigns non-robot roles CPU 1.
 func TestVMApplicationCapacity(t *testing.T) {
 	if os.Getenv("VPNCTL_VM_WORKER") != "1" {
 		t.Skip("requires disposable VM runner")
@@ -29,7 +29,14 @@ func TestVMApplicationCapacity(t *testing.T) {
 	if rebuild != "0" && rebuild != "1" {
 		t.Fatal("explicit steady or rebuild profile required")
 	}
+	startup := os.Getenv("VPNCTL_CAPACITY_STARTUP")
+	if startup != "0" && startup != "1" {
+		t.Fatal("explicit startup profile required")
+	}
 	layout := os.Getenv("VPNCTL_CAPACITY_CPU_LAYOUT")
+	if startup == "1" && (layout != "split" || rebuild == "1") {
+		t.Fatal("startup requires separate split CPU profile")
+	}
 	if layout != "shared" && layout != "split" {
 		t.Fatal("explicit CPU layout required")
 	}
@@ -46,18 +53,19 @@ func TestVMApplicationCapacity(t *testing.T) {
 	}
 	for _, healthy := range []int{0, paths/2 - 1, paths - 1} {
 		t.Run(fmt.Sprint(healthy), func(t *testing.T) {
-			applicationMixedCandidatesProfile(t, healthy, rebuild == "1", paths, cpu, layout)
+			applicationMixedCandidatesProfile(t, healthy, rebuild == "1", paths, cpu, layout, startup == "1")
 		})
 	}
 }
 
 type capacityGroup struct {
-	file  *os.File
-	path  string
-	quota string
-	model string
-	cpus  string
-	scope string
+	file               *os.File
+	path               string
+	quota              string
+	model              string
+	cpus               string
+	scope              string
+	preparationLimited bool
 }
 
 func capacityQuota(cpu string) string {
@@ -188,7 +196,7 @@ func (g *capacityGroup) evidence(t *testing.T) map[string]any {
 	evidence := map[string]any{"scope": g.scope, "cpu_max": g.quota,
 		"cpu_model": g.model, "guest_vcpus": runtime.NumCPU(),
 		"cpu_stat": read("cpu.stat"), "cpu_pressure": read("cpu.pressure"),
-		"initial_preparation_limited":          g.scope == "controller-relays-and-measurement",
+		"initial_preparation_limited":          g.preparationLimited,
 		"controller_relay_measurement_limited": g.scope == "controller-relays-and-measurement"}
 	if g.cpus != "" {
 		actual := read("cpuset.cpus.effective")

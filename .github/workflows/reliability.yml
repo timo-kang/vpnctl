@@ -452,7 +452,7 @@ jobs:
             sudo setfacl -m "u:$(id -un):rw" /dev/kvm
           fi
       - name: Reject incomplete and incorrectly scoped resource evidence
-        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p test_runner.py
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p 'test_*.py'
       - name: Two robot actuators and supervisor with an independent CPU budget
         env:
           VPNCTL_VM_RACE: '1'
@@ -481,6 +481,10 @@ jobs:
             label: '4 candidates, rebuild'
           - profile: rebuild-8
             label: '8 candidates, rebuild'
+          - profile: startup-4
+            label: '4 candidates, startup'
+          - profile: startup-8
+            label: '8 candidates, startup'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -498,7 +502,7 @@ jobs:
             sudo setfacl -m "u:$(id -un):rw" /dev/kvm
           fi
       - name: Reject incomplete and incorrectly scoped resource evidence
-        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p test_runner.py
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p 'test_*.py'
       - name: Robot CPU 0 and server/measurement CPU 1 with verified thread placement
         env:
           VPNCTL_VM_RACE: '1'
@@ -538,7 +542,7 @@ jobs:
       - name: Host-safe sampler and evidence validation regressions
         run: |
           go test -race -tags=integration ./tests/integration -run "^Test(LatestApplicationResult|Manager(Stream|Timeline|LAN|Packet))" -count=1
-          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p test_runner.py
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p 'test_*.py'
       - name: Automatic underlay and relay failover, authority and coexistence
         env:
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-manager-auto
@@ -576,7 +580,7 @@ jobs:
       - name: Host-safe sampler and evidence validation regressions
         run: |
           go test -race -tags=integration ./tests/integration -run "^TestManager(Stream|Timeline|LAN)" -count=1
-          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p test_runner.py
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p 'test_*.py'
       - name: Automatic underlay and relay failover, authority and coexistence
         env:
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-relay-installation

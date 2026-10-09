@@ -196,15 +196,16 @@ func TestNetns_M3PreparationCapacity(t *testing.T) {
 }
 
 func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
-	applicationMixedCandidatesProfile(t, healthy, rebuild, 8, "", "shared")
+	applicationMixedCandidatesProfile(t, healthy, rebuild, 8, "", "shared", false)
 }
 
-func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, paths int, robotCPU, layout string) {
+func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, paths int, robotCPU, layout string, startup bool) {
 	var group, serverGroup *capacityGroup
 	robotCPUs := ""
 	if layout == "split" {
 		serverGroup = newCapacityGroup(t, "1", "1")
 		serverGroup.scope = "controller-relays-and-measurement"
+		serverGroup.preparationLimited = !startup
 		serverGroup.moveWorker(t)
 		robotCPUs = "0"
 	}
@@ -213,7 +214,13 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		group = newCapacityGroup(t, robotCPU, robotCPUs)
 		groupFD = group.file
 	}
-	f := applicationFixtureWithGroup(t, true, paths, false, groupFD)
+	var initial *capacityStartup
+	if startup {
+		initial = &capacityStartup{group: group}
+		group.scope = "robot-startup-and-runtime"
+		group.preparationLimited = true
+	}
+	f := applicationFixtureWithStartup(t, true, paths, false, groupFD, initial)
 	managed := map[string]relayapply.PreparationStatus{}
 	if rebuild {
 		for _, p := range f.plan.Paths {
@@ -224,6 +231,10 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	report := map[string]any{"healthy_index": healthy, "healthy_path": f.plan.Paths[healthy].PathID, "cpu_stat_before": cgroup("cpu.stat"), "memory_events_before": cgroup("memory.events")}
 	if group != nil {
 		report["resource_profile"] = group.evidence(t)
+		if initial != nil {
+			report["resource_profile"] = initial.before
+			report["startup"] = initial.report
+		}
 	}
 	if serverGroup != nil {
 		report["server_resource_profile"] = serverGroup.evidence(t)
