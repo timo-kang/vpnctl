@@ -121,7 +121,8 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 		p, entry := out.Paths[job.index], job.entry
 		err := ctx.Err()
 		if e.uncertain {
-			err = errors.Join(err, relaycache.ErrUncertain)
+			authorityErr = relaycache.ErrUncertain
+			err = errors.Join(err, authorityErr)
 		}
 		acquired := false
 		if err == nil {
@@ -143,10 +144,9 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 				err = errors.Join(authorityErr, ctx.Err())
 			}
 		}
-		if authorityErr != nil || e.uncertain || ctx.Err() != nil {
+		if authorityErr != nil || ctx.Err() != nil {
 			// Status checkpoints the cache clock. A failed write invalidates
 			// this whole sweep, including a grant already in flight or done.
-			authorityErr = errors.Join(authorityErr, err, ctx.Err())
 			stopRenewals()
 			if acquired {
 				<-slots
@@ -177,7 +177,10 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 				err = ErrLeaseExpired
 			}
 			if err != nil {
-				failures[job.index] = errors.Join(err, b.Block(renewCtx, entry))
+				failures[job.index] = err
+				if renewCtx.Err() == nil {
+					failures[job.index] = errors.Join(err, b.Block(renewCtx, entry))
+				}
 			} else {
 				p.KernelReady, p.Reason = true, ""
 			}
@@ -186,10 +189,12 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 	}
 	workers.Wait()
 	if abort := errors.Join(authorityErr, ctx.Err()); abort != nil {
-		// Join first: a worker must never reopen a gate after cleanup. Retain
-		// namespace ownership and the original maintenance deadline, but let
-		// cleanup use its remaining time even if the caller canceled. When
-		// time is exhausted, report the cleanup failure; never claim readiness.
+		// Join before revoking invalid authority: no worker may reopen a gate
+		// after cleanup. An ordinary caller cancellation only invalidates this
+		// sweep's readiness. Other applications still own the same valid,
+		// kernel-bounded leases, including an approved grant ACKed on cancel.
+		// Authority cleanup retains the original maintenance deadline even if
+		// the caller canceled; exhausted cleanup time remains an error.
 		deadline, _ := ctx.Deadline()
 		cleanup, stopCleanup := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 		defer stopCleanup()
@@ -199,7 +204,10 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 			if p.Lease != nil {
 				p.Lease.Active = false
 			}
-			failures[job.index] = errors.Join(failures[job.index], abort, b.Block(cleanup, job.entry))
+			failures[job.index] = errors.Join(failures[job.index], abort)
+			if authorityErr != nil {
+				failures[job.index] = errors.Join(failures[job.index], b.Block(cleanup, job.entry))
+			}
 		}
 	}
 	for _, p := range out.Paths {

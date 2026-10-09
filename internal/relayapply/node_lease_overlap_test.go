@@ -220,6 +220,11 @@ wait:
 
 func TestNodeLeaseOverlapCancellationJoinsBeforeReturn(t *testing.T) {
 	e, b := overlapLeaseFixture(t, 8)
+	guard := &overlapRevocationBackend{overlapLeaseBackend: b}
+	e.backend = guard
+	for _, entry := range e.journal.Entries {
+		b.active[entry.Candidate.PathID] = true
+	}
 	gate, cleanup := make(chan struct{}), make(chan struct{})
 	b.gates["p0"], b.gates["p1"] = gate, gate
 	b.canceled, b.finishCancellation = make(chan string, 2), cleanup
@@ -262,9 +267,12 @@ wait:
 		t.Error("queued renewal started after cancellation")
 	}
 	for _, p := range r.result.Paths {
-		if p.KernelReady || b.active[p.PathID] || b.blocks[p.PathID] == 0 {
-			t.Error("canceled path was left usable")
+		if p.KernelReady || !b.active[p.PathID] || b.blocks[p.PathID] != 0 {
+			t.Error("canceled app sweep claimed readiness or revoked an independent valid lease")
 		}
+	}
+	if len(e.maintained) != 0 || len(guard.cleanupDeadlines) != 0 {
+		t.Error("routine cancellation retained sweep readiness or started detached revocation")
 	}
 }
 
@@ -521,63 +529,117 @@ func TestNodeLeaseOverlapLateAuthorityFailureRevokesWholeSweep(t *testing.T) {
 	}
 }
 
-func TestNodeLeaseOverlapParentCancelUsesRemainingCleanupDeadline(t *testing.T) {
-	e, base := overlapLeaseFixture(t, 4)
+// Stopping one app's observer is not a controller revocation. The installed
+// leases are shared by other apps and remain governed by their existing gates.
+// Cancellation must join this sweep and discard its readiness, without closing
+// healthy shared gates or extending any approved lease deadline.
+func TestNodeLeaseOverlapParentCancelPreservesIndependentLeases(t *testing.T) {
+	for _, mode := range []string{"paused_renewal", "already_granted", "deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			e, base := overlapLeaseFixture(t, 4)
+			b := &overlapRevocationBackend{overlapLeaseBackend: base}
+			e.backend = b
+			for _, entry := range e.journal.Entries {
+				b.active[entry.Candidate.PathID] = true
+			}
+			first := make(chan struct{})
+			if mode != "already_granted" {
+				b.gates["p0"] = make(chan struct{})
+			}
+			b.onStart = func(entry Entry) {
+				if entry.Candidate.PathID == "p0" {
+					close(first)
+				}
+			}
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if mode == "deadline" {
+				ctx, cancel = context.WithTimeout(context.Background(), 250*time.Millisecond)
+			} else {
+				ctx, cancel = context.WithCancel(context.Background())
+			}
+			defer cancel()
+			b.beforeCheck = func(checkCtx context.Context, entry Entry) error {
+				if entry.Candidate.PathID != "p1" {
+					return nil
+				}
+				if mode == "already_granted" {
+					select {
+					case <-b.finished:
+					case <-checkCtx.Done():
+						return checkCtx.Err()
+					}
+				} else {
+					select {
+					case <-first:
+					case <-checkCtx.Done():
+						return checkCtx.Err()
+					}
+				}
+				if mode == "deadline" {
+					<-checkCtx.Done()
+				} else {
+					cancel()
+				}
+				return checkCtx.Err()
+			}
+			r, err := e.MaintainLeases(ctx)
+			if !errors.Is(err, ctx.Err()) || r.KernelReady || len(e.maintained) != 0 || b.inflight != 0 {
+				t.Fatal("canceled sweep retained readiness or failed to join", err)
+			}
+			for _, path := range r.Paths {
+				if path.KernelReady || path.Lease != nil && path.Lease.Active || !b.active[path.PathID] || b.blocks[path.PathID] != 0 {
+					t.Errorf("canceling one app disrupted independent valid lease %s or retained its own readiness", path.PathID)
+				}
+			}
+			if len(b.cleanupDeadlines) != 0 || len(b.started) != 1 {
+				t.Error("routine cancellation started detached revocation or queued renewal")
+			}
+			wantGrants := 0
+			if mode == "already_granted" {
+				wantGrants = 1
+			}
+			if b.grants["p0"] != wantGrants {
+				t.Error("fixture did not exercise the intended renewal boundary")
+			}
+		})
+	}
+}
+
+func TestNodeLeaseOverlapAuthorityFailureExpiredCleanupBudgetReportsFailure(t *testing.T) {
+	e, base, dir := overlapLeaseFixtureDirectory(t, 2)
 	b := &overlapRevocationBackend{overlapLeaseBackend: base}
 	e.backend = b
 	for _, entry := range e.journal.Entries {
 		b.active[entry.Candidate.PathID] = true
 	}
-	first := make(chan struct{})
 	b.gates["p0"] = make(chan struct{})
+	first, finishCancellation := make(chan struct{}), make(chan struct{})
+	b.canceled, b.finishCancellation = make(chan string, 1), finishCancellation
 	b.onStart = func(entry Entry) {
 		if entry.Candidate.PathID == "p0" {
 			close(first)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var deadline time.Time
-	b.beforeCheck = func(checkCtx context.Context, entry Entry) error {
-		if entry.Candidate.PathID == "p0" {
-			deadline, _ = checkCtx.Deadline()
-		} else if entry.Candidate.PathID == "p1" {
-			select {
-			case <-first:
-				cancel()
-			case <-checkCtx.Done():
-				return checkCtx.Err()
-			}
-		}
-		return nil
-	}
-	r, err := e.MaintainLeases(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatal("parent cancellation was not reported", err)
-	}
-	assertOverlapRevoked(t, e, b, r, deadline)
-	if len(b.started) != 1 || len(b.grants) != 0 {
-		t.Error("queued candidate started or granted after parent cancellation")
-	}
-}
-
-func TestNodeLeaseOverlapExpiredCleanupBudgetReportsFailure(t *testing.T) {
-	e, base := overlapLeaseFixture(t, 2)
-	b := &overlapRevocationBackend{overlapLeaseBackend: base}
-	e.backend = b
-	for _, entry := range e.journal.Entries {
-		b.active[entry.Candidate.PathID] = true
-	}
-	b.gates["p0"] = make(chan struct{})
 	b.beforeCheck = func(ctx context.Context, entry Entry) error {
 		if entry.Candidate.PathID == "p1" {
-			<-ctx.Done()
-			return ctx.Err()
+			select {
+			case <-first:
+				return os.Remove(filepath.Join(dir, "state.json"))
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
+	// A genuine authority failure requires revocation, but joining a queued
+	// kernel operation can exhaust the original deadline before cleanup starts.
+	go func() {
+		<-ctx.Done()
+		close(finishCancellation)
+	}()
 	r, err := e.MaintainLeases(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errOverlapExpiredCleanup) || r.KernelReady || len(e.maintained) != 0 || b.inflight != 0 {
 		t.Fatal("exhausted cleanup budget was not reported truthfully", err)

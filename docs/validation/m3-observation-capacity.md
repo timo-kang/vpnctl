@@ -826,7 +826,11 @@ lease bounds, probe timeouts and evidence freshness are unchanged.
 worker has started. Such a failure cancels all renewal workers, stops admission,
 joins every worker and attempts to block every queued/renewed candidate before
 releasing namespace ownership. Earlier successful results lose their readiness
-and cannot populate the maintained set. Cleanup ignores caller cancellation
+and cannot populate the maintained set. Ordinary caller cancellation is not
+authority revocation: it joins workers and discards this sweep's readiness, but
+preserves valid, kernel-bounded shared leases used by other applications. This
+also applies to an approved kernel grant acknowledged during cancellation.
+Only actual authority failure requires global revocation. Cleanup ignores caller cancellation
 but retains the original absolute maintenance deadline; exhausted time or a
 failed gate operation remains an error, with independently expiring kernel
 gates as the existing fallback. It does not claim that an unsuccessful cleanup
@@ -836,8 +840,12 @@ The regressions cover 1/4/8 paths, a stalled first candidate, a two-worker cap,
 stable result ordering, cancellation with pending workers, durable authority
 before grants, later journal/checkpoint failure, and a successful kernel reply
 arriving during cancellation. They require joined cleanup, retained deadlines
-and no surviving readiness. Removing the global cleanup condition makes the
-late-checkpoint and caller-cancellation regressions fail.
+and no surviving readiness. Removing authority cleanup leaves unauthorized
+gates live; applying it to an ordinary canceled observer interrupts another
+application. Separate regressions reject both mistakes, including authority
+failure followed by caller cancellation. The actual-manager watch-restart
+packet test caught the latter regression during development; its failed CI
+record remains attached to the PR.
 
 The local performance comparison uses the same cached guest image, eight paths,
 two apps, shared one-vCPU guest, whole-VM 0.5 CPU and robot 0.5 CPU, with race
