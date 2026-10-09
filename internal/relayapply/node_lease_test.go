@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 )
 
 type fakeNodeLease struct {
+	mu sync.Mutex
 	*fakeKernel
 	active           map[string]bool
 	failPath         string
@@ -22,6 +24,8 @@ type fakeNodeLease struct {
 }
 
 func (k *fakeNodeLease) Lease(_ context.Context, e Entry, f FreshApproval) (DeploymentLease, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	if e.Candidate.PathID == k.failPath {
 		return DeploymentLease{}, ErrConflict
 	}
@@ -33,9 +37,13 @@ func (k *fakeNodeLease) Lease(_ context.Context, e Entry, f FreshApproval) (Depl
 	return DeploymentLease{Active: true, Boot: &relayguard.State{Active: true, DeadlineNS: e.ApprovalBootNS}}, nil
 }
 func (k *fakeNodeLease) LeaseStatus(_ context.Context, e Entry) (DeploymentLease, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	return DeploymentLease{Active: k.active[e.Candidate.PathID], Boot: &relayguard.State{Active: k.active[e.Candidate.PathID], DeadlineNS: e.ApprovalBootNS}}, nil
 }
 func (k *fakeNodeLease) Block(_ context.Context, e Entry) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	k.blocks++
 	k.active[e.Candidate.PathID] = false
 	return nil

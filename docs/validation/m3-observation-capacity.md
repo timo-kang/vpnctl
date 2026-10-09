@@ -4,9 +4,13 @@
 
 This qualification covers local IPv4 application routing with up to eight
 prepared paths and two targets. Candidate TCP proofs overlap within one common
-3s window after one complete lease-maintenance sweep. Approval/cache, inventory,
-kernel checks and fail-closed changes are serialized. Workers finish before the
-engine releases its namespace/cache ownership. The common window also bounds
+3s window after one complete lease-maintenance sweep. Approval/cache writes, public inventory and kernel ownership checks are
+serialized. Independent candidate lease renewals use at most two workers; all
+workers finish before the engine releases its namespace/cache ownership. A
+failed approval checkpoint cancels the sweep, joins its workers and attempts
+to revoke every queued or renewed candidate within the original maintenance
+deadline, without reporting any of them ready. Independent per-candidate
+kernel/lease failures remain isolated. The common window also bounds
 unprotected target observation; it does not grant leases to unprotected paths.
 
 The outer observation budget remains 20s, maintenance 5s, individual TCP timeout
@@ -806,3 +810,42 @@ CPU 제한 중 재구축 시험과 배포 용량의 남은 완료 조건은
 유한 작업량에서 늦은 정상 경로가 관측 예산을 소진하는 별도 결함과
 검사 입장 계약, 장애 격리 한계는 [관측 스케줄 검증](m3-observation-scheduling.md)에
 기록한다. 이 수정으로 최소 배포 CPU나 과거 원격 실패의 해결을 추정하지 않는다.
+
+## Bounded candidate lease renewal overlap (#185)
+
+The maintenance sweep admits at most two independent candidate renewals at once.
+The namespace/cache ownership remains exclusive for the whole sweep. Journal
+updates finish before any renewal; each candidate still receives a serialized
+live kernel ownership check and durable approval-clock checkpoint immediately
+before dispatch. Each worker retains both staged nft transactions, live nft
+and BOOTTIME owner/timer checks, conditional renewal and readback. A fresh
+short rearm and its continuation stay in the same worker. Renewal frequency,
+lease bounds, probe timeouts and evidence freshness are unchanged.
+
+`Status()` is a write boundary: its clock checkpoint can fail after an earlier
+worker has started. Such a failure cancels all renewal workers, stops admission,
+joins every worker and attempts to block every queued/renewed candidate before
+releasing namespace ownership. Earlier successful results lose their readiness
+and cannot populate the maintained set. Cleanup ignores caller cancellation
+but retains the original absolute maintenance deadline; exhausted time or a
+failed gate operation remains an error, with independently expiring kernel
+gates as the existing fallback. It does not claim that an unsuccessful cleanup
+revoked traffic. Per-candidate ownership or lease failures remain isolated.
+
+The regressions cover 1/4/8 paths, a stalled first candidate, a two-worker cap,
+stable result ordering, cancellation with pending workers, durable authority
+before grants, later journal/checkpoint failure, and a successful kernel reply
+arriving during cancellation. They require joined cleanup, retained deadlines
+and no surviving readiness. Removing the global cleanup condition makes the
+late-checkpoint and caller-cancellation regressions fail.
+
+The local performance comparison uses the same cached guest image, eight paths,
+two apps, shared one-vCPU guest, whole-VM 0.5 CPU and robot 0.5 CPU, with race
+instrumentation. This is stricter than the shared CI profile's outer 1 CPU and
+is not a minimum robot CPU specification. Diagnostic command-kind accounting
+is applied equally to baseline and candidate and is not a product change.
+Whole-sweep elapsed maintenance and admission are compared separately from
+summed overlapping child-command durations. Baseline/candidate failures and
+rejected intermediate patches are retained; measurements and source/patch
+identities are recorded on #185 and the change's PR. This narrow change does
+not close #185, #186 or the M3 deployment qualification.

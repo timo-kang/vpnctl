@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"time"
 
 	"vpnctl/internal/relaycache"
@@ -61,7 +62,15 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 		// Only public ownership inventories are shared; lease data is not.
 		check = k.kernel.Check
 	}
-	var all error
+	// Finish journal updates before any renewal starts. Kernel ownership and
+	// the durable approval clock are still checked at dispatch. A later clock
+	// checkpoint failure cancels and revokes all renewals below.
+	type renewal struct {
+		index int
+		entry Entry
+	}
+	var ready []renewal
+	var failures []error
 	for i, old := range e.journal.Entries {
 		if old.LeaseVersion == 0 {
 			continue
@@ -84,44 +93,121 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 			err = errors.Join(ErrRecovery, approvalErr, b.Block(ctx, old))
 		} else {
 			entry.Generation, entry.ApprovalUntil, entry.ApprovalBootNS = w.Generation, w.ExpiresAt, w.UntilBootNS
-			ready, x := check(ctx, old, false)
-			if x != nil || !ready {
-				p.Reason = "kernel_conflict_or_unavailable"
-				err = errors.Join(ErrRecovery, x, b.Block(ctx, old))
+			// This records current authority, never kernel readiness or new
+			// ownership. A conflicting resource still cannot receive a grant.
+			if entry.Generation != old.Generation || !entry.ApprovalUntil.Equal(old.ApprovalUntil) || entry.ApprovalBootNS != old.ApprovalBootNS {
+				e.journal.Entries[i] = entry
+				err = e.persist()
+			}
+			if err != nil {
+				p.Reason = "lease_renewal_failed"
+				err = errors.Join(err, b.Block(ctx, entry))
 			} else {
-				// Commit the authority change before granting any longer deadline.
-				if entry.Generation != old.Generation || !entry.ApprovalUntil.Equal(old.ApprovalUntil) || entry.ApprovalBootNS != old.ApprovalBootNS {
-					e.journal.Entries[i] = entry
-					err = e.persist()
-				}
-				if err == nil {
-					err = e.stillApproved(entry)
-				}
-				if err == nil {
-					var lease DeploymentLease
-					lease, err = b.Lease(ctx, entry, FreshApproval{at, boot})
-					if err == nil && lease.rearmed && lease.Active {
-						// Continue immediately so the first short grant does not
-						// expire while checking the remaining seven candidates.
-						lease, err = b.Lease(ctx, entry, FreshApproval{})
-					}
-					p.Lease = &lease
-					if err == nil && !lease.Active {
-						err = ErrLeaseExpired
-					}
-				}
-				if err != nil {
-					p.Reason = "lease_renewal_failed"
-					err = errors.Join(err, b.Block(ctx, entry))
-				} else {
-					p.KernelReady = true
-					e.maintained[old.Candidate.PathID] = true
-				}
+				ready = append(ready, renewal{len(out.Paths), entry})
 			}
 		}
 		out.Paths = append(out.Paths, p)
-		all = errors.Join(all, err)
+		failures = append(failures, err)
 	}
+	// Only independent nft/BPF lease operations overlap. Keep engine/cache,
+	// public inventory sharing and journal access serialized. Two workers bound
+	// process pressure, and all workers finish before namespace ownership ends.
+	slots := make(chan struct{}, 2)
+	var workers sync.WaitGroup
+	renewCtx, stopRenewals := context.WithCancel(ctx)
+	defer stopRenewals()
+	var authorityErr error
+	for _, job := range ready {
+		p, entry := out.Paths[job.index], job.entry
+		err := ctx.Err()
+		if e.uncertain {
+			err = errors.Join(err, relaycache.ErrUncertain)
+		}
+		acquired := false
+		if err == nil {
+			select {
+			case slots <- struct{}{}:
+				acquired = true
+			case <-ctx.Done():
+			}
+			err = ctx.Err()
+		}
+		p.Reason = "lease_renewal_failed"
+		if err == nil {
+			valid, checkErr := check(ctx, entry, false)
+			if checkErr != nil || !valid {
+				p.Reason = "kernel_conflict_or_unavailable"
+				err = errors.Join(ErrRecovery, checkErr)
+			} else {
+				authorityErr = e.stillApproved(entry)
+				err = errors.Join(authorityErr, ctx.Err())
+			}
+		}
+		if authorityErr != nil || e.uncertain || ctx.Err() != nil {
+			// Status checkpoints the cache clock. A failed write invalidates
+			// this whole sweep, including a grant already in flight or done.
+			authorityErr = errors.Join(authorityErr, err, ctx.Err())
+			stopRenewals()
+			if acquired {
+				<-slots
+			}
+			break
+		}
+		if err != nil {
+			failures[job.index] = errors.Join(err, b.Block(ctx, entry))
+			out.Paths[job.index] = p
+			if acquired {
+				<-slots
+			}
+			continue
+		}
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			defer func() { <-slots }()
+			lease, err := b.Lease(renewCtx, entry, FreshApproval{at, boot})
+			if err == nil && lease.rearmed && lease.Active {
+				// Keep the first short authenticated grant and its continuation
+				// in the same worker; never rearm a failed continuation.
+				lease, err = b.Lease(renewCtx, entry, FreshApproval{})
+			}
+			p.Lease = &lease
+			err = errors.Join(err, renewCtx.Err())
+			if err == nil && !lease.Active {
+				err = ErrLeaseExpired
+			}
+			if err != nil {
+				failures[job.index] = errors.Join(err, b.Block(renewCtx, entry))
+			} else {
+				p.KernelReady, p.Reason = true, ""
+			}
+			out.Paths[job.index] = p
+		}()
+	}
+	workers.Wait()
+	if abort := errors.Join(authorityErr, ctx.Err()); abort != nil {
+		// Join first: a worker must never reopen a gate after cleanup. Retain
+		// namespace ownership and the original maintenance deadline, but let
+		// cleanup use its remaining time even if the caller canceled. When
+		// time is exhausted, report the cleanup failure; never claim readiness.
+		deadline, _ := ctx.Deadline()
+		cleanup, stopCleanup := context.WithDeadline(context.WithoutCancel(ctx), deadline)
+		defer stopCleanup()
+		for _, job := range ready {
+			p := &out.Paths[job.index]
+			p.KernelReady, p.Reason = false, "lease_renewal_failed"
+			if p.Lease != nil {
+				p.Lease.Active = false
+			}
+			failures[job.index] = errors.Join(failures[job.index], abort, b.Block(cleanup, job.entry))
+		}
+	}
+	for _, p := range out.Paths {
+		if p.KernelReady {
+			e.maintained[p.PathID] = true
+		}
+	}
+	all := errors.Join(failures...)
 	if len(out.Paths) > 0 {
 		out.State = "protected"
 		out.KernelReady = true
