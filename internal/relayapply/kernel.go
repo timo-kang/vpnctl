@@ -19,8 +19,9 @@ const protocol = "186"
 
 type object map[string]any
 type kernel struct {
-	run     commandFunc
-	targets func() []TargetGuard
+	run          commandFunc
+	targets      func() []TargetGuard
+	targetLookup targetRouteLookup
 }
 type snapshot struct {
 	links, routes, rules []object
