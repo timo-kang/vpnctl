@@ -110,31 +110,53 @@ func (c LinuxCollector) read(ctx context.Context, args ...string) ([]byte, error
 	return b, e
 }
 func (c LinuxCollector) link(ctx context.Context, name string) (linkRecord, bool, error) {
-	b, e := c.read(ctx, "-j", "address", "show")
+	// Each proof boundary needs this underlay's live addresses, not every
+	// candidate tunnel's addresses. Keep both reads around the route lookup;
+	// narrowing the query must not turn a failed read into proof of absence.
+	b, e := c.read(ctx, "-j", "address", "show", "dev", name)
 	if e != nil {
-		return linkRecord{}, false, e
+		return c.missingLink(ctx, name, e)
+	}
+	var links []linkRecord
+	if json.Unmarshal(b, &links) != nil || links == nil || len(links) > 1 {
+		return linkRecord{}, false, errors.New("invalid inventory")
+	}
+	if len(links) == 0 {
+		return linkRecord{}, false, nil
+	}
+	l := links[0]
+	if l.Name != name || l.Index <= 0 || l.Flags == nil || l.Addresses == nil || len(l.Addresses) > MaxAddresses {
+		return linkRecord{}, false, errors.New("invalid inventory")
+	}
+	return l, true, nil
+}
+
+// ip reports an absent named device as a command error, indistinguishable from
+// denied/unreadable inventory. A separate bounded link list may establish
+// absence; if the device is still present, retain the original failure.
+func (c LinuxCollector) missingLink(ctx context.Context, name string, readErr error) (linkRecord, bool, error) {
+	if ctx.Err() != nil {
+		return linkRecord{}, false, ctx.Err()
+	}
+	b, err := c.read(ctx, "-j", "link", "show")
+	if err != nil {
+		return linkRecord{}, false, errors.Join(readErr, err)
 	}
 	var links []linkRecord
 	if json.Unmarshal(b, &links) != nil || links == nil || len(links) > MaxInterfaces {
-		return linkRecord{}, false, errors.New("invalid inventory")
+		return linkRecord{}, false, errors.New("invalid link inventory")
 	}
-	var found linkRecord
-	present := false
 	names, indexes := map[string]bool{}, map[int]bool{}
 	for _, l := range links {
 		if l.Name == "" || len(l.Name) > 15 || l.Index <= 0 || l.Flags == nil || names[l.Name] || indexes[l.Index] {
-			return linkRecord{}, false, errors.New("invalid inventory")
+			return linkRecord{}, false, errors.New("invalid link inventory")
 		}
 		names[l.Name], indexes[l.Index] = true, true
-		if l.Name != name {
-			continue
-		}
-		if present || l.Index <= 0 || l.Flags == nil || l.Addresses == nil || len(l.Addresses) > MaxAddresses {
-			return linkRecord{}, false, errors.New("invalid inventory")
-		}
-		found, present = l, true
 	}
-	return found, present, nil
+	if names[name] {
+		return linkRecord{}, false, readErr
+	}
+	return linkRecord{}, false, ctx.Err()
 }
 func zeroLifetime(b json.RawMessage) bool { return string(b) == "0" || string(b) == `"0"` }
 func ipv4Addresses(l linkRecord) ([]string, error) {

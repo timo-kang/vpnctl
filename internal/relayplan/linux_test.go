@@ -57,6 +57,12 @@ func TestLinuxInventoryStatesAndChanges(t *testing.T) {
 				tc.link(&l)
 			}
 			c := LinuxCollector{ReadIP: func(ctx context.Context, args ...string) ([]byte, error) {
+				if slices.Equal(args, []string{"-j", "link", "show"}) {
+					if tc.readErr != nil {
+						return nil, tc.readErr
+					}
+					return linkJSON(l), nil
+				}
 				if slices.Contains(args, "address") {
 					reads++
 					if tc.readErr != nil {
