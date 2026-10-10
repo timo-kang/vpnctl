@@ -32,11 +32,11 @@ func TestPolicyConnectLimitIncludesExactBoundary(t *testing.T) {
 					if name == "ip" {
 						return json.Marshal([]object{{"dev": entry.Candidate.Pin.WGInterface, "from": strings.TrimSuffix(entry.Candidate.InnerAddress, "/32")}})
 					}
-					if name == "wg" && args[2] == "latest-handshakes" {
-						return []byte(entry.Candidate.RelayPublicKey + " 1"), nil
+					if name != "wg" || len(args) != 3 || args[2] != "dump" {
+						t.Fatal("unexpected counter query")
 					}
 					transfers++
-					return fmt.Appendf(nil, "%s %d %d", entry.Candidate.RelayPublicKey, 100*transfers, 100*transfers), nil
+					return counterSnapshotWire(entry, "1", fmt.Sprint(100*transfers), fmt.Sprint(100*transfers)), nil
 				}}
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()

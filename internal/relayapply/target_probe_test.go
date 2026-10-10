@@ -94,7 +94,10 @@ func TestObserveTargetRejectsUntrustedOrChangedCandidate(t *testing.T) {
 		})
 	}
 }
-func TestTargetCountersAreStrictAndNeverReadSecrets(t *testing.T) {
+
+// A dump includes keys; the contract is now to erase that bounded buffer and
+// expose only counters. Full WG ownership checks remain in wireState.
+func TestTargetCountersAreStrictAndEraseSensitiveOutput(t *testing.T) {
 	entry := Entry{}
 	e, _, _ := fixture(t, "robot")
 	if _, err := e.PrepareProbe(context.Background(), "p0", ""); err != nil {
@@ -103,14 +106,12 @@ func TestTargetCountersAreStrictAndNeverReadSecrets(t *testing.T) {
 	entry = e.journal.Entries[0]
 	for _, mode := range []string{"valid", "extra-peer", "wrong-peer", "negative", "overflow", "malformed"} {
 		t.Run(mode, func(t *testing.T) {
+			var output []byte
 			k := kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
-				if input != "" || name != "wg" || len(args) != 3 || args[0] != "show" || args[1] != entry.Candidate.Pin.WGInterface || (args[2] != "transfer" && args[2] != "latest-handshakes") {
+				if input != "" || name != "wg" || len(args) != 3 || args[0] != "show" || args[1] != entry.Candidate.Pin.WGInterface || args[2] != "dump" {
 					t.Fatal("unexpected command", name, args)
 				}
-				data := entry.Candidate.RelayPublicKey + " 123"
-				if args[2] == "transfer" {
-					data += " 456"
-				}
+				data := string(counterSnapshotWire(entry, "123", "456", "789"))
 				switch mode {
 				case "extra-peer":
 					data += "\n" + data
@@ -123,12 +124,15 @@ func TestTargetCountersAreStrictAndNeverReadSecrets(t *testing.T) {
 				case "malformed":
 					data = "not counters"
 				}
-				return []byte(data), nil
+				output = []byte(data)
+				return output, nil
 			}}
 			v, err := k.targetCounters(context.Background(), entry)
 			if (err == nil) != (mode == "valid") {
 				t.Fatal(v, err)
 			}
+			assertCounterSnapshotErased(t, output)
+			assertCounterSnapshotNoSecretError(t, err)
 		})
 	}
 }

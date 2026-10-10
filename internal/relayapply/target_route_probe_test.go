@@ -40,11 +40,11 @@ func TestTargetRouteLookupGuardsBothSidesOfTCP(t *testing.T) {
 						t.Fatalf("unexpected external process %s", name)
 					}
 					reads++
-					if args[2] == "latest-handshakes" {
-						return []byte(entry.Candidate.RelayPublicKey + " 1"), nil
+					if len(args) != 3 || args[2] != "dump" {
+						t.Fatal("unexpected counter query")
 					}
 					transfers++
-					return fmt.Appendf(nil, "%s %d %d", entry.Candidate.RelayPublicKey, 100*transfers, 100*transfers), nil
+					return counterSnapshotWire(entry, "1", fmt.Sprint(100*transfers), fmt.Sprint(100*transfers)), nil
 				},
 			}
 			proof, err := k.probeTargetWithDial(context.Background(), entry, target, func(context.Context, Entry, relaycatalog.Target) (net.Conn, error) {
@@ -57,13 +57,13 @@ func TestTargetRouteLookupGuardsBothSidesOfTCP(t *testing.T) {
 				if !errors.Is(err, failure) || proof != (targetProof{}) {
 					t.Fatal("route failure became a successful proof", proof, err)
 				}
-			} else if err != nil || proof.rx == 0 || proof.tx == 0 || lookups != 2 || reads != 4 {
+			} else if err != nil || proof.rx == 0 || proof.tx == 0 || lookups != 2 || reads != 2 {
 				t.Fatal("successful proof omitted live evidence", proof, err, lookups, reads)
 			}
 			if failAt == 1 && (dialed || reads != 0) {
 				t.Fatal("TCP or counters started without route evidence")
 			}
-			if failAt == 2 && (!dialed || lookups != 2 || reads != 2) {
+			if failAt == 2 && (!dialed || lookups != 2 || reads != 1) {
 				t.Fatal("post-TCP route check skipped")
 			}
 		})

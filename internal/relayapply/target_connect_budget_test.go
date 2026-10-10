@@ -45,10 +45,9 @@ func TestCandidateDialBudgetPreservesSurroundingEvidence(t *testing.T) {
 				began := time.Now()
 				transfers, routes := 0, 0
 				k := kernel{run: func(ctx context.Context, input, name string, args ...string) ([]byte, error) {
-					delay := 50 * time.Millisecond
-					if name == "ip" {
-						delay = 100 * time.Millisecond
-					}
+					// Model the combined dump with the same total cost as the
+					// two former 50ms field reads; keep every budget assertion.
+					delay := 100 * time.Millisecond
 					select {
 					case <-time.After(delay):
 					case <-ctx.Done():
@@ -59,15 +58,15 @@ func TestCandidateDialBudgetPreservesSurroundingEvidence(t *testing.T) {
 						routes++
 						return json.Marshal([]object{{"dev": entry.Candidate.Pin.WGInterface, "from": strings.TrimSuffix(entry.Candidate.InnerAddress, "/32")}})
 					case "wg":
-						if args[2] == "latest-handshakes" {
-							return []byte(entry.Candidate.RelayPublicKey + " 1"), nil
+						if len(args) != 3 || args[2] != "dump" {
+							t.Fatal("unexpected counter query")
 						}
 						transfers++
 						count := 100
 						if tc.counters {
 							count *= transfers
 						}
-						return fmt.Appendf(nil, "%s %d %d", entry.Candidate.RelayPublicKey, count, count), nil
+						return counterSnapshotWire(entry, "1", fmt.Sprint(count), fmt.Sprint(count)), nil
 					default:
 						t.Fatalf("unexpected command %s", name)
 						return nil, errors.New("unexpected command")

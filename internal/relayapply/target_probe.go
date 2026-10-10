@@ -3,6 +3,7 @@
 package relayapply
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -352,37 +353,47 @@ type targetCounters struct {
 }
 
 func (k kernel) targetCounters(ctx context.Context, entry Entry) (targetCounters, error) {
-	var out targetCounters
-	for _, field := range []string{"latest-handshakes", "transfer"} {
-		b, err := k.run(ctx, "", "wg", "show", entry.Candidate.Pin.WGInterface, field)
-		if err != nil {
-			return out, err
-		}
-		f := strings.Fields(string(b))
-		want := 2
-		if field == "transfer" {
-			want = 3
-		}
-		if len(f) != want || f[0] != entry.Candidate.RelayPublicKey {
-			return out, errors.New("invalid candidate counters")
-		}
-		if field == "latest-handshakes" {
-			out.handshake, err = strconv.ParseInt(f[1], 10, 64)
-			if err != nil || out.handshake < 0 {
-				return out, errors.New("invalid handshake")
-			}
-		} else {
-			out.rx, err = strconv.ParseUint(f[1], 10, 64)
-			if err != nil {
-				return out, errors.New("invalid receive counter")
-			}
-			out.tx, err = strconv.ParseUint(f[2], 10, 64)
-			if err != nil {
-				return out, errors.New("invalid transmit counter")
-			}
-		}
+	if err := ctx.Err(); err != nil {
+		return targetCounters{}, err
 	}
-	return out, nil
+	// One live interface dump contains both handshake and transfer counters.
+	// Keep separate reads before/after TCP; never share this evidence with a
+	// different proof. The header private key and peer PSK remain byte slices
+	// of this bounded buffer, which is erased even on errors or cancellation.
+	raw, err := k.run(ctx, "", "wg", "show", entry.Candidate.Pin.WGInterface, "dump")
+	defer clear(raw)
+	if err != nil || ctx.Err() != nil {
+		return targetCounters{}, errors.Join(err, ctx.Err())
+	}
+	if len(raw) == 0 || len(raw) > 512<<10 {
+		return targetCounters{}, errors.New("invalid candidate counters")
+	}
+	lines := bytes.Split(bytes.TrimSpace(raw), []byte{'\n'})
+	if len(lines) != 2 || len(bytes.Fields(lines[0])) != 4 {
+		return targetCounters{}, errors.New("invalid candidate counters")
+	}
+	peer := bytes.Fields(lines[1])
+	if len(peer) != 8 || !bytes.Equal(peer[0], []byte(entry.Candidate.RelayPublicKey)) {
+		return targetCounters{}, errors.New("invalid candidate counters")
+	}
+	// Ownership/configuration is checked by wireState at the surrounding
+	// boundaries. These fields prove traffic only when the TCP proof succeeds.
+	handshake, err := strconv.ParseInt(string(peer[4]), 10, 64)
+	if err != nil || handshake < 0 {
+		return targetCounters{}, errors.New("invalid handshake")
+	}
+	rx, err := strconv.ParseUint(string(peer[5]), 10, 64)
+	if err != nil {
+		return targetCounters{}, errors.New("invalid receive counter")
+	}
+	tx, err := strconv.ParseUint(string(peer[6]), 10, 64)
+	if err != nil {
+		return targetCounters{}, errors.New("invalid transmit counter")
+	}
+	if err := ctx.Err(); err != nil {
+		return targetCounters{}, err
+	}
+	return targetCounters{handshake, rx, tx}, nil
 }
 
 func (k kernel) probeTarget(ctx context.Context, entry Entry, target relaycatalog.Target) (targetProof, error) {
