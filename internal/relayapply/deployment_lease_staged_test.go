@@ -34,11 +34,9 @@ func TestStagedLeaseAbsoluteNodeApprovalClipsTimerBeforeMutation(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			mutations := 0
-			k := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
+			k := deploymentKernel{kernel{flowtableLookup: func(context.Context) error { return nil }, run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
 				encode := func(rows []object) ([]byte, error) { return json.Marshal(object{"nftables": rows}) }
 				switch strings.Join(args, " ") {
-				case "-j -n -T list flowtables":
-					return encode([]object{})
 				case "-j -n -T list table inet " + leaseTable(entry):
 					rows := stagedLeaseTestRows(entry, time.Now().Add(9*time.Second).Truncate(time.Second), "lease_00000000000000000000000000000001", "")
 					rows[1]["set"].(object)["elem"] = []any{object{"elem": object{"val": entry.LinkIndex, "expires": 8}}}
@@ -104,13 +102,11 @@ func TestStagedLeaseCancelledPreparationStaysClosedAndIsReclaimed(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cancelPreparation, active, activations, preparations := true, false, 0, 0
-	k := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
+	k := deploymentKernel{kernel{flowtableLookup: func(context.Context) error { return nil }, run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
 		encode := func(rows []object) ([]byte, error) { return json.Marshal(object{"nftables": rows}) }
 		switch strings.Join(args, " ") {
 		case "-j -n -T list tables":
 			return encode(leaseExpected(e, deadline)[:1])
-		case "-j -n -T list flowtables":
-			return encode([]object{})
 		case "-j -n -T list table inet " + leaseTable(e):
 			rows := stagedLeaseTestRows(e, deadline, selected, pending)
 			if active {
@@ -262,12 +258,11 @@ func TestBootLeaseRejectsStaleApprovalEvenWhenNftStillLive(t *testing.T) {
 	}
 	for _, stamp := range []uint64{0, boot - uint64(6*time.Second), boot + uint64(time.Second)} {
 		deadline := time.Now().Add(8 * time.Second).Truncate(time.Second)
-		k := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
+		k := deploymentKernel{kernel{flowtableLookup: func(context.Context) error { return nil }, run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
 			rows := []object{}
 			switch strings.Join(args, " ") {
 			case "-j -n -T list tables":
 				rows = leaseExpected(e, deadline)[:1]
-			case "-j -n -T list flowtables":
 			case "-j -n -T list table inet " + leaseTable(e):
 				rows = stagedLeaseTestRows(e, deadline, "lease_00000000000000000000000000000001", "")
 				rows[1]["set"].(object)["elem"] = []any{object{"elem": object{"val": e.LinkIndex, "expires": 7}}}

@@ -6,6 +6,7 @@ package relayapply
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"testing"
@@ -42,6 +43,13 @@ func TestLiveLeaseReadGlobalFlowtables(t *testing.T) {
 			t.Cleanup(func() { nft("delete table " + family + " unrelated\n") })
 			assertStatus := func(wantSuccess bool) {
 				t.Helper()
+				// Independently compare the unchanged nft CLI with the native gate.
+				if err := legacyFlowtableCheck(ctx, k); (err == nil) != wantSuccess {
+					t.Fatalf("legacy global query success=%t, want=%t", err == nil, wantSuccess)
+				}
+				if err := liveNoFlowtables(ctx); (err == nil) != wantSuccess {
+					t.Fatalf("native global query success=%t, want=%t", err == nil, wantSuccess)
+				}
 				state, err := k.LeaseStatus(ctx, e)
 				if (err == nil) != wantSuccess {
 					t.Fatalf("lease status success=%t, want=%t", err == nil, wantSuccess)
@@ -63,6 +71,45 @@ func TestLiveLeaseReadGlobalFlowtables(t *testing.T) {
 				}
 				nft("delete flowtable " + family + " unrelated ftprobe\n")
 				assertStatus(true)
+			}
+		})
+	}
+}
+
+// Keep the former implementation only as a real-kernel comparison oracle.
+func legacyFlowtableCheck(ctx context.Context, k deploymentKernel) error {
+	rows, err := k.nftRows(ctx, "list", "flowtables")
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if _, meta := row["metainfo"]; !meta {
+			return errors.New("flowtable present")
+		}
+	}
+	return nil
+}
+
+func BenchmarkLiveLeaseReadFlowtables(b *testing.B) {
+	_, _, _ = routeQueryKernelFixture(b)
+	k := deploymentKernel{kernel: kernel{run: command}}
+	for _, native := range []bool{false, true} {
+		name := "nft"
+		if native {
+			name = "native"
+		}
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				var err error
+				if native {
+					err = liveNoFlowtables(context.Background())
+				} else {
+					err = legacyFlowtableCheck(context.Background(), k)
+				}
+				if err != nil {
+					b.Fatal("global query failed")
+				}
 			}
 		})
 	}

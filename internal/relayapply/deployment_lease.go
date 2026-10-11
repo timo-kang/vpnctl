@@ -216,16 +216,10 @@ func (k deploymentKernel) leaseRead(ctx context.Context, e DeploymentEntry) (Dep
 }
 
 func (k deploymentKernel) noFlowtables(ctx context.Context) error {
-	rows, err := k.nftRows(ctx, "list", "flowtables")
-	if err != nil {
-		return err
+	if k.flowtableLookup != nil {
+		return k.flowtableLookup(ctx)
 	}
-	for _, r := range rows {
-		if _, meta := r["metainfo"]; !meta {
-			return errors.New("flow offload is incompatible with relay lease enforcement")
-		}
-	}
-	return nil
+	return liveNoFlowtables(ctx)
 }
 
 func (k deploymentKernel) leaseCreate(ctx context.Context, e DeploymentEntry) error {
@@ -308,7 +302,7 @@ func (k deploymentKernel) leaseRemove(ctx context.Context, e DeploymentEntry) er
 }
 
 func (k deploymentKernel) LeaseStatus(ctx context.Context, e DeploymentEntry) (DeploymentLease, error) {
-	// Keep the global and exact-table queries in separate nft invocations.
+	// Keep the native global and nft exact-table queries independent.
 	// nft 1.0.6 can restrict both to the exact table when they share a command
 	// batch, hiding foreign flowtables that bypass lease enforcement.
 	if err := k.noFlowtables(ctx); err != nil {

@@ -301,7 +301,7 @@ func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testi
 			selected := "lease_00000000000000000000000000000000"
 			pending := ""
 			deadline := time.Now().Add(-time.Second).Truncate(time.Second)
-			backend := deploymentKernel{kernel{run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
+			backend := deploymentKernel{kernel{flowtableLookup: func(context.Context) error { return nil }, run: func(_ context.Context, input, name string, args ...string) ([]byte, error) {
 				if name != "nft" {
 					t.Fatal("unexpected command", name, args)
 				}
@@ -312,8 +312,6 @@ func TestLeaseReadbackExpiryIsRetryableWithoutAcceptingInvalidInventory(t *testi
 						return encode([]object{})
 					}
 					return encode(leaseExpected(entry, deadline)[:1])
-				case "-j -n -T list flowtables":
-					return encode([]object{})
 				case "-j -n -T list table inet " + leaseTable(entry):
 					if committed && mode == "missing" {
 						return nil, errors.New("table absent")
