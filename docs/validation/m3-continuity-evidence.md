@@ -72,3 +72,7 @@ application-capacity-8`로 검증한다. 자원을 줄인 원인 수집 실험�
 검사가 실패하면 실패로 유지하며, 진단의 완전성과 용량 합격 여부를 각각 기록한다.
 호스트 network/kernel/clock/power를 변경하지 않는다. 최종 실행·리뷰·CI 결과는
 [#212](https://github.com/timo-kang/vpnctl/issues/212)에 연결한다.
+
+main `115f469`의 후속 CI에서 이 증거로 실제 `observation_stale` 실패를
+확정했다. 시각 대조와 명령 비용 계측, 안전성 때문에 제외한 조회 통합안은
+[lease 조회 비용 검증](m3-lease-query-cost.md)에 기록한다.
