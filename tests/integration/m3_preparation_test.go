@@ -160,7 +160,7 @@ func TestNetns_M3PreparationRecovery(t *testing.T) {
 			if p := applicationPayload(t, f, "198.18.0.3"); !p.OK {
 				t.Fatal("independent payload lost during rebuild", fault, p)
 			}
-			_, gap = applicationContinuity(t, logs["app2"], independentBaseline)
+			_, gap = applicationContinuity(t, logs["app2"], independentBaseline, "app2", results)
 			managed = latestPreparation(supervision, "p00")
 			for _, r := range applicationResults(logs["app"])[baseline:] {
 				for _, c := range r.Selection.Candidates {
