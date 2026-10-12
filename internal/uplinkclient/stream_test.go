@@ -5,6 +5,7 @@ package uplinkclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -79,7 +80,8 @@ print(json.dumps(s.current()))`, module, dir)
 
 const streamHeader = "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n"
 
-func TestStreamRejectsMalformedAndTruncatedInput(t *testing.T) {
+func streamFixture(t *testing.T) []byte {
+	t.Helper()
 	b, err := os.ReadFile("testdata/consumer.json")
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +93,15 @@ func TestStreamRejectsMalformedAndTruncatedInput(t *testing.T) {
 	var value any
 	json.Unmarshal(fixture.Base, &value)
 	raw, _ := json.Marshal(value)
+	return raw
+}
+
+func TestStreamRejectsMalformedAndTruncatedInput(t *testing.T) {
+	raw := streamFixture(t)
+	var many strings.Builder
+	for i := 0; i < 512; i++ {
+		fmt.Fprintf(&many, "X-%d: x\r\n", i)
+	}
 	for name, wire := range map[string]string{
 		"truncated_record":  streamHeader + string(raw),
 		"oversized_record":  streamHeader + strings.Repeat(" ", 4097) + "\n",
@@ -98,17 +109,25 @@ func TestStreamRejectsMalformedAndTruncatedInput(t *testing.T) {
 		"chunked":           strings.Replace(streamHeader, "Connection:", "Transfer-Encoding: chunked\r\nConnection:", 1),
 		"content_length":    strings.Replace(streamHeader, "Connection:", "Content-Length: 0\r\nConnection:", 1),
 		"oversized_headers": strings.Replace(streamHeader, "Connection:", "X-Fill: "+strings.Repeat("x", 4096)+"\r\nConnection:", 1),
-		"many_headers":      strings.Replace(streamHeader, "Connection:", strings.Repeat("X-Fill: x\r\n", 512)+"Connection:", 1),
+		"many_headers":      strings.Replace(streamHeader, "Connection:", many.String()+"Connection:", 1),
 		"bare_lf":           strings.ReplaceAll(streamHeader, "\r\n", "\n"),
 		"bad_status":        strings.Replace(streamHeader, "200 OK", "503 Service Unavailable", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
-			dir := scriptedServer(t, wire, false)
+			if name != "truncated_record" && name != "oversized_record" {
+				wire += string(raw) + "\n"
+			}
+			dir, received := scriptedServer(t, wire, false)
 			state, _ := NewState("app")
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			if err := Stream(ctx, Options{dir, uint32(os.Geteuid())}, state); err == nil {
 				t.Fatal("invalid stream accepted")
+			}
+			select {
+			case <-received:
+			default:
+				t.Fatal("malformed input did not reach authenticated consumer")
 			}
 			if v := state.Current(); v.APIAvailable || v.Revision != 0 {
 				t.Fatal("incomplete response installed")
@@ -117,9 +136,31 @@ func TestStreamRejectsMalformedAndTruncatedInput(t *testing.T) {
 	}
 }
 
-func scriptedServer(t *testing.T, wire string, stall bool) string {
+func TestStreamByteBudget(t *testing.T) {
+	record := string(streamFixture(t)) + "\n"
+	dir, received := scriptedServer(t, streamHeader+strings.Repeat(record, 256), false)
+	state, _ := NewState("app")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := Stream(ctx, Options{dir, uint32(os.Geteuid())}, state); err == nil {
+		t.Fatal("unbounded stream accepted")
+	}
+	select {
+	case <-received:
+	default:
+		t.Fatal("stream fixture not reached")
+	}
+	if got, want := state.AcceptedFrames(), uint64(64*1024/len(record)); got != want {
+		t.Fatal("stream byte budget", got, want)
+	}
+}
+
+func scriptedServer(t *testing.T, wire string, stall bool) (string, <-chan struct{}) {
 	t.Helper()
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, "uplink.sock"), Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -128,6 +169,7 @@ func scriptedServer(t *testing.T, wire string, stall bool) string {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
+	received := make(chan struct{})
 	t.Cleanup(func() { close(done); l.Close() })
 	go func() {
 		c, err := l.AcceptUnix()
@@ -137,23 +179,30 @@ func scriptedServer(t *testing.T, wire string, stall bool) string {
 		defer c.Close()
 		c.SetDeadline(time.Now().Add(3 * time.Second))
 		request := make([]byte, 512)
-		c.Read(request)
+		if n, err := c.Read(request); err != nil || n == 0 {
+			return
+		}
+		close(received)
 		io.WriteString(c, wire)
 		if stall {
 			<-done
 		}
 	}()
-	return dir
+	return dir, received
 }
 
 func TestStreamCancellationDuringPartialHeader(t *testing.T) {
-	dir := scriptedServer(t, "HTTP/1.1 200", true)
+	dir, received := scriptedServer(t, "HTTP/1.1 200", true)
 	state, _ := NewState("app")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- Stream(ctx, Options{dir, uint32(os.Geteuid())}, state) }()
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("partial header connection not reached")
+	}
 	cancel()
 	select {
 	case <-done:

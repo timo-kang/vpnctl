@@ -71,11 +71,13 @@ class TransportTests(unittest.TestCase):
             'chunked': HEADER.replace(b'Connection:', b'Transfer-Encoding: chunked\r\nConnection:'),
             'length': HEADER.replace(b'Connection:', b'Content-Length: 0\r\nConnection:'),
             'header_size': HEADER.replace(b'Connection:', b'X-Fill: '+ b'x' * 4096 + b'\r\nConnection:'),
-            'many_headers': HEADER.replace(b'Connection:', b'X-Fill: x\r\n' * 512 + b'Connection:'),
+            'many_headers': HEADER.replace(b'Connection:', b''.join(f'X-{i}: x\r\n'.encode() for i in range(512)) + b'Connection:'),
             'bare_lf': HEADER.replace(b'\r\n', b'\n'),
             'status': HEADER.replace(b'200 OK', b'503 Service Unavailable'),
         }.items():
             with self.subTest(name=name):
+                if name not in ('truncated', 'record_size'):
+                    wire += json.dumps(fixture['base']).encode() + b'\n'
                 state = State('app')
                 with self.assertRaises((ValueError, EOFError, OSError)):
                     stream(self.server(wire), os.geteuid(), state, threading.Event(), once=True)
@@ -92,6 +94,14 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(InterruptedError):
             stream(directory, os.geteuid(), State('app'), stop)
         self.assertLess(time.monotonic() - started, 1)
+
+    def test_stream_byte_budget(self):
+        fixture = json.loads((Path(__file__).resolve().parents[3] / 'internal/uplinkclient/testdata/consumer.json').read_text())
+        record = json.dumps(fixture['base']).encode() + b'\n'
+        state = State('app')
+        with self.assertRaises(ValueError):
+            stream(self.server(HEADER + record * 256), os.geteuid(), state, threading.Event())
+        self.assertEqual(state.accepted_frames(), 64 * 1024 // len(record))
 
     def test_directory_symlink_and_wrong_owner_rejected(self):
         with tempfile.TemporaryDirectory() as parent:
