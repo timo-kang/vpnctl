@@ -95,6 +95,7 @@ func applicationContinuity(t *testing.T, path string, baseline int, role string,
 	t.Helper()
 	cycles, maxGap, err := checkApplicationContinuity(path, baseline, role, report)
 	if err != nil {
+		report["sampled_qualification_status"] = "fail"
 		t.Fatal(err)
 	}
 	return cycles, maxGap
@@ -290,7 +291,9 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		secondArgs = append(secondArgs, "--mode", "manual", "--path-id", f.plan.Paths[healthy].PathID)
 	}
 	report["actuator_modes"] = map[string]string{"app": "auto", "app2": secondMode}
-	second := startNetworkProcessInGroup(t, groupFD, f.robot, secondLog, nil, secondArgs...)
+	receipts1, receipts2 := newPublicationStream(), newPublicationStream()
+	report["publication_continuity"] = map[string]any{"contract_version": 2, "status": "not_started"}
+	second := startNetworkProcessWithObserver(t, groupFD, f.robot, secondLog, receipts2, nil, secondArgs...)
 	eventually(t, 45*time.Second, "independent app activated", func() error {
 		r := latestApplicationResult(secondLog)
 		if !r.Applied {
@@ -309,7 +312,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	started := time.Now()
 	report["fault_installed_at"] = started
 	logfile := filepath.Join(f.results, "capacity-app.jsonl")
-	watcher := startNetworkProcessInGroup(t, groupFD, f.robot, logfile, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "500ms", "--probe-timeout", "2s")
+	watcher := startNetworkProcessWithObserver(t, groupFD, f.robot, logfile, receipts1, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "500ms", "--probe-timeout", "2s")
 	var placement func() map[string]any
 	if group != nil {
 		for _, p := range []*networkProcess{f.nodeSupervisor, watcher, second} {
@@ -448,7 +451,23 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	// Exercise several complete rounds, not just residual leases after
 	// activation. Preserve continuous payload/lease sampling throughout.
 	steadyStart := time.Now()
-	baseline1, baseline2 := len(applicationResults(logfile)), len(applicationResults(secondLog))
+	begin1, begin2 := receipts1.snapshot(), receipts2.snapshot()
+	baseline1, baseline2 := len(begin1.Records), len(begin2.Records)
+	// Freeze v2 at qualification end or the first fatal return, before cleanup
+	// collects later diagnostics. Keep the sampled gate's outcome independent.
+	report["sampled_qualification_status"] = "incomplete"
+	var publication1, publication2 publicationVerdict
+	closed := false
+	closePublication := func() {
+		if closed {
+			return
+		}
+		closed = true
+		publication1 = evaluatePublicationContinuity(receipts1.snapshot(), baseline1, begin1.CapturedAt)
+		publication2 = evaluatePublicationContinuity(receipts2.snapshot(), baseline2, begin2.CapturedAt)
+		report["publication_continuity"] = map[string]publicationVerdict{"app": publication1, "app2": publication2}
+	}
+	defer closePublication()
 	broken := ""
 	repaired := !rebuild
 	if rebuild {
@@ -503,6 +522,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	}
 	cycles1, gap1 = applicationContinuity(t, logfile, baseline1, "app", report)
 	cycles2, gap2 = applicationContinuity(t, secondLog, baseline2, "app2", report)
+	closePublication()
 	report["steady_seconds"] = time.Since(steadyStart).Seconds()
 	report["steady_applied_cycles"] = map[string]int{"app": cycles1, "app2": cycles2}
 	report["maximum_fresh_observation_gap_seconds"] = map[string]float64{"app": gap1.Seconds(), "app2": gap2.Seconds()}
@@ -529,4 +549,8 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	}
 	watcher.terminate(t)
 	second.terminate(t)
+	report["sampled_qualification_status"] = "pass"
+	if publication1.Status != "pass" || publication2.Status != "pass" {
+		t.Errorf("publication continuity not established: app=%s app2=%s", publication1.Status, publication2.Status)
+	}
 }
