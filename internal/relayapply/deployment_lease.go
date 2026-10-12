@@ -21,12 +21,14 @@ const DeploymentRearmWindow = 5 * time.Second
 var ErrLeaseExpired = errors.New("relay lease expired; fresh controller approval required")
 
 type DeploymentLease struct {
-	Active   bool      `json:"active"`
-	Deadline time.Time `json:"deadline"`
-	rearmed  bool      // this call established a fresh short grant, not a continuation
-	set      string
-	staged   []string
-	Boot     *relayguard.State `json:"boottime,omitempty"`
+	Active       bool      `json:"active"`
+	Deadline     time.Time `json:"deadline"`
+	rearmed      bool      // this call established a fresh short grant, not a continuation
+	set          string
+	staged       []string
+	nftRemaining time.Duration // floor of the selected timer countdown; never a new grant
+	retained     *nodeLeaseRetention
+	Boot         *relayguard.State `json:"boottime,omitempty"`
 }
 
 func leaseTable(e DeploymentEntry) string { return "vl" + e.Interface[2:] }
@@ -134,7 +136,7 @@ func validateLease(rows []object, e DeploymentEntry) (DeploymentLease, error) {
 							return state, ErrConflict
 						}
 						left, ok := item["expires"].(float64)
-						if !ok || left < 0 || left > DeploymentLeaseDuration.Seconds() {
+						if !ok || !(left >= 0 && left <= DeploymentLeaseDuration.Seconds()) {
 							return state, ErrConflict
 						}
 						if raw, ok := item["timeout"]; ok {
@@ -143,13 +145,14 @@ func validateLease(rows []object, e DeploymentEntry) (DeploymentLease, error) {
 							// subsecond element has timeout=0 and expires=0; keep
 							// it inactive without mistaking our own timer for a
 							// foreign resource and tearing down the owned link.
-							if !ok || timeout < 0 || timeout > DeploymentLeaseDuration.Seconds() || left > timeout {
+							if !ok || !(timeout >= 0 && timeout <= DeploymentLeaseDuration.Seconds()) || left > timeout {
 								return state, ErrConflict
 							}
 						}
 						// JSON rounds remaining time to seconds. At zero, do
 						// not infer that a cached approval may rearm the gate.
 						state.Active = left > 0
+						state.nftRemaining = time.Duration(left) * time.Second
 					}
 					delete(x, "elem")
 				}

@@ -106,6 +106,7 @@ func validateStagedLease(rows []object, e DeploymentEntry) (DeploymentLease, err
 		}
 		if name == state.set {
 			state.Active, state.Deadline = checked.Active, checked.Deadline
+			state.nftRemaining = checked.nftRemaining
 		} else {
 			state.staged = append(state.staged, name)
 		}
@@ -160,6 +161,30 @@ func (k deploymentKernel) stagedLeaseBounded(ctx context.Context, e DeploymentEn
 	}
 	if boot != nil {
 		state.Active = state.Active && boot.Active
+	}
+	// Retention is only for a live node v3 grant. Approval and both kernel
+	// inventories have just been checked; no state survives across calls.
+	if e.LeaseVersion == 3 && boot != nil && approvalBootNS != 0 {
+		retained, err := planNodeLeaseRetention(state, *boot, expiry, approvalBootNS, started, bootStarted)
+		if err != nil {
+			return state, err
+		}
+		if retained != nil {
+			latest, present, err := k.leaseRead(ctx, e)
+			if err == nil {
+				if !present || latest.set != state.set || !latest.Deadline.Equal(state.Deadline) || len(latest.staged) != 0 {
+					err = ErrConflict
+				} else if !latest.Active {
+					err = ErrLeaseExpired
+				} else {
+					err = ctx.Err()
+				}
+			}
+			latest.retained = retained
+			// The caller still checks BPF identity and a fresh BOOTTIME after
+			// its final read. Never fall back to renewal with this old snapshot.
+			return latest, err
+		}
 	}
 	rearmed := !state.Active
 	authenticatedAt := authenticated.At

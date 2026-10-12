@@ -26,7 +26,12 @@ type nodeLeaseBackend interface {
 	LeaseStatus(context.Context, Entry) (DeploymentLease, error)
 	Block(context.Context, Entry) error
 }
-type nodeKernel struct{ kernel }
+type nodeKernel struct {
+	kernel
+	// Injectable syscall boundaries; nil uses the live kernel implementation.
+	readLeaseGuard func(context.Context, relayguard.Owner) (relayguard.State, error)
+	leaseClock     func() (time.Duration, error)
+}
 
 func (k nodeKernel) leaseKernel() deploymentKernel { return deploymentKernel{kernel: k.kernel} }
 
@@ -129,7 +134,14 @@ func (k nodeKernel) LeaseStatus(ctx context.Context, e Entry) (DeploymentLease, 
 	return s, err
 }
 func (k nodeKernel) Lease(ctx context.Context, e Entry, fresh FreshApproval) (DeploymentLease, error) {
-	b, err := relayguard.Read(ctx, nodeGuardOwner(e))
+	readGuard, clock := k.readLeaseGuard, k.leaseClock
+	if readGuard == nil {
+		readGuard = relayguard.Read
+	}
+	if clock == nil {
+		clock = leaseBootTime
+	}
+	b, err := readGuard(ctx, nodeGuardOwner(e))
 	if err != nil {
 		return DeploymentLease{}, err
 	}
@@ -138,8 +150,20 @@ func (k nodeKernel) Lease(ctx context.Context, e Entry, fresh FreshApproval) (De
 		s.Active = false
 		return s, err
 	}
-	b, err = relayguard.Read(ctx, nodeGuardOwner(e))
+	b, err = readGuard(ctx, nodeGuardOwner(e))
 	s.Boot = &b
+	if err == nil && s.retained != nil {
+		// Read includes syscalls after its ObservedNS timestamp. A fresh clock
+		// here also accounts for suspend while either readback was in flight.
+		var now time.Duration
+		now, err = clock()
+		if err == nil {
+			err = validateNodeLeaseRetention(s, b, e.ApprovalUntil, e.ApprovalBootNS, time.Now(), now)
+		}
+		if err == nil {
+			err = ctx.Err()
+		}
+	}
 	s.Active = s.Active && b.Active && err == nil
 	if err == nil && (!s.Active || b.DeadlineNS > e.ApprovalBootNS || !time.Now().Before(e.ApprovalUntil)) {
 		err = ErrLeaseExpired

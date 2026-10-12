@@ -62,7 +62,7 @@ func Open(cache *relaycache.Store, underlays []relayplan.Underlay) (*Engine, err
 		unlock()
 		return nil, err
 	}
-	e, err := open(cache, underlays, d, nodeKernel{kernel{run: command}})
+	e, err := open(cache, underlays, d, nodeKernel{kernel: kernel{run: command}})
 	if err != nil {
 		unlock()
 		return nil, err
