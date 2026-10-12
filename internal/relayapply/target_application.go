@@ -253,6 +253,7 @@ func (e *Engine) quarantineTarget(parent context.Context, id string) (TargetGuar
 		return e.targetFailure(id, "application_backend_unavailable", ErrRecovery)
 	}
 	g.Phase = "switching"
+	g.RouteRevision = nextRouteRevision(g.RouteRevision)
 	e.journal.Targets[i] = g
 	if err := e.persist(); err != nil {
 		return e.targetFailure(id, "journal_save_failed", errors.Join(err, e.blockTargetCandidates(ctx, g)))
@@ -432,6 +433,7 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 			return e.targetFailure(id, "target_kernel_conflict", err)
 		}
 		g.Phase, g.Pending, g.ApplicationVersion = "switching", desired, 1
+		g.RouteRevision = nextRouteRevision(g.RouteRevision)
 		e.journal.Targets[e.targetIndex(id)] = g
 		if err := e.persist(); err != nil {
 			return e.targetFailure(id, "journal_save_failed", err)
@@ -456,6 +458,9 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 		return e.targetFailure(id, "underlay_changed_before_commit", err)
 	}
 	g.Active, g.Pending, g.Phase, g.Generation, g.VerifiedAt = desired, nil, "active", entry.Generation, &proof.ObservedAt
+	if g.RouteRevision == 0 { // Upgrade a legacy active reservation on fresh commit.
+		g.RouteRevision = 1
+	}
 	e.journal.Targets[e.targetIndex(id)] = g
 	if err := e.persist(); err != nil {
 		return e.targetFailure(id, "journal_save_failed", err)
@@ -481,6 +486,7 @@ func (e *Engine) rollbackTarget(ctx context.Context, old TargetGuard, d relaysel
 			proof, probeErr := e.applicationProof(ctx, g, old.Active)
 			if probeErr == nil && time.Now().Before(d.ValidUntil) && decisionUnderlay(ctx, entry, d, proof.UnderlayGeneration) == nil {
 				g.Active, g.Pending, g.Phase, g.Generation, g.VerifiedAt = old.Active, nil, "active", entry.Generation, &proof.ObservedAt
+				g.RouteRevision = nextRouteRevision(g.RouteRevision)
 				at := time.Now()
 				g.ChangedAt = &at
 				e.journal.Targets[e.targetIndex(id)] = g
@@ -521,4 +527,11 @@ func decisionUnderlay(ctx context.Context, entry Entry, d relayselect.Decision, 
 		}
 	}
 	return errors.New("underlay generation differs from confirmed decision")
+}
+
+func nextRouteRevision(revision uint64) uint64 {
+	if revision != ^uint64(0) {
+		revision++
+	}
+	return revision
 }
