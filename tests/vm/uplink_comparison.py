@@ -37,14 +37,14 @@ def collect(root, worker):
     reports = []
     for report in sorted((root / 'results').glob('uplink-*/uplink.json')):
         total += report.stat().st_size
-        if total > 8 * 1024 * 1024:
+        if total > 32 * 1024 * 1024:
             raise RuntimeError('comparison evidence exceeds bound')
         row = {'report': json.loads(report.read_text()), 'logs': {}}
         for log in sorted(report.parent.iterdir()):
             if log.suffix not in ('.log', '.jsonl'):
                 continue
             total += log.stat().st_size
-            if total > 8 * 1024 * 1024:
+            if total > 32 * 1024 * 1024:
                 raise RuntimeError('comparison evidence exceeds bound')
             row['logs'][log.name] = log.read_text()
         reports.append(row)

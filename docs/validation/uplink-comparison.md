@@ -51,3 +51,5 @@ vpnctl에는 별도 참조로 `app1-last-path`를 공통 사례 뒤에 추가한
 공식 옵션 근거: [OpenVPN 2.6 매뉴얼](https://openvpn.net/community-docs/community-articles/openvpn-2-6-manual.html), [다중 remote 전환 설명](https://openvpn.net/community-docs/implementing-a-load-balancing-failover-configuration.html).
 
 `fault_rules_before`는 설치 직후 스냅샷이므로 이미 초기 차단 패킷이 포함될 수 있다. 카운터 단조성과 전체 차단 증거를 확인하며 전후 차이가0이라는 이유만으로 무효화하지 않는다. `final_selection`은 관측창 후 조회 시각 범위를 같이 저장한 보조 증거다.45초 안에 선택/복구했다는 판정에는 원본 응답·reconcile 시각을 사용한다.
+
+8경로·최대6개 fixture의 전체 원본 보고서와 로그 수집 한도는 VM당32MiB다. 수집 상한을 넘으면 계측 실패로 남기며 정상창·관측창이나 제품 자원 제한을 늘리지 않는다.
