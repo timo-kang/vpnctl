@@ -123,11 +123,8 @@ func Start(parent context.Context, options Options, source Source) (*Server, err
 	s.wg.Add(1)
 	go s.accept()
 	go func() {
-		select {
-		case <-parent.Done():
-			s.Close()
-		case <-s.ctx.Done():
-		}
+		<-s.ctx.Done()
+		s.Close()
 	}()
 	return s, nil
 }

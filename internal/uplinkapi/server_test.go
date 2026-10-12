@@ -224,3 +224,52 @@ func TestBlockedStreamWriteHasDeadline(t *testing.T) {
 		t.Fatal("blocked stream ignored write deadline")
 	}
 }
+
+func TestParentCancellationReleasesEndpointAndConnections(t *testing.T) {
+	for attempt := 0; attempt < 32; attempt++ {
+		dir := testRuntime(t)
+		parent, cancel := context.WithCancel(context.Background())
+		alreadyCanceled := attempt%2 == 0
+		if alreadyCanceled {
+			cancel() // Both parent and derived Done channels are ready at startup.
+		}
+		s, err := Start(parent, Options{Directory: dir, AllowedUIDs: []uint32{uint32(os.Geteuid())}}, sourceFixture())
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { cancel(); s.Close() })
+		if !alreadyCanceled {
+			r, _ := request(t, dir, "/v1/events")
+			decoder := json.NewDecoder(r.Body)
+			var frame Frame
+			if decoder.Decode(&frame) != nil {
+				t.Fatal("stream setup")
+			}
+			cancel() // No explicit Close: cancellation owns endpoint cleanup.
+			if decoder.Decode(&frame) == nil {
+				t.Fatal("canceled stream remained open")
+			}
+		}
+		until := time.Now().Add(time.Second)
+		for time.Now().Before(until) {
+			v := s.Stats()
+			if !v.Running && v.Connections == 0 && v.Streams == 0 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		stats := s.Stats()
+		if stats.Running || stats.Connections != 0 || stats.Streams != 0 {
+			t.Fatal("parent cancellation left API active")
+		}
+		if _, err := os.Lstat(dir + "/" + socketName); !os.IsNotExist(err) {
+			t.Fatal("parent cancellation retained socket", err)
+		}
+		replacement, err := listen(dir)
+		if err != nil {
+			t.Fatal("parent cancellation retained lock", err)
+		}
+		replacement.Close()
+	}
+}
