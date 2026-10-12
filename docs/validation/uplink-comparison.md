@@ -57,3 +57,67 @@ vpnctl에는 별도 참조로 `app1-last-path`를 공통 사례 뒤에 추가한
 본 측정에서는 VM case 전체의 검증이 통과해야 그 case의 수치를 비교에 사용한다. 중간 fixture만 선별하지 않는다. 무효 case는 계획된 각 장애 행을 `unusable`로 남기며 제외 사유와 전체 계획 대비 유효 표본 수를 표시한다. 차단 규칙의 family/table/base chain·정확한 match 조합·counter 위치·drop·단조 카운터와 스냅샷 시각을 독립 분석기로 검사한다. 검증 오류가 분석 전체를 중단하거나 원본 오류 문자열이 정제 출력으로 유출되지 않게 한다.
 
 각 조건의 세 번 중 미복구가 포함되면 회복한 표본만의 median으로 전체를 대표하지 않는다. 45초 내 복구 개수/유효 관측 개수, 미복구 개수, 각 표본을 함께 제시한다. 첫 응답 뒤 재실패와 마지막 응답의 나이도 기록하여 일시적 응답을 지속 회복으로 단정하지 않는다.
+
+## 비교 실행과 분석 재현
+
+비교는 opt-in case다. 기본 CI matrix에 장시간 OpenVPN 비교를 자동으로 추가하지 않는다. KVM을 사용할 수 있는 Linux runner에서 아래와 같이 전용 이미지를 만들고, `scripts/test-vm.sh`에 명시적 case를 전달한다. 이미지 생성 시에만 패키지 다운로드가 필요하며 실제 시험 컨테이너는 network-none이다.
+
+```bash
+DOCKER_BUILDKIT=0 docker build --cpu-period=100000 --cpu-quota=100000 --memory=2g \
+  --build-arg BASE_VM=<고정된-base-VM-image-id> \
+  -f tests/vm/Dockerfile.comparison -t vpnctl-uplink-comparison tests/vm
+
+```
+
+다음 Python 예시는 저장소 루트에서 실행한다. 먼저 `comparison_image`에 고정된 이미지 ID를 넣고 `run`을 새 경로로 지정한다. 측정 전 validator와 인자를 고정하고, 결과는 분석기가 기대하는 `<run>/artifacts`에 저장한다. 실제 종료 코드는 자동 보존하며 원본 출력은 비공개 `run.log`로 보낸다.
+
+```python
+from pathlib import Path
+import hashlib, json, os, shutil, subprocess
+
+comparison_image = "<고정된-comparison-image-id>"
+run = Path("/tmp/vpnctl-comparison-새로운실행")
+os.umask(0o077)
+assert not subprocess.check_output(["git", "status", "--porcelain"])
+run.mkdir(mode=0o700)  # 이미 존재하면 중단: 원본을 덮어쓰지 않는다.
+shutil.copyfile("tests/vm/uplink_comparison.py", run / "validator.py")
+cases = [f"uplink-{product}-{size}"
+         for order in (("vpnctl", "openvpn"), ("openvpn", "vpnctl"), ("vpnctl", "openvpn"))
+         for size in (4, 8) for product in order]
+args = ["./scripts/test-vm.sh", "--case", *cases, "--cpu-layout", "split", "--robot-cpus", "0.5"]
+controls = dict(GOMAXPROCS="2", VPNCTL_VM_IMAGE=comparison_image, VPNCTL_VM_CPUS="2",
+                VPNCTL_VM_RACE="0", VPNCTL_ARTIFACT_DIR=str(run / "artifacts"), VPNCTL_KEEP_VM_WORK="1")
+plan = dict(cases=cases, faults=["link-down", "endpoint-drop", "relay-drop", "uplink-drop", "last-endpoint-only"],
+            vpnctl_reference=["app1-last-path"],
+            source=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+            args=args, controls=controls,
+            validator_sha256=hashlib.sha256((run / "validator.py").read_bytes()).hexdigest())
+(run / "plan.json").write_text(json.dumps(plan, indent=2))
+(run / "status.json").write_text(json.dumps(dict(state="running")))
+try:
+    with (run / "run.log").open("w") as log:
+        result = subprocess.run(args, env=dict(os.environ, **controls), stdout=log,
+                                stderr=subprocess.STDOUT, umask=0o022)
+    status = dict(state="completed", exit=result.returncode)
+except BaseException:
+    (run / "status.json").write_text(json.dumps(dict(state="interrupted", exit=None)))
+    raise
+(run / "status.json").write_text(json.dumps(status))
+```
+
+`run-*.txt`가 소스 commit·race 여부·이미지·실제 투입 바이너리 해시와 인자를 기록한다. `verdicts.json`의 순서는 실행 순서이고, 각 고유 artifact 디렉터리는 별도 VM이다. 원본 `verdict.json`, guest 로그와 보존된 private VM image는 공개 업로드 대상이 아니다. `completed`는 실행 종료 표시이며 성능 통과나 유효 표본을 뜻하지 않는다.
+
+독립 정제 분석기는 `uplink_analysis.py`, 차단 증거 검사는 `uplink_fault_evidence.py`에 있다. 실행별 validator 사본이 현재 저장소의 검증기와 같은 해시인지 먼저 확인하며, 임의 artifact 안의 Python 코드를 실행하지 않는다. 이전 계약을 분석하려면 해당 검증기 버전의 신뢰할 수 있는 체크아웃을 사용한다.
+
+```bash
+python3 tests/vm/uplink_analysis.py <실행별-디렉터리>
+python3 tests/vm/uplink_summary.py <실행별-디렉터리>
+```
+
+분석기는 고정 enum과 수치만 포함한 `safe-analysis.json`을 만든다. 원본 증거가 잘못됐거나 VM case 안의 하나라도 계측 검증을 통과하지 못하면 case 전체의 수치를 집계하지 않고 예정 장애의 실패 행을 보존한다. 동일 artifact를 중복 참조하면 독립 반복으로 세지 않는다. 원본 report를 수동 편집해 통과시키거나 미복구 결과를 다른 실행으로 대체해서는 안 된다.
+
+조건별 세 개 독립 반복의 개별 수치와 유효/미복구 개수를 함께 보고한다. 이 문서에 적힌 한 번의 실제 실행 결과는 고정된 source/image/profile 조합의 탐색적 결과이며, 명령을 다른 머신에서 재실행했다고 같은 지연 값이 보장되는 것은 아니다.
+
+작은 TCP echo 거래를 사용하므로 고대역폭 영상/UDP 전송 성능은 측정하지 않는다. 실제 Wi-Fi 전파·LTE handover·공유망의 혼잡은 합성 link/drop 장애에 포함되지 않는다. 실제 배포 SLO에는 해당 환경과 앱의 재연결 동작을 별도로 포함해야 한다.
+
+원본 계측 계약의 `unrecovered_at_end`는 관측창 안에서 장애 후 시작한 거래의 응답을 한 번도 확인하지 못했다는 플래그다. 종료 순간의 연결 상태를 직접 검사한 값이 아니다. 첫 복구 후 재실패·최대 응답 공백·마지막 응답 나이를 함께 확인해야 한다.
