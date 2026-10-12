@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -158,11 +159,31 @@ fi
 				args = append(args, "--controller-id", strings.Repeat("0", 32))
 			}
 			cmd := cliProcess(t, args...)
+			if mode == "expires-during-plan" {
+				// Exercise the same production print/persist boundary with the
+				// explicit collector seam. Native link reads no longer use PATH.
+				cmd.Args[1] = "-test.run=^TestRelayPlanCollectionExpiryProcess$"
+			}
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
 			raw, e := cmd.Output()
 			if e == nil {
 				t.Fatal("unusable approval accepted", mode)
+			}
+			if mode == "expires-during-plan" {
+				// Check before a later CLI command can advance the watermark.
+				data, err := os.ReadFile(filepath.Join(cacheDir, "state.json"))
+				if err != nil {
+					t.Fatal("cannot inspect expiry checkpoint")
+				}
+				var checkpoint struct {
+					ObservedAt time.Time `json:"observed_at"`
+				}
+				decodeErr := json.Unmarshal(data, &checkpoint)
+				clear(data)
+				if decodeErr != nil || checkpoint.ObservedAt.Before(state.ExpiresAt) {
+					t.Fatal("collection-time expiry was not durably checkpointed")
+				}
 			}
 			prepareArgs := append([]string{}, args...)
 			prepareArgs[2] = "prepare"
@@ -234,4 +255,42 @@ func TestRelayPlanConfigExample(t *testing.T) {
 			t.Fatal("example catalog underlay missing", path.UnderlayID)
 		}
 	}
+}
+
+// Only the delayed-inventory case uses this helper. All other approval cases
+// continue through the full production CLI entrypoint and default collector.
+func TestRelayPlanCollectionExpiryProcess(t *testing.T) {
+	if os.Getenv("VPNCTL_CLI_TEST_PROCESS") != "1" {
+		return
+	}
+	var path string
+	for i, arg := range os.Args {
+		if arg == "--config" && i+1 < len(os.Args) {
+			path = os.Args[i+1]
+		}
+	}
+	cfg, err := loadConfig(path)
+	if err != nil || cfg.Node == nil {
+		os.Exit(2)
+	}
+	cache, err := openNodeRelayCache(cfg.Node, cfg.Node.RelayCacheDir, false)
+	if err != nil {
+		os.Exit(2)
+	}
+	report, err := cache.Status()
+	if err != nil {
+		cache.Close()
+		os.Exit(2)
+	}
+	collector := relayplan.LinuxCollector{ReadIP: func(ctx context.Context, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, "ip", args...).Output()
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), relayplan.MaxDuration)
+	err = printRelayPlan(ctx, cfg.Node.Name, "", report, cfg.Node.RelayUnderlays, cache, collector)
+	cancel()
+	cache.Close()
+	if err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
 }

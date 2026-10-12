@@ -450,6 +450,11 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	report["first_payload_seconds"] = time.Since(started).Seconds()
 	// Exercise several complete rounds, not just residual leases after
 	// activation. Preserve continuous payload/lease sampling throughout.
+	// Capture the robot cgroup over the same steady window for both binaries.
+	// This excludes enrollment and post-test cleanup; command children inherit it.
+	if group != nil {
+		report["steady_resource_before"] = group.evidence(t)
+	}
 	steadyStart := time.Now()
 	begin1, begin2 := receipts1.snapshot(), receipts2.snapshot()
 	baseline1, baseline2 := len(begin1.Records), len(begin2.Records)
@@ -522,6 +527,10 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	}
 	cycles1, gap1 = applicationContinuity(t, logfile, baseline1, "app", report)
 	cycles2, gap2 = applicationContinuity(t, secondLog, baseline2, "app2", report)
+	if group != nil {
+		report["steady_resource_after"] = group.evidence(t)
+	}
+	report["steady_resource_elapsed_ns"] = time.Since(steadyStart).Nanoseconds()
 	closePublication()
 	report["steady_seconds"] = time.Since(steadyStart).Seconds()
 	report["steady_applied_cycles"] = map[string]int{"app": cycles1, "app2": cycles2}

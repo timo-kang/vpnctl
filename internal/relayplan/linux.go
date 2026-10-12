@@ -110,6 +110,9 @@ func (c LinuxCollector) read(ctx context.Context, args ...string) ([]byte, error
 	return b, e
 }
 func (c LinuxCollector) link(ctx context.Context, name string) (linkRecord, bool, error) {
+	if c.ReadIP == nil {
+		return readNativeLink(ctx, name)
+	}
 	b, e := c.read(ctx, "-j", "address", "show")
 	if e != nil {
 		return linkRecord{}, false, e

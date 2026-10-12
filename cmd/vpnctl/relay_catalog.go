@@ -193,7 +193,7 @@ func runNodeRelay(args []string) error {
 		}
 		cache, err := openNodeRelayCacheUsing(cfg.Node, dir, args[0] == "refresh", open)
 		if errors.Is(err, relaycache.ErrMissing) && args[0] == "plan" {
-			return printRelayPlan(ctx, cfg.Node.Name, *id, relaycache.MissingReport(cfg.Node.Name), cfg.Node.RelayUnderlays, nil)
+			return printRelayPlan(ctx, cfg.Node.Name, *id, relaycache.MissingReport(cfg.Node.Name), cfg.Node.RelayUnderlays, nil, nil)
 		}
 		if errors.Is(err, relaycache.ErrMissing) && args[0] == "status" {
 			return json.NewEncoder(os.Stdout).Encode(relaycache.MissingReport(cfg.Node.Name))
@@ -211,7 +211,7 @@ func runNodeRelay(args []string) error {
 			if err != nil {
 				return err
 			}
-			return printRelayPlan(ctx, cfg.Node.Name, *id, report, cfg.Node.RelayUnderlays, cache)
+			return printRelayPlan(ctx, cfg.Node.Name, *id, report, cfg.Node.RelayUnderlays, cache, nil)
 		}
 		if args[0] == "status" {
 			report, err = cache.Status()
@@ -263,8 +263,8 @@ func openNodeRelayCacheUsing(cfg *config.NodeConfig, dir string, create bool, op
 	return open(dir, relaycache.Options{NodeID: cfg.Name, Create: create, LegacyPublicKeys: legacy})
 }
 
-func printRelayPlan(ctx context.Context, node, controller string, report relaycache.Report, underlays []relayplan.Underlay, cache *relaycache.Store) error {
-	plan, err := relayplan.Build(ctx, node, controller, report, underlays, nil)
+func printRelayPlan(ctx context.Context, node, controller string, report relaycache.Report, underlays []relayplan.Underlay, cache *relaycache.Store, collector relayplan.Collector) error {
+	plan, err := relayplan.Build(ctx, node, controller, report, underlays, collector)
 	if err != nil {
 		return err
 	}
