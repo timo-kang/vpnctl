@@ -4,10 +4,36 @@ package relayapply
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestTargetRouteRevisionLoadsLegacyJournal(t *testing.T) {
+	e, m, _, dir := appFixture(t)
+	s := activateApp(t, e)
+	e.journal.Targets[0].RouteRevision = 0
+	raw, err := json.Marshal(envelope{Journal: e.journal, Digest: digest(e.journal)})
+	if err != nil || strings.Contains(string(raw), "route_revision") {
+		t.Fatal("zero revision changed legacy journal bytes")
+	}
+	if err := e.save(raw); err != nil {
+		t.Fatal(err)
+	}
+	e = reopenTarget(t, e, m, dir)
+	if e.journal.Targets[0].RouteRevision != 0 {
+		t.Fatal("journal load invented a verified transition")
+	}
+	appProbes(e)
+	if _, err := e.ReconcileTarget(context.Background(), "app", "", s, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if e.journal.Targets[0].RouteRevision != 1 {
+		t.Fatal("fresh committed verification did not upgrade legacy revision")
+	}
+}
 
 func TestTargetRouteRevisionTracksTransitionsNotCatalog(t *testing.T) {
 	e, m, _, dir := appFixture(t)
