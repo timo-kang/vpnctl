@@ -16,6 +16,7 @@ from collections import deque
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import uplink_comparison
 
 ROOT = Path('/var/lib/vpnctl-vm')
 ARGS = dict(s.split('=', 1) if '=' in s else (s, '') for s in Path('/proc/cmdline').read_text().split())
@@ -358,6 +359,14 @@ class Handler(BaseHTTPRequestHandler):
                         return json.load(r)
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     result = list(pool.map(probe, jobs))
+            elif action == 'uplink-start':
+                with LOCK:
+                    if WORKER is not None:
+                        raise RuntimeError('only one fixture per VM')
+                    WORKER = uplink_comparison.start(ROOT, req)
+                result = {'started': True}
+            elif action == 'uplink-result':
+                result = uplink_comparison.collect(ROOT, WORKER)
             elif action == 'direct-start':
                 result = start_direct(req)
             elif action == 'direct-result':

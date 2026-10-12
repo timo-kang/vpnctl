@@ -1,0 +1,12 @@
+# Build the normal VM image first; pass its immutable local ID as BASE_VM.
+# Only this guest filesystem receives OpenVPN; no host packages or modules.
+ARG BASE_VM
+FROM ${BASE_VM}
+RUN mknod -m 666 /guest-root/dev/null c 1 3 && \
+    cp /etc/resolv.conf /guest-root/etc/resolv.conf && \
+    chroot /guest-root apt-get update && \
+    chroot /guest-root apt-get install -y --no-install-recommends openvpn openssl && \
+    chroot /guest-root systemctl mask openvpn.service && \
+    rm -rf /guest-root/var/lib/apt/lists/*
+COPY guest_agent.py uplink_comparison.py /guest-root/opt/vpnctl-vm/
+COPY observer.py uplink_comparison.py /opt/vpnctl-vm/
