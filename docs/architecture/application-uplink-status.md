@@ -28,7 +28,9 @@ filesystem permissions and explicit allowed local UIDs verified by SO_PEERCRED.
 Do not expose the controller administration socket, private cache, keys, peer
 configuration, full candidate inventory, or mutation operations. Do not open a
 TCP listener by default. Deployment prepares directory ownership/group access;
-services do not gain a persistent chown or mount capability for the API.
+services do not gain a persistent chown or mount capability for the API. Clients
+verify the expected server UID and protected parent-directory ownership before
+trusting the socket; a replaced listener is not automatically a valid producer.
 
 ## Status semantics
 
@@ -65,8 +67,14 @@ route equality from path ID alone or use wall-clock timestamps as counters.
 
 An in-process producer must carry an actual monotonic/BOOTTIME validity budget
 out of reconciliation; reconstructing authority from JSON timestamps is not
-acceptable. The exported deadline is the minimum absolute observation and approval
-deadline. An event can wait in a queue or socket after serialization, so a
+acceptable. For `reachable` and approved-scope `unreachable`, the exported deadline is
+the minimum absolute observation and approval deadline. A newly observed
+explicit denial/expiry publishes `blocked` with its own bounded observation
+deadline; this reports a negative policy observation and cannot extend approval
+or authorize traffic. Missing evidence publishes unknown without a reusable
+validity budget. All fresh states become unknown/stale when their observation
+budget expires, including blocked. An event can wait in a queue or socket after
+serialization, so a
 consumer must never start `remaining_validity_ms` at receipt. Instead it verifies
 `clock_domain`, compares its current `CLOCK_BOOTTIME` with
 `valid_until_boot_ns` at receipt and before use, and rejects already expired
@@ -84,7 +92,15 @@ clock domain supplied by a different host. Cross-host consumers need a separate
 contract. Suspension, clock rollback, stopped publication, delayed delivery and
 producer restart must never extend evidence validity. A changed producer also
 invalidates old cursors and cached snapshots. A stale snapshot stays stale until
-new evidence arrives. API liveness and data-path liveness are independent.
+new evidence arrives. At or beyond the deadline, an old fresh
+snapshot becomes `availability=unknown, freshness=stale`; retaining an old
+`reachable` label must never authorize a current-state claim. A newly observed
+explicit approval denial/expiry may publish `blocked`, which describes policy
+unavailability and does not by itself prove installed kernel quarantine. API
+liveness and data-path liveness are independent.
+
+Linux BOOTTIME includes suspend, while time namespaces can offset BOOTTIME and
+MONOTONIC; see the [Linux time-namespace contract](https://man7.org/linux/man-pages/man7/time_namespaces.7.html).
 
 ## Delivery and consumer behavior
 
@@ -95,8 +111,8 @@ readers; never block the producer. Bound both global and per-UID request rates,
 concurrent handlers, active streams, parsing work and response bytes. Reject
 excess requests with a bounded `429` response rather than queueing unbounded
 work. An allowed fast reader must not starve reconciliation; include a request
-flood in the resource and freshness qualification. Expiry must become observable even if no new
-reconcile completes. Consumers handle duplicates, missing revisions, changed
+flood in the resource and freshness qualification. Expiry must become observable
+even if no new reconcile completes. Consumers handle duplicates, missing revisions, changed
 producer IDs, truncated records, disconnection and their own freshness timeout.
 
 Provide Go and Python examples. Each example maintains its own bounded connect,
