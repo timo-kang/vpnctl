@@ -139,12 +139,15 @@ class State:
         self._target, self._clock = target, clock
         self._lock = threading.Lock()
         self._epoch = self._last_clock = 0
+        self._accepted = 0
+        self._observed_high = 0
         self._first = self._api = self._invalid = self._reset = self._active = False
         self._last = None
 
     def begin(self):
         with self._lock:
             self._api, self._first = False, True
+            self._active = False
             if self._epoch == MAX_UINT:
                 self._invalid = True
                 return 0
@@ -155,6 +158,11 @@ class State:
     def cursor(self):
         with self._lock:
             return self._last['cursor'] if self._last else ''
+
+    def accepted_frames(self):
+        """Validated API records, not evidence of payload success/freshness."""
+        with self._lock:
+            return self._accepted
 
     def disconnect(self, epoch):
         with self._lock:
@@ -184,7 +192,7 @@ class State:
                     if same:
                         if rev < prev_rev or int(s['path_revision']) < int(b['path_revision']):
                             raise ValueError('out of order revision')
-                        if rev > prev_rev and s['freshness'] == 'fresh' and int(s['observed_boot_ns']) <= int(b.get('observed_boot_ns', 0)):
+                        if rev > prev_rev and s['freshness'] == 'fresh' and int(s['observed_boot_ns']) <= self._observed_high:
                             raise ValueError('reused observation timestamp')
                         if rev == prev_rev:
                             if any(s.get(k, '0') != b.get(k, '0') for k in ('observed_boot_ns', 'valid_until_boot_ns', 'path_revision')):
@@ -194,7 +202,12 @@ class State:
                     reset = (reset and f['cursor'] != old['cursor']) or changed or not same or (not changed and seq > prev + 1) or (same and rev > prev_rev + 1)
                 if new_publication:
                     self._invalid = False
+                if old is None or s['producer_id'] != old['snapshot']['producer_id']:
+                    self._observed_high = 0
+                if s['freshness'] == 'fresh':
+                    self._observed_high = max(self._observed_high, int(s['observed_boot_ns']))
                 self._last, self._api, self._first, self._reset = f, True, False, reset
+                self._accepted = min(MAX_UINT, self._accepted + 1)
                 self._current()
             except ValueError:
                 self._api, self._invalid = False, True

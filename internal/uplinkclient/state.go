@@ -31,6 +31,7 @@ type State struct {
 	target                             string
 	clock                              func() (string, uint64, error)
 	epoch, lastClock                   uint64
+	accepted, observedHigh             uint64
 	first, api, invalid, reset, active bool
 	last                               *uplinkapi.Frame
 }
@@ -50,6 +51,7 @@ func (s *State) Begin() uint64 {
 	defer s.mu.Unlock()
 	s.api = false
 	s.first = true
+	s.active = false
 	if s.epoch == ^uint64(0) {
 		s.invalid = true
 		return 0
@@ -65,6 +67,14 @@ func (s *State) Cursor() string {
 		return ""
 	}
 	return s.last.Cursor
+}
+
+// AcceptedFrames counts validated records, including heartbeats. It measures API
+// delivery only; it is not evidence of payload recovery or observation freshness.
+func (s *State) AcceptedFrames() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.accepted
 }
 func (s *State) Disconnect(epoch uint64) {
 	s.mu.Lock()
@@ -101,7 +111,7 @@ func (s *State) Accept(epoch uint64, raw []byte) error {
 			if a.Revision < b.Revision || a.PathRevision < b.PathRevision {
 				return reject()
 			}
-			if a.Revision > b.Revision && a.Freshness == "fresh" && a.ObservedBootNS <= b.ObservedBootNS {
+			if a.Revision > b.Revision && a.Freshness == "fresh" && a.ObservedBootNS <= s.observedHigh {
 				return reject()
 			}
 			if a.Revision == b.Revision {
@@ -118,10 +128,19 @@ func (s *State) Accept(epoch uint64, raw []byte) error {
 	if newPublication {
 		s.invalid = false
 	}
+	if s.last == nil || s.last.Snapshot.ProducerID != f.Snapshot.ProducerID {
+		s.observedHigh = 0
+	}
+	if f.Snapshot.Freshness == "fresh" {
+		s.observedHigh = max(s.observedHigh, f.Snapshot.ObservedBootNS)
+	}
 	s.last = &f
 	s.api = true
 	s.first = false
 	s.reset = reset
+	if s.accepted < ^uint64(0) {
+		s.accepted++
+	}
 	s.current() // Latch clock/expiry failures at receipt, before returning.
 	return nil
 }

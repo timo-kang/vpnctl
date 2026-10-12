@@ -1068,6 +1068,122 @@
           }
         }
       ]
+    },
+    {
+      "name": "sequence_reversal_same_publication",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2"
+          },
+          "error": false
+        },
+        {
+          "op": "receive",
+          "patch": {},
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "revision_reversal_ascending_sequence",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "revision": "2"
+            }
+          },
+          "error": false
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:3"
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unknown_cannot_erase_observation_watermark",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false
+        },
+        {
+          "op": "clock",
+          "fail": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        },
+        {
+          "op": "clock",
+          "fail": false
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "revision": "2",
+              "availability": "unknown",
+              "freshness": "unknown",
+              "reason": "observation_unavailable",
+              "path_id": null,
+              "evidence": null,
+              "observed_boot_ns": null,
+              "valid_until_boot_ns": null
+            }
+          },
+          "error": false
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:3",
+            "snapshot": {
+              "revision": "3"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:4",
+            "snapshot": {
+              "revision": "4",
+              "observed_boot_ns": "1500000000",
+              "valid_until_boot_ns": "11500000000"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        }
+      ]
     }
   ]
 }
