@@ -429,7 +429,7 @@ def validate_capacity_accounting(row, prefix, quota, scope, vcpus, cpus):
         raise RuntimeError('role CPU accounting did not advance')
 
 
-def validate_application_mixed_result(status, preparation=False, paths=8, robot_cpu=None, cpu_layout='shared'):
+def validate_application_mixed_result(status, preparation=False, paths=8, robot_cpu=None, cpu_layout='shared', uplink_api=False):
     reports = [row.get('report', {}) for row in status.get('reports', [])]
     if (status.get('exit') != 0 or len(reports) != 3
             or paths not in (4, 8)
@@ -444,6 +444,22 @@ def validate_application_mixed_result(status, preparation=False, paths=8, robot_
                 or set(gaps) != {'app', 'app2'} or any(not 0 < n <= 10 for n in gaps.values())
                 or row.get('steady_seconds', 0) < 15):
             raise RuntimeError('mixed application continuity evidence incomplete')
+        if uplink_api:
+            load = row.get('uplink_api_load', {})
+            if load.get('enabled') is not True or load.get('client_scope') != 'server-measurement':
+                raise RuntimeError('API load profile missing or incorrectly scoped')
+            times = [load.get(k) for k in ('started_monotonic_ns', 'window_started_monotonic_ns',
+                                          'window_ended_monotonic_ns', 'stopped_monotonic_ns')]
+            if (load.get('parent_stopped') is not True
+                    or any(type(n) is not int or n <= 0 for n in times)
+                    or not times[0] <= times[1] < times[2] <= times[3]
+                    or times[2] - times[1] < row['steady_seconds'] * 1e9):
+                raise RuntimeError('API load did not cover qualification window')
+            for app in ('app', 'app2'):
+                client = load.get(app, {})
+                if any(type(client.get(k)) is not int or client[k] < minimum
+                       for k, minimum in (('responses', 10), ('limited', 1), ('fresh_reachable', 1))):
+                    raise RuntimeError('API load did not exercise both apps and rejection')
         if robot_cpu is not None:
             validate_robot_capacity(row, paths, robot_cpu, cpu_layout)
         if preparation:
@@ -646,7 +662,7 @@ def validate_manager_auto_result(status, paths, installation=False):
             or summary.get('required_samples_per_class') != 20):
         raise RuntimeError('incomplete or misleading SLO summary')
 
-def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared'):
+def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared', uplink_api=False):
     vm.launch()
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
@@ -671,7 +687,12 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
         preparation = case == 'application-preparation' or case.startswith('application-capacity-rebuild-')
         action = 'application-capacity' if capacity else case
         paths = int(case.rsplit('-', 1)[1]) if capacity else 8
-        vm.call(action + '-start', {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout, 'rebuild': preparation} if capacity else {})
+        request = {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout, 'rebuild': preparation} if capacity else {}
+        if uplink_api:
+            if not capacity:
+                raise RuntimeError('API load requires a capacity profile')
+            request['uplink_api'] = True
+        vm.call(action + '-start', request)
         until = time.monotonic() + 16 * 60
         while time.monotonic() < until:
             status = vm.call(action + '-result')
@@ -679,7 +700,7 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
                 result[case] = status
                 vm.record(case + '-result', status)
                 if capacity or case in ('application-mixed', 'application-preparation'):
-                    validate_application_mixed_result(status, preparation=preparation, paths=paths, robot_cpu=robot_cpus if capacity else None, cpu_layout=cpu_layout)
+                    validate_application_mixed_result(status, preparation=preparation, paths=paths, robot_cpu=robot_cpus if capacity else None, cpu_layout=cpu_layout, uplink_api=uplink_api)
                 else:
                     validate_application_approval_result(status)
                 return result
@@ -965,7 +986,10 @@ def main():
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
     parser.add_argument('--robot-cpus', default='0.5', choices=['1', '0.5', '0.25'])
     parser.add_argument('--cpu-layout', default='shared', choices=['shared', 'split'])
+    parser.add_argument('--uplink-api-load', action='store_true')
     args = parser.parse_args()
+    if args.uplink_api_load and any(not case.startswith('application-capacity-') for case in args.case):
+        raise SystemExit('API load requires capacity cases')
     if not Path('/.dockerenv').exists() or set(os.listdir('/sys/class/net')) != {'lo'}:
         raise SystemExit('run only inside the dedicated network-none container')
     caps = next(s.split()[1] for s in Path('/proc/self/status').read_text().splitlines() if s.startswith('CapEff:'))
@@ -1007,7 +1031,7 @@ def main():
         verdict = {'schema_version': 1, 'case': case, 'mode': mode, 'delta': delta, 'rtc': rtc, 'completed': False, 'qualified': False}
         try:
             with record_container_resources(verdict):
-                exercise(vm, case, mode, delta, verdict, args.robot_cpus, args.cpu_layout)
+                exercise(vm, case, mode, delta, verdict, args.robot_cpus, args.cpu_layout, args.uplink_api_load)
             verdict['completed'] = True
             if 'unsupported_reason' not in verdict and 'defect_reason' not in verdict:
                 verdict['qualified'] = True
