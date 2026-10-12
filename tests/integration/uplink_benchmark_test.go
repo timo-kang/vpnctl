@@ -24,12 +24,28 @@ type uplinkFixture struct {
 	roles            map[string]any
 	version, profile string
 	primary          func() error
+	paths            []uplinkPath
+	selection        func() map[string]string
 }
 
 func vpnctlUplinkFixture(t *testing.T, paths int, robot, server *capacityGroup, resultDir string) *uplinkFixture {
 	a := applicationFixtureWithGroup(t, true, paths, false, robot.file)
 	uplinkControlPath(t, a.robot, a.controller.ns)
-	f := &uplinkFixture{robot: a.robot, endpointPort: 51820, logs: map[string]string{}, roles: map[string]any{}, version: "main-73a5d5f", profile: "watch=500ms; other target policy defaults unchanged"}
+	f := &uplinkFixture{robot: a.robot, endpointPort: 51820, logs: map[string]string{}, roles: map[string]any{}, version: "vpnctl; exact build identity in runner manifest", profile: "watch=500ms; other target policy defaults unchanged"}
+	for _, p := range a.plan.Paths {
+		f.paths = append(f.paths, uplinkPath{ID: p.PathID, Interface: p.Pin.WGInterface, Relay: int(p.PathID[1] - '0'), Underlay: int(p.PathID[2] - '0'), Port: 51820 + int(p.PathID[2]-'0')})
+	}
+	f.selection = func() map[string]string {
+		out := map[string]string{}
+		for target, log := range f.logs {
+			r := latestApplicationResult(log)
+			out[target] = r.Selection.DesiredPathID
+			if !r.Applied {
+				out[target] = "not_applied"
+			}
+		}
+		return out
+	}
 	for i, r := range a.recipients {
 		f.relays = append(f.relays, r.ns)
 		f.roles[fmt.Sprintf("relay%d", i)] = server.placement(t, r.watch.cmd.Process.Pid)
@@ -66,26 +82,6 @@ func uplinkResources(t *testing.T, g *capacityGroup) map[string]any {
 	return out
 }
 
-func injectUplinkFault(t *testing.T, f *uplinkFixture, fault string) {
-	t.Helper()
-	switch fault {
-	case "link-down":
-		netOutput(t, f.robot, "ip", "link", "set", "wan0", "down")
-	case "endpoint-drop":
-		(relayUplink{relay: f.robot}).nft(t, fmt.Sprintf(`table inet comparison_fault { chain output { type filter hook output priority -100; policy accept; ip daddr 192.0.2.11 udp dport %d counter drop; } }`, f.endpointPort))
-	case "relay-drop":
-		(relayUplink{relay: f.relays[0]}).nft(t, `table inet comparison_fault {
- chain input { type filter hook input priority -100; policy drop; }
- chain output { type filter hook output priority -100; policy drop; }
- chain forward { type filter hook forward priority -100; policy drop; }
- }`)
-	case "uplink-drop":
-		(relayUplink{relay: f.relays[0]}).nft(t, `table inet comparison_fault { chain forward { type filter hook forward priority -100; policy accept; ip daddr 198.18.0.2 tcp dport 9192 counter drop; } }`)
-	default:
-		t.Fatal("unsupported comparison fault")
-	}
-}
-
 func TestVMUplinkBenchmark(t *testing.T) {
 	if os.Getenv("VPNCTL_UPLINK_TRANSPORT") == "" {
 		t.Skip("explicit comparison VM only")
@@ -112,7 +108,11 @@ func TestVMUplinkBenchmark(t *testing.T) {
 	if e := os.WriteFile("/sys/fs/cgroup/cgroup.subtree_control", []byte("+memory"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	for _, fault := range []string{"link-down", "endpoint-drop", "relay-drop", "uplink-drop"} {
+	faults := []string{"link-down", "endpoint-drop", "relay-drop", "uplink-drop", "last-endpoint-only"}
+	if transport == "vpnctl" {
+		faults = append(faults, "app1-last-path")
+	}
+	for _, fault := range faults {
 		t.Run(fault, func(t *testing.T) { runUplinkTrial(t, transport, paths, fault) })
 	}
 }
@@ -196,16 +196,26 @@ func runUplinkTrial(t *testing.T, transport string, paths int, fault string) {
 	} else if err := f.primary(); err != nil {
 		t.Fatal("baseline primary changed", err)
 	}
+	report["phase"] = "injecting"
 	begin := managerMono()
+	report["fault_begin_ns"] = begin
 	injectUplinkFault(t, f, fault)
 	end := managerMono()
 	stop := end + int64(45*time.Second)
 	report["fault_begin_ns"], report["fault_end_ns"], report["window_end_ns"] = begin, end, stop
 	report["phase"] = "observing"
+	report["fault_rules_before"] = uplinkFaultEvidence(t, f, fault)
+	report["fault_rules_before_observed_ns"] = managerMono()
 	time.Sleep(time.Duration(max(int64(0), stop-managerMono())))
 	mustWrite(t, trace+".stop", "stop")
 	sampler.finish(t)
 	rows = readUplinkTrace(t, trace)
+	report["fault_rules_after"] = uplinkFaultEvidence(t, f, fault)
+	report["fault_rules_after_observed_ns"] = managerMono()
+	report["final_selection_begin_ns"] = managerMono()
+	report["final_selection"] = f.selection()
+	report["final_selection_end_ns"] = managerMono()
+	report["candidate_ids"] = f.paths
 	report["samples"] = rows
 	report["robot_after"], report["server_after"] = uplinkResources(t, robot), uplinkResources(t, server)
 	metrics := map[string]uplinkMetric{}

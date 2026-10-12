@@ -5,8 +5,8 @@
 ## 고정할 조건
 
 - controller는 로봇/릴레이와 별도 namespace. 실제 uplink 서버 두 주소는 릴레이 뒤에만 있다. 로봇에는 서버로 가는 직접 경로가 없다.
-- 두 릴레이와2/4개 underlay로4/8개 후보 endpoint. 두 앱의 새 TCP 거래 및 첫 앱의 기존 TCP 소켓을완료 후200ms 간격, 연결400ms·프레임 읽기/쓰기 각각400ms 제한으로 관측한다. 기존 연결 실패를 새 연결로 숨기지 않는다.
--2 vCPU VM, 외부2 CPU/2GiB/0swap/pids256. 로봇 제어 프로세스와 자식은 CPU0·0.5CPU, 서버/측정기는 CPU1·1CPU. 메모리와 cgroup CPU 증거를 전후 수집한다.
+- 두 릴레이와 2/4개 underlay로 4/8개 후보 endpoint. 두 앱의 새 TCP 거래 및 첫 앱의 기존 TCP 소켓을완료 후200ms 간격, 연결400ms·프레임 읽기/쓰기 각각400ms 제한으로 관측한다. 기존 연결 실패를 새 연결로 숨기지 않는다.
+- 2 vCPU VM, 외부2 CPU/2GiB/0swap/pids256. 로봇 제어 프로세스와 자식은 CPU0·0.5CPU, 서버/측정기는 CPU1·1CPU. 메모리와 cgroup CPU 증거를 전후 수집한다.
 - vpnctl은 현재 제품 기본값(관측 freshness10초, 연결 한도1초, 재확인2회)을 유지하며 watch interval500ms인 명시적 운용 프로필을 사용한다.
 - OpenVPN은 UDP/TLS 인증, AES-256-GCM, 하나의 활성 터널과 순서가 고정된 여러 remote. ping1초/ping-restart5초, handshake3초/connect-retry1초를 명시하는 빠른 전환 프로필. 배포 기본값 또는 최적 설정이라고 주장하지 않는다. DCO는 양쪽 실험 이미지의 지원 차이 때문에 끄고 기록한다.
 - OpenVPN은 터널 상대의 통신 상태를 검사하며 목적지 앱/승인·커널 lease 검사와 동일한 기능을 제공하지 않는다. 기능 범위 차이를 성능 순위로 숨기지 않는다.
@@ -19,12 +19,15 @@
 2. 선택된 relay endpoint의 UDP만 조용히 drop.
 3. 첫 relay의 모든 입력/출력/전달을 drop하여 relay 격리.
 4. 첫 relay 뒤의 첫 앱 uplink 전달만 drop. 터널은 살아 있다. 앱2에 대한 영향도 별도로 기록한다.
+5. 마지막 r1/wanN endpoint 하나를 제외한 모든 후보의 정확한 UDP 목적지/포트를 각 릴레이 INPUT에서 drop. 4경로 중3개, 8경로 중7개가 무응답이다. 관리 통신은 유지한다.
+
+vpnctl에는 별도 참조로 `app1-last-path`를 공통 사례 뒤에 추가한다. robot OUTPUT에서 실제 Candidate.Pin.WGInterface 중 마지막 것을 제외한 인터페이스의 앱1 TCP만 drop한다. 앱2와 터널 UDP는 그대로다. 이는 #185의 앱별 후보 부하 형태를 정상창 이후 동적으로 만드는 참조이며 원래 처음부터 후보들이 실패한 조건과 동일한 재현이라고 주장하지 않는다. OpenVPN은 이 행에서 해당 없음이며 실패·미복구로 집계하지 않는다. 복구 시간만으로 10초 freshness의 인과효과를 주장하지 않고 앱별 reconcile 원본 시각·선택·적용 로그를 함께 보존한다.
 
 새 연결 성공시점과 기존 소켓의 회복/오류/미복구를 구분한다. 실패한 계측 시도 수는 패킷 손실률이나 서로 다른 요청 수가 아니다. 타이머/계측 간격 때문에0.2초 이하 순위나p95/p99를 소수 표본에서 주장하지 않는다. 승인 안전성은 별도 기존 검증을 유지한다.
 
 ## 실행 순서와 증거
 
-먼저 별도 계측 검증(pilot)을 수행한다. pilot은 성능 표본에 포함하지 않는다. 측정기 검증 후 source/binary/image/config/분석기 해시를 고정하고4/8경로 각3쌍을 AB/BA/AB 순서로 실행한다. 한 VM에서는 동일 제품/규모의 네 장애 사례를 각각 새 fixture로 실행한다. 실행 중단·성공할 때까지 재시도·실패 삭제는 하지 않는다. 계측 결함이면 해당 계획을 무효로 남기고 수정 버전을 별도 계획으로 고정한다.
+먼저 별도 계측 검증(pilot)을 수행한다. pilot은 성능 표본에 포함하지 않는다. 측정기 검증 후 source/binary/image/config/분석기 해시를 고정하고4/8경로 각3쌍을 AB/BA/AB 순서로 실행한다. 한 VM에서는 동일 제품/규모의 공통 다섯 장애와 vpnctl 전용 참조 사례를 각각 새 fixture로 실행한다. 실행 중단·성공할 때까지 재시도·실패 삭제는 하지 않는다. 계측 결함이면 해당 계획을 무효로 남기고 수정 버전을 별도 계획으로 고정한다.
 
 안전한 비공개 원본과 정제 요약을 함께 남긴다. 호스트 네트워크/Wi-Fi/커널/clock/power를 변경하지 않는다. OpenVPN 설치는 비교용 게스트 이미지 안에서만 한다. 비교 결과는 이 구성의 탐색적 median/range이며 하드웨어 배포 인증이나fleet p95가 아니다.
 
@@ -35,3 +38,16 @@
 역할별 CPU 제한은 사용자 공간 프로세스와 자식의 cgroup 제한이다. OpenVPN의 사용자 공간 데이터 처리와 WireGuard의 커널/softirq 처리는 비용 귀속이 같지 않다. 외부 VM 전체의 CPU도 기록하되 이 시험으로 동일한 전체 로봇 CPU 효율 또는 처리량을 주장하지 않는다. OpenVPN의 장애 직전 management state와 vpnctl의 최신 선택 결과 모두 r0/wan0를 확인한다.
 
 컨트롤러는 별도 관리용 veth/host route로 로봇과 통신하며 IP forwarding을 끈다. wan0 장애가 동시에 승인 통신 장애가 되는 혼입을 피하고 실제 서버 uplink의 직접 우회 경로는 만들지 않는다. 이 구성의 결과는 컨트롤러까지 함께 끊기는 복합 장애 결과로 일반화하지 않는다.
+
+## Pilot 이력과 실행 예산
+
+- Pilot-1: OpenVPN 설치가 남긴 apt archive/partial 권한으로 capability-free 이미지 생성 실패. VM은 시작하지 않았고 원본 실패를 보존했다. guest 이미지에서 해당 임시 디렉터리만 제거했다.
+- Pilot-2: 4경로 양 제품 각 두 장애는 45초 측정 완료. endpoint/uplink-drop 두 사례는 정상창 후 한 줄 nft 파일 문법 오류로 주입 실패. 전체를 성능 표본에서 제외하고 원본을 보존했다. 중간에 VM을 중지하거나 측정창을 연장하지 않았다.
+- Pilot-3: 주입 규칙을 여러 줄 문법으로 수정하고 8경로에서 공통5개 및 vpnctl 참조1개를 검증한다. 각 VM worker15분/observer16분 상한, 장애45초는 동일하다.
+- 본 표본: 4/8경로 각3쌍 AB/BA/AB. 공통60개 장애 관측 + vpnctl 전용6개 참조. 최종 소스·실행기·분석기·이미지/바이너리 해시를 이슈에 고정한 후 실행한다. 예상 시간 안에서 미복구는 유효한 결과이며 관측창을 늘리지 않는다.
+
+차단 규칙과 카운터를 장애 설치 직후/45초 종료 후 함께 기록하고, 마지막 경로 조건에서는 최종 OpenVPN remote 또는 vpnctl의 실제 선택·적용을 남긴다. r1이라는 응답 표지만으로 underlay 사용을 추정하지 않는다.
+
+공식 옵션 근거: [OpenVPN 2.6 매뉴얼](https://openvpn.net/community-docs/community-articles/openvpn-2-6-manual.html), [다중 remote 전환 설명](https://openvpn.net/community-docs/implementing-a-load-balancing-failover-configuration.html).
+
+`fault_rules_before`는 설치 직후 스냅샷이므로 이미 초기 차단 패킷이 포함될 수 있다. 카운터 단조성과 전체 차단 증거를 확인하며 전후 차이가0이라는 이유만으로 무효화하지 않는다. `final_selection`은 관측창 후 조회 시각 범위를 같이 저장한 보조 증거다.45초 안에 선택/복구했다는 판정에는 원본 응답·reconcile 시각을 사용한다.

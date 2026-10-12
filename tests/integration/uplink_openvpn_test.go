@@ -101,7 +101,8 @@ func openVPNUplinkFixture(t *testing.T, paths int, robot, server *capacityGroup,
 	}
 	conf := common + fmt.Sprintf("client\ncert %s/client.crt\nkey %s/client.key\nremote-cert-tls server\nverify-x509-name server name\nnobind\npersist-key\npersist-tun\nping 1\nping-restart 5\nhand-window 3\nconnect-retry 1 1\nroute 198.18.0.2 255.255.255.255\nroute 198.18.0.3 255.255.255.255\n", private, private)
 	for r := 0; r < 2; r++ {
-		for _, prefix := range []string{"192.0.2", "198.51.100", "203.0.113", "198.19.0"}[:paths/2] {
+		for u, prefix := range uplinkPrefixes[:paths/2] {
+			f.paths = append(f.paths, uplinkPath{ID: fmt.Sprintf("p%d%d", r, u), Relay: r, Underlay: u, Port: 1194})
 			conf += fmt.Sprintf("remote %s.%d 1194\n", prefix, 11+r)
 		}
 	}
@@ -113,7 +114,28 @@ func openVPNUplinkFixture(t *testing.T, paths int, robot, server *capacityGroup,
 	f.logs["client"] = log
 	p := startNetworkProcessInGroup(t, robot.file, layout.robot, log, nil, "openvpn", "--config", path)
 	f.roles["client"] = robot.placement(t, p.cmd.Process.Pid)
-	f.primary = func() error { return openVPNPrimary(management) }
+	f.primary = func() error {
+		remote, err := openVPNRemote(management)
+		if err != nil {
+			return err
+		}
+		if remote != "192.0.2.11:1194" {
+			return fmt.Errorf("primary endpoint changed")
+		}
+		return nil
+	}
+	f.selection = func() map[string]string {
+		remote, err := openVPNRemote(management)
+		id := "not_connected"
+		if err == nil {
+			for _, p := range f.paths {
+				if remote == fmt.Sprintf("%s.%d:%d", uplinkPrefixes[p.Underlay], 11+p.Relay, p.Port) {
+					id = p.ID
+				}
+			}
+		}
+		return map[string]string{"tunnel": id}
+	}
 	eventually(t, 30*time.Second, "OpenVPN initial endpoint", f.primary)
 	f.endpointPort = 1194
 	f.version = strings.Split(netOutput(t, layout.robot, "openvpn", "--version"), "\n")[0]
@@ -124,28 +146,28 @@ func openVPNUplinkFixture(t *testing.T, paths int, robot, server *capacityGroup,
 
 // Query current management state, not historical log text. A reconnect to another
 // underlay before injection would otherwise make the selected-endpoint fault void.
-func openVPNPrimary(path string) error {
+func openVPNRemote(path string) (string, error) {
 	c, e := net.DialTimeout("unix", path, time.Second)
 	if e != nil {
-		return fmt.Errorf("management unavailable")
+		return "", fmt.Errorf("management unavailable")
 	}
 	defer c.Close()
 	if e = c.SetDeadline(time.Now().Add(time.Second)); e != nil {
-		return e
+		return "", e
 	}
 	if _, e = io.WriteString(c, "state\n"); e != nil {
-		return e
+		return "", e
 	}
 	scanner := bufio.NewScanner(io.LimitReader(c, 16384))
 	scanner.Buffer(make([]byte, 4096), 4096)
-	connected := false
+	remote := ""
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "END" {
-			if connected {
-				return nil
+			if remote != "" {
+				return remote, nil
 			}
-			return fmt.Errorf("primary not connected")
+			return "", fmt.Errorf("not connected")
 		}
 		fields := strings.Split(line, ",")
 		if len(fields) < 6 {
@@ -154,7 +176,10 @@ func openVPNPrimary(path string) error {
 		if _, e := strconv.ParseInt(fields[0], 10, 64); e != nil {
 			continue
 		}
-		connected = fields[1] == "CONNECTED" && fields[2] == "SUCCESS" && fields[4] == "192.0.2.11" && fields[5] == "1194"
+		remote = ""
+		if fields[1] == "CONNECTED" && fields[2] == "SUCCESS" {
+			remote = fields[4] + ":" + fields[5]
+		}
 	}
-	return fmt.Errorf("incomplete management state")
+	return "", fmt.Errorf("incomplete management state")
 }

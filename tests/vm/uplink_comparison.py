@@ -6,7 +6,10 @@ import time
 
 CASES = ['uplink-' + product + '-' + str(paths)
          for product in ('vpnctl', 'openvpn') for paths in (4, 8)]
-FAULTS = {'link-down', 'endpoint-drop', 'relay-drop', 'uplink-drop'}
+FAULTS = {'link-down', 'endpoint-drop', 'relay-drop', 'uplink-drop', 'last-endpoint-only', 'app1-last-path'}
+
+def faults(transport):
+    return FAULTS if transport == 'vpnctl' else FAULTS - {'app1-last-path'}
 KINDS = {'app', 'app2', 'existing'}
 
 
@@ -88,7 +91,8 @@ def validate(status, transport, paths):
     if status.get('exit') != 0:
         raise RuntimeError('comparison worker failed; private evidence retained')
     reports = status.get('reports', [])
-    if len(reports) != len(FAULTS) or {r['report'].get('fault') for r in reports} != FAULTS:
+    expected_faults = faults(transport)
+    if len(reports) != len(expected_faults) or {r['report'].get('fault') for r in reports} != expected_faults:
         raise RuntimeError('missing comparison fault reports')
     for item in reports:
         r = item['report']
