@@ -31,7 +31,7 @@ type uplinkFixture struct {
 func vpnctlUplinkFixture(t *testing.T, paths int, robot, server *capacityGroup, resultDir string) *uplinkFixture {
 	a := applicationFixtureWithGroup(t, true, paths, false, robot.file)
 	uplinkControlPath(t, a.robot, a.controller.ns)
-	f := &uplinkFixture{robot: a.robot, endpointPort: 51820, logs: map[string]string{}, roles: map[string]any{}, version: "vpnctl; exact build identity in runner manifest", profile: "watch=500ms; other target policy defaults unchanged"}
+	f := &uplinkFixture{robot: a.robot, endpointPort: 51820, logs: map[string]string{}, roles: map[string]any{}, version: "vpnctl; exact build identity in runner manifest", profile: "watch=500ms; supervisor-refresh=1s; probe-timeout=1s; other target policy defaults unchanged"}
 	for _, p := range a.plan.Paths {
 		f.paths = append(f.paths, uplinkPath{ID: p.PathID, Interface: p.Pin.WGInterface, Relay: int(p.PathID[1] - '0'), Underlay: int(p.PathID[2] - '0'), Port: 51820 + int(p.PathID[2]-'0')})
 	}
