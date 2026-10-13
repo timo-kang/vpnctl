@@ -17,6 +17,30 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+// A concurrent candidate rebuild can interrupt a multipart link inventory.
+// Discard every interrupted dump and retry only enumeration, before reading
+// any lease. Check the existing deadline between at most three attempts; the
+// parent's CommandContext bounds the blocking netlink call itself. Lease read
+// failures and inactive guards are never retried or accepted as good samples.
+func guardSamplingLinks(ctx context.Context, list func() ([]netlink.Link, error)) ([]netlink.Link, error) {
+	for range 3 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		links, err := list()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err == nil {
+			return links, nil
+		}
+		if !errors.Is(err, netlink.ErrDumpInterrupted) {
+			return nil, err
+		}
+	}
+	return nil, netlink.ErrDumpInterrupted
+}
+
 // Worker stderr may contain arbitrary runtime output. Preserve only known,
 // exact error lines; a failed sample is never evidence of an inactive lease.
 func guardSamplingFailure(ctx context.Context, err error) string {
@@ -48,7 +72,8 @@ func TestGuardSamplingFailureClassification(t *testing.T) {
 	for _, tc := range []struct{ stderr, want string }{
 		{netlink.ErrDumpInterrupted.Error() + "\n", "link_dump_interrupted"},
 		{"operation not permitted\n", "permission_denied"},
-		{"private-value dump interrupted\n", "worker_failed"},
+		{"private-value " + netlink.ErrDumpInterrupted.Error() + "\n", "worker_failed"},
+		{netlink.ErrDumpInterrupted.Error() + " private-value\n", "worker_failed"},
 		{"unknown private-value\n", "worker_failed"},
 	} {
 		got := guardSamplingFailure(context.Background(), &exec.ExitError{Stderr: []byte(tc.stderr)})
@@ -61,7 +86,7 @@ func TestGuardSamplingFailureClassification(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := guardSamplingFailure(ctx, &exec.ExitError{Stderr: []byte("dump interrupted\n")}); got != "class=cancelled exit=-1" {
+	if got := guardSamplingFailure(ctx, &exec.ExitError{Stderr: []byte(netlink.ErrDumpInterrupted.Error() + "\n")}); got != "class=cancelled exit=-1" {
 		t.Fatal(got)
 	}
 	ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
