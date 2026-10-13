@@ -196,7 +196,7 @@ func requireApplicationLeasesExcept(t *testing.T, f *m3AuthorityFixture, exclude
 	cmd.Env = append(os.Environ(), "VPNCTL_WORKER=boot-guard-snapshot")
 	b, err := cmd.Output()
 	if err != nil {
-		t.Fatal("guard sampling", err)
+		t.Fatal("guard sampling", guardSamplingFailure(ctx, err))
 	}
 	states := map[string]struct {
 		State relayguard.State `json:"state"`
