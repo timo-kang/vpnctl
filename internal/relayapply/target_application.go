@@ -253,6 +253,7 @@ func (e *Engine) quarantineTarget(parent context.Context, id string) (TargetGuar
 		return e.targetFailure(id, "application_backend_unavailable", ErrRecovery)
 	}
 	g.Phase = "switching"
+	g.RouteRevision = nextRouteRevision(g.RouteRevision)
 	e.journal.Targets[i] = g
 	if err := e.persist(); err != nil {
 		return e.targetFailure(id, "journal_save_failed", errors.Join(err, e.blockTargetCandidates(ctx, g)))
@@ -302,10 +303,26 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 	if g.Phase != "guarded" && g.Phase != "active" {
 		return out, ErrRecovery
 	}
+	if g.RouteRevision == ^uint64(0) {
+		out.Application, err = e.quarantineTarget(parent, id)
+		return out, errors.Join(ErrRecovery, err)
+	}
+	fence := e.targetObservationFence(g)
 	ctx, cancel := context.WithTimeout(parent, MaxDuration)
 	defer cancel()
 	ctx = context.WithValue(ctx, targetConnectLimitKey{}, selector.MaxConnectTime())
 	report, _ := e.observeTargetFiltered(ctx, id, controller, timeout, e.candidateProbe(), selector.ObservationExclusion)
+	// Candidate lease enforcement remains live within observation. No target
+	// decision or route mutation may consume evidence for a changed reservation.
+	i, g, current := fence.current(e)
+	if !current {
+		out.Selection = relayselect.Decision{SchemaVersion: 1, NodeID: e.journal.Node, TargetID: id, State: "unknown", Reason: "target_changed_during_observation", Candidates: []relayselect.Candidate{}}
+		out.Application = TargetGuardResult{SchemaVersion: 1, TargetID: id, State: "unknown", Reason: "target_changed_during_observation"}
+		if e.uncertain {
+			return out, errors.Join(ErrConflict, relaycache.ErrUncertain)
+		}
+		return out, ErrConflict
+	}
 	for j := range report.Paths {
 		k := e.index(report.Paths[j].PathID)
 		if report.Paths[j].State != "excluded" && k >= 0 && (e.journal.Entries[k].LeaseVersion != 3 || e.journal.Entries[k].ProbeScope != 1) {
@@ -432,6 +449,7 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 			return e.targetFailure(id, "target_kernel_conflict", err)
 		}
 		g.Phase, g.Pending, g.ApplicationVersion = "switching", desired, 1
+		g.RouteRevision = nextRouteRevision(g.RouteRevision)
 		e.journal.Targets[e.targetIndex(id)] = g
 		if err := e.persist(); err != nil {
 			return e.targetFailure(id, "journal_save_failed", err)
@@ -456,6 +474,9 @@ func (e *Engine) applyTarget(ctx context.Context, old TargetGuard, desired *Targ
 		return e.targetFailure(id, "underlay_changed_before_commit", err)
 	}
 	g.Active, g.Pending, g.Phase, g.Generation, g.VerifiedAt = desired, nil, "active", entry.Generation, &proof.ObservedAt
+	if g.RouteRevision == 0 { // Upgrade a legacy active reservation on fresh commit.
+		g.RouteRevision = 1
+	}
 	e.journal.Targets[e.targetIndex(id)] = g
 	if err := e.persist(); err != nil {
 		return e.targetFailure(id, "journal_save_failed", err)
@@ -481,6 +502,7 @@ func (e *Engine) rollbackTarget(ctx context.Context, old TargetGuard, d relaysel
 			proof, probeErr := e.applicationProof(ctx, g, old.Active)
 			if probeErr == nil && time.Now().Before(d.ValidUntil) && decisionUnderlay(ctx, entry, d, proof.UnderlayGeneration) == nil {
 				g.Active, g.Pending, g.Phase, g.Generation, g.VerifiedAt = old.Active, nil, "active", entry.Generation, &proof.ObservedAt
+				g.RouteRevision = nextRouteRevision(g.RouteRevision)
 				at := time.Now()
 				g.ChangedAt = &at
 				e.journal.Targets[e.targetIndex(id)] = g
