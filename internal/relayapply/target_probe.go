@@ -132,9 +132,11 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 	// One full sweep precedes the bounded wave. There is no journal/lease
 	// renewal concurrently with candidate checks. At most eight socket proofs
 	// overlap; pre/post checks and fail-closed mutations remain serialized.
+	relayobserve.Mark(ctx, "observation_maintenance_started")
 	if e.hasLeases() {
 		_, _ = e.MaintainLeases(ctx)
 	}
+	relayobserve.Mark(ctx, "observation_maintenance_complete")
 	type work struct {
 		index int
 		entry Entry
@@ -175,6 +177,7 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 		// lease/guard/timer data is shared or cached.
 		wave = context.WithValue(wave, observationCheckerKey{}, observationChecker(k.kernel.Check))
 	}
+	relayobserve.Mark(ctx, "observation_wave_started")
 	gates := newObservationGates(len(jobs))
 	var workers sync.WaitGroup
 	for i, job := range jobs {
@@ -186,6 +189,7 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 		}()
 	}
 	workers.Wait() // No probe may outlive the cache/namespace ownership.
+	relayobserve.Mark(ctx, "observation_wave_complete")
 	// A candidate's deadline callback can finish its worker before the shared
 	// context publishes Err. Report exhaustion from the deadline itself too.
 	deadline, _ := wave.Deadline() // WithTimeout above always supplies one.

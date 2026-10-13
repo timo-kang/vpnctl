@@ -123,6 +123,33 @@ cancellation/failure; a phase not reached is absent. Successful boundaries add
 `admission_queue_ready`, `admission_cache_ready`, and `admission_kernel_ready`
 monotonic checkpoints. They do not establish that an approval or path is usable.
 
+CLI observation, reconcile and supervision reports snapshot their top-level
+`diagnostics` after closing the namespace engine and cache/FIFO owner.
+`ownership_release_started` precedes both closes; `ownership_release_finished`
+follows them. Thus `admission_kernel_ready` to release-start is a confirmed
+ownership interval, while the exact unlock instants lie within the release
+bracket. The release bracket must not be counted as fully held or fully free.
+Missing release marks do not prove ownership: failed admission never emits them.
+Engine-level and nested observation diagnostics still end at their own return;
+operation `started_at`/`finished_at` and proof timestamps retain their meanings.
+None of these timestamps records when a report is written or received.
+
+`observation_maintenance_started`/`observation_maintenance_complete` bracket the
+lease-maintenance section, including the no-lease skip. `observation_wave_started`
+precedes candidate worker launch; `observation_wave_complete` follows joining all
+workers, including cancellation. Their difference includes serialized checks,
+parallel socket proofs and scheduling, not socket-wait time alone. Supervision
+similarly marks `supervision_maintenance_started`,
+`supervision_maintenance_complete`, and `supervision_rebuild_complete`; the first
+follows the optional refresh. A completion boundary says the section returned,
+not that it succeeded or renewed authority. All names are fixed, with no per-path
+events, and remain subject to the existing bounded checkpoint limit.
+
+Compare ordered boundaries only when `monotonic_available` is true and
+`checkpoints_dropped` is false, within the same guest boot and ownership scope.
+Partition with differences of the explicit monotonic boundary fields; the
+separately sampled `monotonic_elapsed_ns` need not match their difference exactly.
+
 `precheck_wait` and `postcheck_wait` measure gate admission inside their existing
 inclusive `precheck` and `postcheck` phases. Command counts remain on the parent
 check phase, and an ungated check has no wait phase. Subtract the corresponding
