@@ -113,6 +113,23 @@ command counts. Phase and command durations are sums; concurrent phases can
 exceed the operation elapsed time; nested phases overlap too. They contain no command arguments, output or
 credentials, and provide no authorization. BPF syscalls are not external commands.
 
+`admission` remains the inclusive time to open both owners. Its nested phases
+separate `admission_queue` (private queue setup and FIFO waiting),
+`admission_cache` (opening/validating the cache, including retries against a
+nonparticipating cache owner), and `admission_kernel` (opening/validating the
+namespace engine, including contention retries). These are elapsed costs, not
+CPU usage or pure lock-sleep time. Each attempted phase is recorded even on
+cancellation/failure; a phase not reached is absent. Successful boundaries add
+`admission_queue_ready`, `admission_cache_ready`, and `admission_kernel_ready`
+monotonic checkpoints. They do not establish that an approval or path is usable.
+
+`precheck_wait` and `postcheck_wait` measure gate admission inside their existing
+inclusive `precheck` and `postcheck` phases. Command counts remain on the parent
+check phase, and an ungated check has no wait phase. Subtract the corresponding
+wait duration to estimate non-wait check work; do not add parent and nested
+durations or treat sums of concurrent candidates as cycle wall time. None of
+these boundaries is a report publication, application receipt or recovery SLO.
+
 The original 2 CPU race capacity failure and 4 CPU interim validation remain in
 [issue #162](https://github.com/timo-kang/vpnctl/issues/162). Reproduction, mixed
 healthy/slow paths, CPU profiles and remaining qualification limits are described
