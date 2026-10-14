@@ -1,9 +1,9 @@
 # 관측 결과의 연속 신선도 증거 (#217)
 
-기존 관측 나이·proof 간격 검사(v1)는 두 읽기 사이에 만료되고 회복된 공백을
+관측 나이·proof 간격 표본 검사는 두 읽기 사이에 만료되고 회복된 공백을
 놓칠 수 있다. 관측 T, 다음 관측 T+9초, 다음 완료 T+10.3초, 다음 읽기
 T+10.5초이면 기존 검사는 통과하지만 최소 300ms 동안 새 완료 결과가 없었다.
-v2는 이 공백을 별도 검사한다. 과거 PASS/FAIL과 10초 freshness, 3초 wave,
+publication v2는 이 공백을 별도 검사한다. 과거 PASS/FAIL과 10초 freshness, 3초 wave,
 승인·철회·nft/BOOTTIME·실제 payload 기준은 바꾸지 않는다.
 
 ## 시간의 의미와 판정
@@ -71,11 +71,41 @@ baseline count/행, 정제된 모든 수신 행, 부분 bytes, 전체 bytes/writ
 해석을 포함한 wall 시간이며 pipe·파일 쓰기 등 전체 추가 비용은 아니다.
 주소·키·raw ID·proof·임의 diagnostics는 새 증거에 저장하지 않는다.
 
-`sampled_qualification_status`는 기존 qualification의 pass/fail/incomplete를
-따로 남긴다. 기존 구간이 통과해도 v2가 fail/inconclusive이면 통합 시험은
+`sampled_qualification_status`는 표본 qualification의 pass/fail/incomplete를
+따로 남긴다. 표본 구간이 통과해도 publication v2가 fail/inconclusive이면 통합 시험은
 실패한다. 기존 실패가 있으면 `continuity_failure` 입력 스냅샷도 그대로 남는다.
 최종 `completed`는 전체 통합 판정이다. v2 성공도 실제 배포 용량이나 M3 전체
 완료를 뜻하지 않는다.
+
+## 표본 검사 입력과 시각의 일치
+
+`sampled_contract_version=2`는 완결 행 수신기의 같은 잠금 안에서 기록과
+평가 시각을 고정한다. 기존 수신기가 있는 용량 시험에 적용한다.
+과거 파일 읽기 방식은 T+9.8초에 이전 행만 읽고, T+9.9초에 새 행을
+받은 뒤, T+10.1초에 이전 행을 평가하여 정상 갱신을 실패로 표시할 수 있었다.
+수신기 입력을 직접 평가하면 이 파일 읽기와 평가 시각의 불일치를 제거한다.
+baseline을 얻기 전 두 앱의 Applied 행 수신도 확인한다. 따라서
+`first_payload_seconds`는 TCP payload 확인과 이 수신 준비 조건을 함께 만족한
+표본의 경과 시간이며, 순수 최초 TCP 응답 시간이나 이전 계약과 동일한 지연
+측정값으로 비교하지 않는다.
+
+표본용 입력에는 모든 후보의 경로 식별자·상태·자격·관측 시각과 검사에 필요한
+applied/정책/완료 시각만 메모리에 보관한다. 전체 로그를 매 표본마다 재해석하지
+않는다. 수신기의 기존 행/byte 상한을 공유하고 오류 후 정상으로 복구하지 않는다.
+입력은 보고서에 직렬화하지 않으며 실패 증거는 기존 allowlist를 사용한다.
+새 `continuity_failure.schema_version=2`의 `checked_at`은 이 잠금 안에서 고정한
+시각이다. 파일 읽기를 하지 않으므로 `read` 필드는 없다. 이전 schema 1의
+파일 읽기 시간과 실패는 원래 의미로 보존하며 과거 판정을 재작성하지 않는다.
+
+10초 ±1ns 경계, baseline부터 모든 후보의 과거 간격, 정책·applied 검사,
+최초 실패 보존은 유지한다. 부분 행은 완결된 관측으로 사용하지 않는다.
+표본 사이 공백은 여전히 publication v2가 별도 검사한다. 이 변경으로 기존
+completion gap이나 실제 갱신 지연이 해소됐다고 판단하지 않는다.
+
+별도 `preparation-recovery` 시험은 파일 기반 표본 검사를 유지한다. 이 시험은
+7개 복구 단계에 각 120초를 허용하므로 짧은 용량 창의 수신기 상한을 그대로
+적용할 수 없다. 해당 시험의 전환에는 단계별 보관 범위와 수신 기반 baseline을
+함께 검증해야 한다. 파일 방식의 경계 결함을 모든 시험에서 해결한 것은 아니다.
 
 ## 검증
 
