@@ -453,7 +453,7 @@ jobs:
           fi
       - name: Reject incomplete and incorrectly scoped resource evidence
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p test_runner.py
-      - name: Two robot actuators and supervisor with an independent CPU budget
+      - name: Shared-CPU race stress with a separate robot CPU quota
         env:
           VPNCTL_VM_RACE: '1'
           VPNCTL_VM_CPUS: '1'
