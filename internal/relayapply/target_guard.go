@@ -25,7 +25,7 @@ import (
 // reopen a previously blocked target through the machine's default route.
 type TargetGuard struct {
 	// RouteRevision counts journaled route transitions, not catalog changes.
-	// Saturation withdraws status confidence but never prevents quarantine.
+	// Saturation prevents new decisions but never prevents safety quarantine.
 	RouteRevision      uint64       `json:"route_revision,omitempty"`
 	AllocationSlot     uint32       `json:"allocation_slot,omitempty"`     // zero preserves legacy reservations
 	ApplicationVersion int          `json:"application_version,omitempty"` // persists while quarantined
