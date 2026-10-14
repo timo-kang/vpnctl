@@ -12,6 +12,8 @@ import (
 	"os"
 	"syscall"
 	"time"
+
+	"vpnctl/internal/relayobserve"
 )
 
 const admissionSlots = 32
@@ -242,10 +244,15 @@ func OpenQueued(ctx context.Context, dir string, opts Options) (*Store, error) {
 	if _, bounded := ctx.Deadline(); !bounded {
 		return nil, errors.New("bounded node admission context required")
 	}
-	a, err := waitAdmission(ctx, dir)
+	queue, queueDone := relayobserve.Phase(ctx, "admission_queue")
+	a, err := waitAdmission(queue, dir)
+	queueDone()
 	if err != nil {
 		return nil, err
 	}
+	relayobserve.Mark(ctx, "admission_queue_ready")
+	ctx, cacheDone := relayobserve.Phase(ctx, "admission_cache")
+	defer cacheDone()
 	for {
 		if err = ctx.Err(); err != nil {
 			break
@@ -262,6 +269,7 @@ func OpenQueued(ctx context.Context, dir string, opts Options) (*Store, error) {
 			}
 			if err == nil {
 				s.admission = a
+				relayobserve.Mark(ctx, "admission_cache_ready")
 				return s, nil
 			}
 			s.Close()
