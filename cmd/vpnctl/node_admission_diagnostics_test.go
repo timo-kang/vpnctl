@@ -29,40 +29,107 @@ func TestNodeAdmissionDiagnosticsReachFailedReports(t *testing.T) {
 	defer holder.Close()
 	node := &config.NodeConfig{Name: "robot"}
 	for _, entry := range []string{"observation", "reconcile", "supervisor"} {
-		t.Run(entry, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
-			defer cancel()
-			var d *relayobserve.Diagnostics
-			switch entry {
-			case "observation":
-				out := collectTargetObservation(ctx, node, dir, "app", "", time.Second)
-				if out.Valid || len(out.Paths) != 0 || out.Reason != "cache_unavailable" {
-					t.Fatal("failed admission supplied an observation")
-				}
-				d = out.Diagnostics
-			case "reconcile":
-				out, err := reconcileApplicationTarget(ctx, node, dir, "app", "", time.Second, nil)
-				if !errors.Is(err, context.DeadlineExceeded) || out.Applied || out.Selection.Reason != "ownership_unavailable" || out.Application.State != "blocked" {
-					t.Fatal("failed admission changed route status", err)
-				}
-				d = out.Diagnostics
-			case "supervisor":
-				out, err := nodeSupervisionCycle(ctx, node, dir, nil, true)
-				if !errors.Is(err, context.DeadlineExceeded) || out.Kernel != nil || out.Refresh != "not_due" || out.State != "blocked" {
-					t.Fatal("failed admission started supervised work", err)
-				}
-				d = out.Diagnostics
+		for _, canceled := range []bool{false, true} {
+			name := "deadline"
+			if canceled {
+				name = "precanceled"
 			}
-			if d == nil || d.Phases["admission"].Calls != 1 || d.Phases["admission_queue"].Calls != 1 || d.Phases["admission_cache"].Calls != 1 || d.Phases["admission_cache"].Duration < 70*time.Millisecond || d.Phases["admission_kernel"].Calls != 0 {
-				t.Fatalf("missing/incorrect admission attribution: %+v", d)
-			}
-			for _, mark := range d.Checkpoints {
-				if mark.Name == "ownership_release_started" || mark.Name == "ownership_release_finished" {
-					t.Fatal("failed admission claimed ownership release")
+			t.Run(entry+"/"+name, func(t *testing.T) {
+				// Cancel the parent first so scheduler delays cannot let the
+				// child's deadline win over the precanceled case.
+				parent, cancelParent := context.WithCancel(context.Background())
+				defer cancelParent()
+				wantErr := context.DeadlineExceeded
+				if canceled {
+					cancelParent()
+					wantErr = context.Canceled
 				}
-			}
-		})
+				ctx, cancel := context.WithTimeout(parent, 75*time.Millisecond)
+				defer cancel()
+				var d *relayobserve.Diagnostics
+				switch entry {
+				case "observation":
+					out := collectTargetObservation(ctx, node, dir, "app", "", time.Second)
+					if out.Valid || len(out.Paths) != 0 || out.Reason != "cache_unavailable" {
+						t.Fatal("failed admission supplied an observation")
+					}
+					d = out.Diagnostics
+				case "reconcile":
+					out, err := reconcileApplicationTarget(ctx, node, dir, "app", "", time.Second, nil)
+					if !errors.Is(err, wantErr) || out.Applied || out.Selection.Reason != "ownership_unavailable" || out.Application.State != "blocked" {
+						t.Fatal("failed admission changed route status", err)
+					}
+					d = out.Diagnostics
+				case "supervisor":
+					out, err := nodeSupervisionCycle(ctx, node, dir, nil, true)
+					if !errors.Is(err, wantErr) || out.Kernel != nil || out.Refresh != "not_due" || out.State != "blocked" {
+						t.Fatal("failed admission started supervised work", err)
+					}
+					d = out.Diagnostics
+				}
+				assertFailedAdmissionDiagnostics(t, d, canceled)
+			})
+		}
 	}
+}
+
+// A deadline may expire in the FIFO scan or while waiting for the cache. The
+// report must attribute only the stages actually reached, even on a slow runner.
+func assertFailedAdmissionDiagnostics(t *testing.T, d *relayobserve.Diagnostics, canceled bool) {
+	t.Helper()
+	if d == nil || !d.MonotonicAvailable || d.CheckpointsDropped {
+		t.Fatal("missing complete monotonic admission diagnostics")
+	}
+	cacheReached := len(d.Checkpoints) == 1
+	if len(d.Checkpoints) > 1 || canceled && cacheReached {
+		t.Fatal("failed admission claimed later readiness", d.Checkpoints)
+	}
+	for _, mark := range d.Checkpoints {
+		if mark.Name != "admission_queue_ready" || mark.At < d.StartedMono || mark.At > d.FinishedMono {
+			t.Fatal("incorrect failed admission boundary", mark)
+		}
+	}
+	want := map[string]bool{"admission": true, "admission_queue": true}
+	if cacheReached {
+		want["admission_cache"] = true
+	}
+	if len(d.Phases) != len(want) {
+		t.Fatal("unexpected admission work", d.Phases)
+	}
+	for name := range want {
+		phase := d.Phases[name]
+		if phase.Calls != 1 || phase.Duration <= 0 || phase.KernelCommands != 0 || phase.InventoryCommands != 0 || phase.CommandDuration != 0 {
+			t.Fatalf("missing/incorrect %s attribution: %+v", name, d)
+		}
+	}
+	if d.Phases["admission_queue"].Duration+d.Phases["admission_cache"].Duration > d.Phases["admission"].Duration || d.Phases["admission"].Duration > d.Elapsed {
+		t.Fatal("sequential admission phases exceed enclosing duration", d.Phases)
+	}
+}
+
+// The timeout remains a watchdog; cancellation follows the observed predecessor
+// boundary so scheduling delays cannot move this test into an earlier phase.
+func cancelNodeAdmissionAtCheckpoint(ctx context.Context, cancel context.CancelFunc, recorder *relayobserve.Recorder, name string) func() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			for _, mark := range recorder.Snapshot().Checkpoints {
+				if mark.Name == name {
+					cancel()
+					return
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
 }
 
 // Opening an empty/corrupt journal only holds an advisory Unix socket and reads
@@ -102,13 +169,12 @@ func TestNodeAdmissionKernelDiagnostics(t *testing.T) {
 				defer c.Close()
 				defer e.Close()
 			}
-			limit := time.Second
-			if mode == "busy" {
-				limit = 75 * time.Millisecond
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), limit)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			ctx, recorder := relayobserve.Start(ctx)
+			if mode == "busy" {
+				defer cancelNodeAdmissionAtCheckpoint(ctx, cancel, recorder, "admission_cache_ready")()
+			}
 			c, e, err := openNodeRelayEngine(ctx, node, dir)
 			if c != nil {
 				defer c.Close()
@@ -120,15 +186,12 @@ func TestNodeAdmissionKernelDiagnostics(t *testing.T) {
 				if err != nil || c == nil || e == nil {
 					t.Fatal("empty engine did not open", err)
 				}
-			} else if err == nil || c != nil || e != nil || mode == "busy" && !errors.Is(err, context.DeadlineExceeded) {
+			} else if err == nil || c != nil || e != nil || mode == "busy" && !errors.Is(err, context.Canceled) {
 				t.Fatal("failed engine opening retained ownership", err)
 			}
 			d := recorder.Snapshot()
 			if d.Phases["admission_kernel"].Calls != 1 || d.Phases["admission_kernel"].Duration <= 0 {
 				t.Fatal("kernel opening cost missing", d.Phases)
-			}
-			if mode == "busy" && d.Phases["admission_kernel"].Duration < 70*time.Millisecond {
-				t.Fatal("namespace wait attributed elsewhere", d.Phases)
 			}
 			want := []string{"admission_queue_ready", "admission_cache_ready"}
 			if mode == "ready" {

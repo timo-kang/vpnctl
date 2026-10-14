@@ -35,15 +35,22 @@ func TestAdmissionDiagnosticsSeparateQueueAndCacheContention(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer holder.Close()
-			short, stop := context.WithTimeout(ctx, 75*time.Millisecond)
+			limit, wantErr := 75*time.Millisecond, context.DeadlineExceeded
+			if !queued {
+				limit, wantErr = 3*time.Second, context.Canceled
+			}
+			short, stop := context.WithTimeout(ctx, limit)
 			defer stop()
 			measured, recorder := relayobserve.Start(short)
-			if s, err := OpenQueued(measured, dir, Options{NodeID: "robot"}); s != nil || !errors.Is(err, context.DeadlineExceeded) {
+			if !queued {
+				defer cancelCacheAdmissionAtCheckpoint(measured, stop, recorder, "admission_queue_ready")()
+			}
+			if s, err := OpenQueued(measured, dir, Options{NodeID: "robot"}); s != nil || !errors.Is(err, wantErr) {
 				t.Fatalf("contention escaped: store=%v error=%v", s != nil, err)
 			}
 			d := recorder.Snapshot()
 			wait := d.Phases["admission_"+name]
-			if wait.Calls != 1 || wait.Duration < 70*time.Millisecond {
+			if wait.Calls != 1 || wait.Duration <= 0 {
 				t.Fatalf("missing bounded %s wait: %+v", name, d.Phases)
 			}
 			if queued && d.Phases["admission_cache"].Calls != 0 {
@@ -82,4 +89,29 @@ func TestAdmissionDiagnosticsSeparateQueueAndCacheContention(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Cancel only after the queue is acquired; the parent deadline is a watchdog,
+// not an assumption about how fast the FIFO scan runs on a shared CI runner.
+func cancelCacheAdmissionAtCheckpoint(ctx context.Context, cancel context.CancelFunc, recorder *relayobserve.Recorder, name string) func() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			for _, mark := range recorder.Snapshot().Checkpoints {
+				if mark.Name == name {
+					cancel()
+					return
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
 }
