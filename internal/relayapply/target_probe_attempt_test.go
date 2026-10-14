@@ -101,7 +101,7 @@ func TestProbeAttemptCannotEscapeOwnershipLifetime(t *testing.T) {
 	}
 }
 
-func TestProbeAttemptOriginalDeadlineCannotBeReplaced(t *testing.T) {
+func TestProbeAttemptOriginalCancellationCannotBeReplaced(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	e, k, _, a := probeAttemptFixture(t, ctx)

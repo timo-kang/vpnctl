@@ -58,6 +58,10 @@ Engine's cache/save closures. There is no ownership-yield switch in this change.
 Tests model journal removal, recreation, pending state, generation, node/domain
 changes, nested input mutation, target-definition mismatch, closed/reopened
 Engine lifetimes, duplicate/early consumption and cancellation during postcheck.
+A virtual-clock regression also lets the original deadline expire during a
+blocked postcheck. An unbounded or later replacement context cannot extend the
+deadline delivered to the checker; an earlier replacement remains binding.
+Expiration yields no health or lease mutation and consumes the proof permanently.
 A current lease failure must still invoke its existing fail-closed enforcement;
 a stale identity must not invoke it. Existing wave ordering, overlap, connect
 limits and cancellation tests remain applicable.
