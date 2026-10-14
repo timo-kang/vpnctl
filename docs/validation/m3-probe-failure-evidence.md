@@ -45,6 +45,9 @@ future enum values as unknown diagnostics. The field is additive to schema v1.
 If a later kernel, inventory, approval, lease, or underlay check rejects the
 observation, its original `state`/`reason` takes precedence. Any probe failure
 already captured remains diagnostic context, not a replacement decision.
+The one-use probe attempt owns a copy of that diagnostic. A postcheck gate
+cancellation can discard the observation while retaining its failure context;
+starting a new attempt clears any diagnostic from an earlier observation.
 
 To investigate a `guarded` result, correlate the candidate within the same
 reconcile record and inspect `probe_failure`, `confirmation_gap_ns`, and the

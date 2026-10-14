@@ -173,7 +173,7 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 		// observePreparedGated checks the live lease at both boundaries itself.
 		// Avoid the duplicate middle LeaseStatus inside nodeKernel.Check; no
 		// lease/guard/timer data is shared or cached.
-		wave = context.WithValue(wave, observationCheckerKey{}, observationChecker(k.kernel.Check))
+		wave = context.WithValue(wave, observationCheckerKey{}, ownedObservationChecker{e, k.kernel.Check})
 	}
 	gates := newObservationGates(len(jobs))
 	var workers sync.WaitGroup
@@ -231,121 +231,33 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 	return e.observePreparedGated(ctx, entry, target, timeout, out, probe, nil)
 }
 
-// Only the socket proof may overlap. Approval/cache, inventory, kernel checks
-// and any fail-closed lease mutation use the shared, context-bounded gate.
+// Only the socket proof may overlap. Each stage runs under the existing
+// ownership/gate. The private attempt is not permission to release that ownership.
 func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), gate *observationGate) TargetObservation {
+	out.ProbeFailure = nil
 	if entry.LeaseVersion != 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, targetObservationWaveDuration)
 		defer cancel()
 	}
-	check := e.backend.Check
-	if k, ok := e.backend.(nodeKernel); ok {
-		// This function checks the live lease at both proof boundaries itself,
-		// including single-candidate revalidation outside a shared wave.
-		check = k.kernel.Check
+	pre, done, err := observationStage(ctx, "precheck", gate)
+	if err != nil {
+		done()
+		return unknownProbe(out, "observation_deadline")
 	}
-	if shared, ok := ctx.Value(observationCheckerKey{}).(observationChecker); ok {
-		check = shared
+	attempt, failed := e.prepareTargetProbe(pre, entry, target, timeout, out)
+	done()
+	if attempt == nil {
+		return failed
 	}
-	out.ObservedAt = time.Time{}
-	out.ProbeFailure = nil
-	finish := func(state, reason string) TargetObservation {
-		out.State, out.Reason = state, reason
-		if out.ObservedAt.IsZero() {
-			out.ObservedAt = time.Now()
-		}
-		return out
+	attempt.run(probe)
+	post, done, err := observationStage(ctx, "postcheck", gate)
+	defer done()
+	if err != nil {
+		// Consume failure too: a later call cannot turn an expired attempt healthy.
+		return attempt.discard("observation_deadline")
 	}
-	ctx, finishStage, stageErr := observationStage(ctx, "precheck", gate)
-	defer func() { finishStage() }()
-	if stageErr != nil {
-		return finish("unknown", "observation_deadline")
-	}
-	generation, eventErr := relayobserve.UnderlayGeneration(ctx, entry.Candidate.UnderlayID)
-	if eventErr != nil {
-		return finish("unknown", "underlay_events_unavailable")
-	}
-	out.UnderlayGeneration = generation
-	if !entry.ProbeRouting {
-		return finish("unknown", "probe_routing_not_prepared")
-	}
-	if entry.Phase != "prepared" {
-		return finish("unknown", "pending_journal")
-	}
-	if e.stillApproved(entry) != nil {
-		return finish("unknown", "approval_expired_or_changed")
-	}
-	if _, err := e.checkLease(ctx, entry); err != nil {
-		return finish("unknown", "lease_inactive")
-	}
-	// Bind evidence to the installed resource generation, not a reusable path ID.
-	out.Fingerprint = entryFingerprint(entry)
-	ready, err := check(ctx, entry, false)
-	if err != nil || !ready {
-		return finish("unknown", "kernel_conflict_or_unavailable")
-	}
-	if err = inventoryMatches(ctx, entry, e.underlays, e.collector); err != nil {
-		return finish("unknown", "inventory_changed")
-	}
-	finishStage()
-	finishStage = func() {}
-	probeCtx, endProbe := relayobserve.Phase(ctx, "probe")
-	probeCtx, cancel := context.WithTimeout(probeCtx, timeout)
-	proof, probeErr := probe(probeCtx, entry, target)
-	out.ObservedAt = time.Now()
-	var evidenceFailure *targetProbeError
-	if errors.As(probeErr, &evidenceFailure) {
-		failure := evidenceFailure.failure
-		out.ProbeFailure = &failure
-	}
-	cancel()
-	endProbe()
-	if _, shared := ctx.Value(observationCheckerKey{}).(observationChecker); shared {
-		floor, err := leaseBootTime()
-		if err != nil {
-			return finish("unknown", "observation_clock_unavailable")
-		}
-		ctx = context.WithValue(ctx, observationFloorKey{}, floor)
-	}
-	ctx, finishStage, stageErr = observationStage(ctx, "postcheck", gate)
-	if stageErr != nil {
-		return finish("unknown", "observation_deadline")
-	}
-	// A successful TCP connect cannot override a concurrent ownership or
-	// inventory change. Even a network failure is attributable only after checks.
-	ready, err = check(ctx, entry, false)
-	if err != nil || !ready {
-		return finish("unknown", "kernel_changed_during_probe")
-	}
-	if inventoryMatches(ctx, entry, e.underlays, e.collector) != nil {
-		return finish("unknown", "inventory_changed")
-	}
-	if e.stillApproved(entry) != nil {
-		return finish("unknown", "approval_expired_or_changed")
-	}
-	if ctx.Err() != nil {
-		return finish("unknown", "observation_deadline")
-	}
-	if _, err := e.checkLease(ctx, entry); err != nil {
-		return finish("unknown", "lease_expired_during_probe")
-	}
-	current, eventErr := relayobserve.UnderlayGeneration(ctx, entry.Candidate.UnderlayID)
-	if eventErr != nil {
-		return finish("unknown", "underlay_events_unavailable")
-	}
-	if current != generation {
-		return finish("unknown", "underlay_changed_during_probe")
-	}
-	if probeErr != nil {
-		var failure *targetConnectError
-		if errors.As(probeErr, &failure) {
-			return finish("unreachable", failure.reason)
-		}
-		return finish("unknown", "probe_evidence_unavailable")
-	}
-	out.ConnectTime, out.Handshake, out.RXDelta, out.TXDelta = proof.duration, proof.handshake, proof.rx, proof.tx
-	return finish("reachable", "tcp_connect_verified")
+	return e.finishTargetProbe(post, attempt)
 }
 
 type targetConnectError struct{ reason string }
