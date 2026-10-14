@@ -57,7 +57,7 @@ func (e *Engine) candidateProbe() func(context.Context, Entry, relaycatalog.Targ
 	if e.probe != nil {
 		return e.probe
 	}
-	return kernel{run: command}.probeTarget
+	return kernel{run: command, targetLookup: liveTargetRoute}.probeTarget
 }
 
 func (e *Engine) observeTarget(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) (out TargetReport, err error) {
@@ -472,6 +472,9 @@ func classifyTargetConnect(err error) error {
 // In particular, reject a local target or an unexpected gateway. A local TCP
 // service plus unrelated WG traffic must not be attributed to this relay.
 func (k kernel) targetRoute(ctx context.Context, entry Entry, target relaycatalog.Target) error {
+	if k.targetLookup != nil {
+		return k.targetLookup(ctx, entry, target)
+	}
 	source := strings.TrimSuffix(entry.Candidate.InnerAddress, "/32")
 	rows, err := k.list(ctx, "-j", "-N", "-4", "route", "get", target.ProbeAddress, "from", source, "oif", entry.Candidate.Pin.WGInterface)
 	if err != nil {
