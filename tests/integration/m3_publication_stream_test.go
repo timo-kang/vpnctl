@@ -31,7 +31,9 @@ type publicationStream struct {
 	// Private inputs for the sampled gate, bounded by the same stream limits.
 	// Preserve every candidate for historical gap checks, but no proofs or
 	// diagnostics. These rows are never serialized into publication evidence.
-	rows []relayapply.TargetReconcileResult
+	rows            []relayapply.TargetReconcileResult
+	lastRecordBytes int
+	sampledWindow   int
 }
 
 func newPublicationStream() *publicationStream { return &publicationStream{now: time.Now} }
@@ -81,6 +83,7 @@ func (s *publicationStream) Write(p []byte) (int, error) {
 			StartedAt: r.StartedAt, ReceivedAt: at, SelectedMatches: matches,
 		})
 		s.rows = append(s.rows, sampledContinuityInput(r))
+		s.lastRecordBytes = len(s.pending) + 1 // Include the terminating newline.
 		s.pending = s.pending[:0]
 		p = p[i+1:]
 	}
@@ -107,6 +110,10 @@ func sampledContinuityInput(r relayapply.TargetReconcileResult) relayapply.Targe
 func (s *publicationStream) checkContinuity(baseline int, role string, report map[string]any) (int, time.Duration, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.checkContinuityLocked(baseline, role, report)
+}
+
+func (s *publicationStream) checkContinuityLocked(baseline int, role string, report map[string]any) (int, time.Duration, error) {
 	at := s.now()
 	cycles, gap, err := evaluateApplicationContinuity(s.rows, baseline, at)
 	if s.input.Problem != "" && err == nil {
