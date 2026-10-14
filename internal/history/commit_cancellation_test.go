@@ -13,6 +13,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Delay the real SQLite driver, not Storage.Ingest or a fake successful write.
@@ -148,8 +151,15 @@ func TestCanceledIngestNeedsCommitDrainBeforePersistenceBaseline(t *testing.T) {
 				if err != nil {
 					t.Fatal("entered SQLite commit failed", err)
 				}
-			} else if !errors.Is(err, context.Canceled) {
-				t.Fatal("pre-transaction cancellation", err)
+			} else {
+				// Cancellation can interrupt the driver's BEGIN itself. SQLite
+				// returns SQLITE_INTERRUPT without wrapping context.Canceled;
+				// both reject the write, which the drained/reopened counts below
+				// must prove. Do not accept unrelated database failures.
+				var interrupted *sqlite.Error
+				if !errors.Is(err, context.Canceled) && !(errors.As(err, &interrupted) && interrupted.Code() == sqlite3.SQLITE_INTERRUPT) {
+					t.Fatal("pre-transaction cancellation", err)
+				}
 			}
 			if attempts, successes := count(s); attempts != want || successes != 3 {
 				t.Fatal("drained baseline", attempts, successes)
