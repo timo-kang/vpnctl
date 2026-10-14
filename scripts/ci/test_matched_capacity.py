@@ -105,5 +105,86 @@ class MatchedScheduleTests(unittest.TestCase):
                 shutil.rmtree(work)
 
 
+class DisposableKVMTests(unittest.TestCase):
+    environment = {'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted', 'GITHUB_RUN_ATTEMPT':'1'}
+    allowed = {'character_device':True, 'device':1, 'inode':2, 'rdev':3, 'readable':True, 'writable':True}
+
+    def test_local_or_rerun_cannot_mutate_permissions(self):
+        for env in ({}, dict(self.environment, RUNNER_ENVIRONMENT='self-hosted'), dict(self.environment, GITHUB_RUN_ATTEMPT='2')):
+            with self.subTest(env=env), tempfile.TemporaryDirectory() as tmp:
+                with patch.dict(matched.os.environ, env, clear=True), patch.object(matched, 'kvm_snapshot') as snapshot, patch.object(matched.subprocess, 'run') as run:
+                    with self.assertRaisesRegex(RuntimeError, 'fresh_disposable'):
+                        matched.prepare_kvm(Path(tmp))
+                    snapshot.assert_not_called();run.assert_not_called()
+
+    def test_existing_access_needs_no_privileged_command(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(matched.os.environ,self.environment,clear=True), patch.object(matched,'kvm_snapshot',return_value=self.allowed), patch.object(matched.subprocess,'run') as run:
+            matched.prepare_kvm(Path(tmp));run.assert_not_called()
+            self.assertFalse(json.loads((Path(tmp)/'kvm-access.json').read_text())['refreshed'])
+
+    def test_failed_permission_grant_stays_an_error(self):
+        denied=dict(self.allowed,writable=False)
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(matched.os.environ,self.environment,clear=True), patch.object(matched,'kvm_snapshot',return_value=denied), patch.object(matched.subprocess,'run') as run:
+            with self.assertRaisesRegex(RuntimeError,'KVM_access_not_established'):
+                matched.prepare_kvm(Path(tmp))
+            run.assert_called_once()
+            self.assertFalse(json.loads((Path(tmp)/'kvm-access.json').read_text())['prepared']['writable'])
+
+    def test_permission_loss_between_invocations_is_prepared_without_test_retry(self):
+        denied=dict(self.allowed,readable=False,writable=False)
+        snapshots=[self.allowed,self.allowed,denied,denied,self.allowed,self.allowed]
+        from subprocess import CompletedProcess
+        commands=[]
+        def invoke(args,**kwargs):
+            commands.append(args)
+            return CompletedProcess(args,1 if args[0]=='bash' and sum(c[0]=='bash' for c in commands)==1 else 0)
+        previous_mask=matched.os.umask(0o077)
+        try:
+            with tempfile.TemporaryDirectory() as tmp, patch.dict(matched.os.environ,self.environment,clear=True), patch.object(matched,'kvm_snapshot',side_effect=snapshots), patch.object(matched,'work_directories',return_value={}), patch.object(matched,'retain_binaries'), patch.object(matched.subprocess,'run',side_effect=invoke):
+                root=Path(tmp);first=root/'first';second=root/'second';first.mkdir();second.mkdir()
+                self.assertEqual(matched.invoke_vm(root,{'cases':[4,8]},first,root,'image'),1)
+                self.assertEqual(matched.invoke_vm(root,{'cases':[4,8]},second,root,'image'),0)
+                self.assertEqual(json.loads((first/'process-exit.json').read_text())['exit_code'],1)
+                self.assertFalse(json.loads((first/'kvm-after.json').read_text())['writable'])
+                self.assertTrue(json.loads((second/'kvm-access.json').read_text())['refreshed'])
+                self.assertEqual(sum(c[0]=='bash' for c in commands),2)
+                privileged=[c for c in commands if c[0]=='sudo']
+                self.assertEqual(privileged,[['sudo','-n','setfacl','-m',f'u:{matched.os.getuid()}:rw','/dev/kvm']])
+        finally:matched.os.umask(previous_mask)
+
+    def test_retention_failure_preserves_original_exit_and_post_access(self):
+        from subprocess import CompletedProcess
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(matched.os.environ,self.environment,clear=True), patch.object(matched,'kvm_snapshot',return_value=self.allowed), patch.object(matched,'work_directories',return_value={}), patch.object(matched,'retain_binaries',side_effect=ValueError('retention-test')), patch.object(matched.subprocess,'run',return_value=CompletedProcess([],1)) as run:
+            root=Path(tmp)
+            with self.assertRaisesRegex(RuntimeError,'post_invocation_evidence_incomplete'):
+                matched.invoke_vm(root,{'cases':[4,8]},root,root,'image')
+            run.assert_called_once()
+            self.assertEqual(json.loads((root/'process-exit.json').read_text())['exit_code'],1)
+            self.assertEqual(json.loads((root/'kvm-after.json').read_text()),self.allowed)
+            self.assertEqual(json.loads((root/'post-invocation-errors.json').read_text())['errors'],[{'stage':'retention','exception':'ValueError'}])
+
+    def test_post_snapshot_failure_does_not_skip_binary_retention(self):
+        from subprocess import CompletedProcess
+        snapshots=[self.allowed,self.allowed,RuntimeError('snapshot-test')]
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(matched.os.environ,self.environment,clear=True), patch.object(matched,'kvm_snapshot',side_effect=snapshots), patch.object(matched,'work_directories',return_value={}), patch.object(matched,'retain_binaries') as retain, patch.object(matched.subprocess,'run',return_value=CompletedProcess([],0)) as run:
+            root=Path(tmp)
+            with self.assertRaisesRegex(RuntimeError,'post_invocation_evidence_incomplete'):
+                matched.invoke_vm(root,{'cases':[4,8]},root,root,'image')
+            run.assert_called_once();retain.assert_called_once()
+            self.assertEqual(json.loads((root/'process-exit.json').read_text())['exit_code'],0)
+            self.assertEqual(json.loads((root/'post-invocation-errors.json').read_text())['errors'],[{'stage':'kvm_snapshot','exception':'RuntimeError'}])
+
+    def test_snapshot_bracket_contains_access_checks(self):
+        from types import SimpleNamespace
+        info=SimpleNamespace(st_mode=matched.stat.S_IFCHR|0o660,st_dev=1,st_ino=2,st_rdev=3,st_uid=4,st_gid=5)
+        calls=[]
+        def clock():calls.append('clock');return len(calls)
+        def access(*_):calls.append('access');return True
+        with patch.object(matched.Path,'stat',return_value=info), patch.object(matched,'read_command',return_value='fixed-acl'), patch.object(matched.os,'access',side_effect=access), patch.object(matched.time,'monotonic_ns',side_effect=clock):
+            result=matched.kvm_snapshot()
+        self.assertEqual(calls,['clock','access','access','clock'])
+        self.assertLess(result['started_monotonic_ns'],result['finished_monotonic_ns'])
+
+
 if __name__ == '__main__':
     unittest.main()

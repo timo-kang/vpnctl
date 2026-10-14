@@ -1,5 +1,15 @@
 # One-runner matched CI investigation (PR236)
 
+Generation 2 is a separate run after run38492657318 completed naturally with an
+incomplete comparison matrix. That original run and every failure remain retained;
+no attempt is rerun or substituted. This generation keeps the same fixed schedule
+and product criteria. Only disposable-runner KVM access preparation changes: capture
+device/ACL evidence, re-establish the runner user's ACL when needed immediately
+before each scheduled invocation, and capture access again after it ends. A failed
+preparation is retained as an infrastructure failure; a started test is never
+retried. No claim is made about which external actor removed access. No local host
+permissions are changed.
+
 This experiment branch is not a replacement reliability pipeline and is not
 intended for merging into main. It runs only by manual dispatch. No product or
 original fixture code is changed. Local preliminary results are not adoption

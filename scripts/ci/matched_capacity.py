@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import time
 import traceback
@@ -132,9 +133,82 @@ def retain_binaries(root, destination, before, after):
         raise ValueError('ambiguous_manifest')
 
 
+def require_disposable_runner():
+    if (os.environ.get('GITHUB_ACTIONS') != 'true'
+            or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
+            or os.environ.get('GITHUB_RUN_ATTEMPT') != '1'):
+        raise RuntimeError('fresh_disposable_GitHub_runner_required')
+
+
+def kvm_snapshot():
+    started = time.monotonic_ns()
+    info = Path('/dev/kvm').stat()
+    acl = read_command(['getfacl', '-cp', '/dev/kvm'])
+    readable = os.access('/dev/kvm', os.R_OK)
+    writable = os.access('/dev/kvm', os.W_OK)
+    return {'started_monotonic_ns': started, 'finished_monotonic_ns': time.monotonic_ns(),
+            'character_device': stat.S_ISCHR(info.st_mode),
+            'device': info.st_dev, 'inode': info.st_ino, 'rdev': info.st_rdev,
+            'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid,
+            'readable': readable, 'writable': writable,
+            'acl': acl}
+
+
+def prepare_kvm(destination):
+    # Only the disposable CI runner, immediately before each planned invocation.
+    # A lost ACL never causes a retry or alteration of an already-started test.
+    require_disposable_runner()
+    before = kvm_snapshot()
+    record = {'before': before, 'refreshed': False}
+    write_json(destination / 'kvm-access.json', record)
+    if not before['character_device']:
+        raise RuntimeError('KVM_character_device_required')
+    if not before['readable'] or not before['writable']:
+        record['refreshed'] = True
+        write_json(destination / 'kvm-access.json', record)
+        subprocess.run(['sudo', '-n', 'setfacl', '-m', f'u:{os.getuid()}:rw', '/dev/kvm'],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    after = kvm_snapshot()
+    record['prepared'] = after
+    write_json(destination / 'kvm-access.json', record)
+    if (not after['character_device'] or not after['readable'] or not after['writable']
+            or any(before[k] != after[k] for k in ('device', 'inode', 'rdev'))):
+        raise RuntimeError('KVM_access_not_established')
+
+
+def invoke_vm(root, row, destination, source, pinned_image):
+    prepare_kvm(destination)
+    env = dict(os.environ, GOMAXPROCS='2', VPNCTL_VM_CPUS='1', VPNCTL_VM_RACE='1',
+               VPNCTL_VM_IMAGE=pinned_image, VPNCTL_ARTIFACT_DIR=str(destination/'artifacts'), VPNCTL_KEEP_VM_WORK='1')
+    for key in ('GOFLAGS', 'VPNCTL_TEST_BINARY', 'VPNCTL_VM_MANAGERS'):
+        env.pop(key, None)
+    os.umask(0o022)  # Cap-free image builder must be able to read /input.
+    before = work_directories()
+    with (destination / 'runner.log').open('xb') as log:
+        result = subprocess.run(['bash', 'scripts/test-vm.sh', '--case',
+                                 *[f'application-capacity-{n}' for n in row['cases']],
+                                 '--robot-cpus', '0.5', '--cpu-layout', 'shared'],
+                                cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT)
+    write_json(destination / 'process-exit.json', {'exit_code': result.returncode})
+    # Preserve these independently so a retention failure cannot hide access
+    # loss, and a failed snapshot cannot discard the executable bytes.
+    errors = []
+    for name, action in (
+            ('kvm_snapshot', lambda: write_json(destination / 'kvm-after.json', kvm_snapshot())),
+            ('retention', lambda: retain_binaries(root, destination, before, work_directories()))):
+        try:
+            action()
+        except Exception as error:
+            errors.append({'stage': name, 'exception': type(error).__name__})
+            (destination / (name + '-error.log')).write_text(traceback.format_exc())
+    if errors:
+        write_json(destination / 'post-invocation-errors.json', {'errors': errors})
+        raise RuntimeError('post_invocation_evidence_incomplete')
+    return result.returncode
+
+
 def main():
-    if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
-        raise SystemExit('disposable GitHub-hosted runner required')
+    require_disposable_runner()
     repo = Path(__file__).resolve().parents[2]
     root = Path(os.environ['VPNCTL_MATCHED_ROOT']).resolve()
     root.mkdir(mode=0o700, exist_ok=True)
@@ -151,7 +225,7 @@ def main():
         sources[arm] = path
     read_command(['git', 'diff', '--exit-code', SOURCES['A'], SOURCES['B'], '--',
                   'scripts/test-vm.sh', 'tests/vm', 'tests/integration'], repo)
-    plan = {'schema': 1, 'sources': SOURCES, 'schedule': schedule(),
+    plan = {'schema': 1, 'predecessor_run_id': '38492657318', 'experiment_generation': 2, 'sources': SOURCES, 'schedule': schedule(),
             'experiment_commit': read_command(['git', 'rev-parse', 'HEAD'], repo),
             'experiment_clean': not read_command(['git', 'status', '--porcelain'], repo),
             'harness': {name: digest(sources['A'] / 'tests/vm' / name) for name in HARNESS},
@@ -183,23 +257,9 @@ def main():
         raise RuntimeError('embedded_harness_mismatch')
     write_json(root / 'image-provenance.json', {'image_id': image, 'embedded_harness': embedded})
 
-    def invoke(row, destination, source, pinned_image):
-        env = dict(os.environ, GOMAXPROCS='2', VPNCTL_VM_CPUS='1', VPNCTL_VM_RACE='1',
-                   VPNCTL_VM_IMAGE=pinned_image, VPNCTL_ARTIFACT_DIR=str(destination/'artifacts'), VPNCTL_KEEP_VM_WORK='1')
-        for key in ('GOFLAGS', 'VPNCTL_TEST_BINARY', 'VPNCTL_VM_MANAGERS'):
-            env.pop(key, None)
-        os.umask(0o022)  # Cap-free image builder must be able to read /input.
-        before = work_directories()
-        with (destination / 'runner.log').open('xb') as log:
-            result = subprocess.run(['bash', 'scripts/test-vm.sh', '--case',
-                                     *[f'application-capacity-{n}' for n in row['cases']],
-                                     '--robot-cpus', '0.5', '--cpu-layout', 'shared'],
-                                    cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT)
-        # Record the original test exit even if retention itself fails.
-        write_json(destination / 'process-exit.json', {'exit_code': result.returncode})
-        retain_binaries(root, destination, before, work_directories())
-        return result.returncode
-    return execute_schedule(root, sources, image, invoke)
+    return execute_schedule(root, sources, image,
+                            lambda row, dest, source, pinned: invoke_vm(root, row, dest, source, pinned))
+
 
 
 if __name__ == '__main__':

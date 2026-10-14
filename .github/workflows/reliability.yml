@@ -1,5 +1,5 @@
 # Experiment-only branch; the default branch reliability pipeline is unchanged.
-name: PR236 matched capacity investigation
+name: PR236 matched capacity investigation v2
 on:
   workflow_dispatch:
 permissions:
@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - name: Prepare private evidence and disposable runner KVM access
+      - name: Prepare private evidence and verify disposable runner
         run: |
           export VPNCTL_MATCHED_ROOT="$RUNNER_TEMP/vpnctl-matched"
           printf 'VPNCTL_MATCHED_ROOT=%s\n' "$VPNCTL_MATCHED_ROOT" >> "$GITHUB_ENV"
@@ -30,9 +30,8 @@ jobs:
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$GITHUB_RUN_ATTEMPT" = 1
           test -c /dev/kvm
-          if ! test -r /dev/kvm || ! test -w /dev/kvm; then
-            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
-          fi
+          command -v getfacl
+          command -v setfacl
           command -v gpg
       - name: Verify fixed schedule and failure retention
         run: python3 -B -m unittest discover -s scripts/ci -p test_matched_capacity.py
