@@ -1,7 +1,8 @@
 # Application uplink status and reconnect contract (#29)
 
-Status: implementation proposal. These endpoints and consumers do not exist yet.
-This document scopes the next slices after observation-cost qualification.
+Status: design contract. The API and consumers are not enabled on `main`; their
+implementation is tracked in #229–#234. This document defines their acceptance
+criteria. Implementation, capacity and deployment qualification remain separate.
 
 VPN supplies one way for a robot without its own direct uplink to reach an
 application server through a relay. This API describes network observations;
@@ -46,7 +47,7 @@ Keep availability, observation freshness and session continuity separate:
 | `reason` | Bounded machine-readable reason from an explicit allowlist. |
 | `observed_age_ms`, `remaining_validity_ms` | Informational age and budget at serialization; neither starts a new TTL on receipt. |
 | `clock_domain`, `valid_until_boot_ns` | Verified local boot/namespace domain and absolute `CLOCK_BOOTTIME` deadline. The consumer checks both at receipt and before use. |
-| `path_id`, `path_revision` | Verified active path and local transition revision, when known. |
+| `path_id`, `path_revision` | Verified active path and producer-local observed route-identity revision, when known. |
 | `evidence` | Initially `unbound_tcp_connect`; not application protocol health. |
 | `session_continuity` | Initially `not_established`; never promote this to `preserved` from a new connection's success. |
 | `forecast` | Absent until a separately validated prediction is available. |
@@ -58,12 +59,19 @@ it cannot claim that quarantine was installed. Explicit denial/expiry is
 blocked. Claim unreachable only from fresh negative evidence for the approved
 candidate scope; distinguish unknown candidates from known unavailable paths.
 
-The current reservation/catalog `generation` is not a route-change counter.
-Introduce an explicit publisher transition revision. It changes after a switch,
-rollback, quarantine/reactivation, or installation identity change, including
-returning to the same path ID. A producer restart changes `producer_id` and
-invalidates the old cursor before any fresh state is available. Do not infer
-route equality from path ID alone or use wall-clock timestamps as counters.
+The reservation/catalog `generation` is not a route-change counter. Reuse the
+persisted reservation owner and `route_revision` mechanism from #238 when
+integrating #229. Together with the active route, these identify switches,
+rollback, quarantine/reactivation and release/recreation, including returning
+to the same path ID. Do not use wall-clock timestamps as transition counters.
+
+The public `path_revision` counts route-identity changes observed by this
+producer. It is neither a copy of the durable `route_revision` nor a count of
+every intermediate transition: multiple transitions between publications can
+produce one observed identity change. The public `revision` instead orders each
+publication, including publications that keep the same route identity.
+A producer restart changes `producer_id`; consumers must resynchronize and
+invalidate old cursors and cached snapshots before using the new producer.
 
 An in-process producer must carry an actual monotonic/BOOTTIME validity budget
 out of reconciliation; reconstructing authority from JSON timestamps is not
@@ -147,9 +155,10 @@ the application supplies its own idempotency/deduplication contract. Keep
 4. Record monotonic boundaries for injected fault, verified route change,
    publication, consumer receipt, connect and first correct payload. Report
    missing boundaries and right-censored recovery explicitly. Measure CPU cost,
-   duplicates/loss and gaps after initial recovery. Select application-specific
-   outage/reconnect budgets; the selector's 10-second freshness limit is not a
-   universal application outage SLO.
+   duplicates/loss and gaps after initial recovery. Measure each app first; set
+   application-specific outage/reconnect budgets at deployment. Experiment
+   termination deadlines are not those budgets, and the selector's 10-second
+   freshness limit is not a universal application outage SLO.
 
 All network and power fault experiments remain in owned disposable namespaces
 or VM guests. No host Wi-Fi, network, clock, suspend or reboot changes are needed.
