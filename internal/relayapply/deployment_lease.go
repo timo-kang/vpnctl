@@ -308,6 +308,9 @@ func (k deploymentKernel) leaseRemove(ctx context.Context, e DeploymentEntry) er
 }
 
 func (k deploymentKernel) LeaseStatus(ctx context.Context, e DeploymentEntry) (DeploymentLease, error) {
+	// Keep the global and exact-table queries in separate nft invocations.
+	// nft 1.0.6 can restrict both to the exact table when they share a command
+	// batch, hiding foreign flowtables that bypass lease enforcement.
 	if err := k.noFlowtables(ctx); err != nil {
 		return DeploymentLease{}, err
 	}
