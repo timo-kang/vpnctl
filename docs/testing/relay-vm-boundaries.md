@@ -272,6 +272,13 @@ On failure the test captures public route/nft state and allows up to 10 seconds
 for the pending application cycles to write their diagnostics before automatic
 fixture cleanup. The original failure remains failed even if traffic recovers.
 
+The guard sampler discards interrupted link dumps and attempts enumeration at
+most three times, checking its two-second budget between calls. The parent
+process enforces the three-second worker deadline. Lease reads and inactive
+guards are never retried. Worker failures retain a fixed error class and exit
+code without publishing stderr; an unsuccessful sample does not prove that a
+kernel lease was inactive and still prevents qualification.
+
 `--case application-approval`은 같은 격리 VM에서 실제 60초 승인 만료와 인증서 철회를
 검증한다. expiry 전 supervised FIFO 갱신 후 앱 적용 세대가 새 grant와 같아야 하며,
 기존/새 unbound TCP 차단과 독립 relay 승인 유지를 확인한다. 두 fault의 완전한 결과와
