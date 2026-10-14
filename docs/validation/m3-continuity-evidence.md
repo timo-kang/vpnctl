@@ -72,3 +72,7 @@ application-capacity-8`로 검증한다. 자원을 줄인 원인 수집 실험�
 검사가 실패하면 실패로 유지하며, 진단의 완전성과 용량 합격 여부를 각각 기록한다.
 호스트 network/kernel/clock/power를 변경하지 않는다. 최종 실행·리뷰·CI 결과는
 [#212](https://github.com/timo-kang/vpnctl/issues/212)에 연결한다.
+
+별도 [lease 전역 flowtable 검사 계약](m3-lease-flowtable-contract.md)은 소유 테이블
+밖의 flowtable도 각 경계에서 검출하는 실제 커널 회귀를 정의한다. 이 시험의
+성공은 관측 지연이나 용량 판정을 대신하지 않는다.
