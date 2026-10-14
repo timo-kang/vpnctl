@@ -43,8 +43,7 @@ func nodeSupervisionCycle(ctx context.Context, cfg *config.NodeConfig, dir strin
 		out.Reason = nodeAdmissionReason(err)
 		return out, err
 	}
-	defer c.Close()
-	defer e.Close()
+	defer closeNodeRelayEngine(ctx, c, e)
 	// Admission must not consume the authenticated refresh / maintenance budget.
 	// Each successful observer also maintains all leases while this waits.
 	ctx, cancel := context.WithTimeout(ctx, relayapply.NodeMaintenanceDuration)
@@ -57,11 +56,14 @@ func nodeSupervisionCycle(ctx context.Context, cfg *config.NodeConfig, dir strin
 	}
 	// Rejection/storage failure still reaches blocking. No output is written
 	// while holding either lock. A blocked logger cannot renew kernel leases.
+	relayobserve.Mark(ctx, "supervision_maintenance_started")
 	r, err := e.MaintainLeases(ctx)
+	relayobserve.Mark(ctx, "supervision_maintenance_complete")
 	out.Kernel = &r
 	out.State = r.State
 	out.Reason = r.Reason
 	preparation, rebuildErr := e.RebuildCandidates(ctx)
+	relayobserve.Mark(ctx, "supervision_rebuild_complete")
 	if len(preparation.Preparations) > 0 || preparation.PathID != "" {
 		out.Preparation = &preparation
 	}
