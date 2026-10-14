@@ -8,6 +8,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +76,11 @@ func startNetworkProcess(t *testing.T, ns, log string, env []string, args ...str
 
 func startNetworkProcessInGroup(t *testing.T, group *os.File, ns, log string, env []string, args ...string) *networkProcess {
 	t.Helper()
+	return startNetworkProcessWithObserver(t, group, ns, log, nil, env, args...)
+}
+
+func startNetworkProcessWithObserver(t *testing.T, group *os.File, ns, log string, observer io.Writer, env []string, args ...string) *networkProcess {
+	t.Helper()
 	f, err := os.OpenFile(log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		t.Fatal(err)
@@ -87,11 +93,25 @@ func startNetworkProcessInGroup(t *testing.T, group *os.File, ns, log string, en
 	}
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout, cmd.Stderr = f, f
+	if observer != nil {
+		// Opt-in receipt capture adds an exec pipe/copy goroutine. Keep the
+		// original log, then timestamp complete stdout lines in the observer.
+		cmd.Stdout = io.MultiWriter(f, observer)
+		// A descendant can inherit stdout after the producer exits. Bound
+		// Wait's pipe drain as well as the existing process-exit watchdog.
+		cmd.WaitDelay = 2 * time.Second
+	}
 	if err := cmd.Start(); err != nil {
 		f.Close()
 		t.Fatal(err)
 	}
-	f.Close()
+	if observer == nil {
+		f.Close() // Child inherited the descriptor directly.
+	} else {
+		// The copy goroutine writes in this process; close after process stop
+		// and Wait have joined it (cleanup registration is LIFO).
+		t.Cleanup(func() { f.Close() })
+	}
 	p := &networkProcess{cmd: cmd, log: log}
 	t.Cleanup(func() { p.stop() })
 	return p
