@@ -89,18 +89,6 @@ func readLatestApplicationResult(r io.ReaderAt, size int64) (out relayapply.Targ
 	return
 }
 
-// Count real applied cycles after the baseline, rejecting a gap before any
-// later recovery can hide it. Payload alone can pass while an observer stalls.
-func applicationContinuity(t *testing.T, path string, baseline int, role string, report map[string]any) (cycles int, maxGap time.Duration) {
-	t.Helper()
-	cycles, maxGap, err := checkApplicationContinuity(path, baseline, role, report)
-	if err != nil {
-		report["sampled_qualification_status"] = "fail"
-		t.Fatal(err)
-	}
-	return cycles, maxGap
-}
-
 func evaluateApplicationContinuity(results []relayapply.TargetReconcileResult, baseline int, now time.Time) (cycles int, maxGap time.Duration, err error) {
 	fail := func(reason string, row, candidate int) *continuityFailure {
 		out := &continuityFailure{SchemaVersion: 1, Reason: reason, CheckedAt: now,
