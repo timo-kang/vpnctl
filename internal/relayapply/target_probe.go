@@ -175,8 +175,8 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 		out.Paths = append(out.Paths, observation)
 	}
 	waveParent := ctx
-	if k, ok := e.backend.(nodeKernel); ok {
-		k.run = observationInventory(k.run, leaseBootTime)
+	if enableTargetObservationInventory(e) {
+		k := e.backend.(nodeKernel)
 		// observePreparedGated checks the live lease at both boundaries itself.
 		// Avoid the duplicate middle LeaseStatus inside nodeKernel.Check; no
 		// lease/guard/timer data is shared or cached.
@@ -280,6 +280,9 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 				return out, fresh, errors.Join(errTargetObservationOwnership, errors.New("reacquired cache scope does not match observation owner"))
 			}
 		}
+		// Rebuild the public-inventory cache after every socket proof completed.
+		// Fresh per-interface, lease, guard, and underlay checks remain uncached.
+		enableTargetObservationInventory(fresh)
 		for i, ticket := range tickets {
 			if ticket == nil {
 				continue
