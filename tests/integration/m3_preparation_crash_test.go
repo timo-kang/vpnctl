@@ -57,7 +57,10 @@ endpoint:-4\ route\ add) [ "$4" = "$VPNCTL_REBUILD_ENDPOINT" ] && fire=1;;
 rule:-4\ rule\ add) [ "$6" = fwmark ] && fire=1;;
 address:-4\ address\ add) fire=1;;
 probe-targets:-4\ route\ add) [ "$4" = "198.18.0.2/32" ] && fire=1;;
-probe-source:-4\ rule\ add) [ "$6" = from ] && fire=1;;
+probe-source:-4\ rule\ add)
+	[ "$6" = from ] && fire=1
+	printf 'status=%s args=%s\n' "$status" "$*" >> "$VPNCTL_REBUILD_TRACE"
+	;;
 remove-link:link\ del\ dev) fire=1;;
 remove-probe-source:-4\ rule\ del) [ "$6" = from ] && fire=1;;
 remove-rule:-4\ rule\ del) [ "$6" = fwmark ] && fire=1;;
@@ -97,6 +100,7 @@ exit "$status"
 			netOutput(t, f.robot, "ip", "route", "add", p.Pin.EndpointPrefix, "via", "192.0.2.11", "dev", "wan0", "src", "192.0.2.10", "onlink")
 		}
 		marker := filepath.Join(f.private, "rebuild-crash-"+step)
+		trace := filepath.Join(f.private, "rebuild-crash-"+step+".trace")
 		log, err := os.Create(filepath.Join(f.results, "rebuild-crash-"+step+".jsonl"))
 		if err != nil {
 			t.Fatal(err)
@@ -105,7 +109,7 @@ exit "$status"
 		for turn := 0; turn < 16; turn++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			cmd := netCommand(ctx, f.robot, integrationBinary(t), "node", "relay", "supervise", "--config", f.node, "--once")
-			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "VPNCTL_REBUILD_FAULT="+step, "VPNCTL_REBUILD_MARKER="+marker, "VPNCTL_REBUILD_ENDPOINT="+p.Pin.EndpointPrefix)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "VPNCTL_REBUILD_FAULT="+step, "VPNCTL_REBUILD_MARKER="+marker, "VPNCTL_REBUILD_ENDPOINT="+p.Pin.EndpointPrefix, "VPNCTL_REBUILD_TRACE="+trace)
 			b, runErr := cmd.CombinedOutput()
 			cancel()
 			if _, err := log.Write(b); err != nil {
@@ -123,7 +127,8 @@ exit "$status"
 		}
 		log.Close()
 		if b, err := os.ReadFile(marker); !crashed || err != nil || string(b) != "fired" {
-			t.Fatal("SIGKILL boundary not reached", step, err)
+			traceOutput, _ := os.ReadFile(trace)
+			t.Fatalf("SIGKILL boundary not reached %s: %v; matching command trace: %s", step, err, traceOutput)
 		}
 		ready := false
 		for turn := 0; turn < 32; turn++ {
