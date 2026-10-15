@@ -208,6 +208,15 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			t.Fatal(err)
 		}
 		counts := map[string]map[string]int{}
+		adminReconfigurationFailures := map[string]int{
+			"tcp-new": 0, "tcp-existing": 0, "udp": 0, "independent-app": 0,
+		}
+		postRecoveryFailures := map[string]int{
+			"tcp-new": 0, "tcp-existing": 0, "udp": 0, "independent-app": 0,
+		}
+		postRecoverySuccesses := map[string]int{
+			"tcp-new": 0, "tcp-existing": 0, "udp": 0, "independent-app": 0,
+		}
 		for _, p := range packets {
 			if p.Begin < begin {
 				continue
@@ -220,8 +229,26 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 				key = "ok"
 			}
 			counts[p.Kind][key]++
-			if !p.OK && (p.Kind == "rf-lan" || p.Kind == "gimbal-lan" || independent && p.Kind == "independent-app") && !managerLANReconfigurationSample(name, p, begin, lanRecovered) {
-				t.Fatal("unaffected communication interrupted", name, p)
+			if !p.OK {
+				if p.Kind == "rf-lan" || p.Kind == "gimbal-lan" {
+					if !managerLANReconfigurationSample(name, p, begin, lanRecovered) {
+						t.Fatal("unaffected LAN communication interrupted", name, p)
+					}
+				} else if name == "netplan-apply" && managerApplicationPacketKind(p.Kind) {
+					if p.Begin >= ready {
+						if p.Kind != "tcp-existing" {
+							t.Fatal("fresh application traffic failed after admin reconfiguration recovery", name, p)
+						}
+						postRecoveryFailures[p.Kind]++
+					} else {
+						adminReconfigurationFailures[p.Kind]++
+					}
+				} else if independent && p.Kind == "independent-app" {
+					t.Fatal("unaffected independent app communication interrupted", name, p)
+				}
+			}
+			if name == "netplan-apply" && managerApplicationPacketKind(p.Kind) && p.OK && p.Begin >= ready {
+				postRecoverySuccesses[p.Kind]++
 			}
 			if desired != "" && p.Begin >= ready && p.OK && (p.Kind == "tcp-new" || p.Kind == "udp") && p.Source != sourceFor(desired) {
 				t.Fatal("post-convergence payload used another relay", name, p)
@@ -251,6 +278,26 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		row["traffic"] = counts
 		if name == "netplan-apply" {
 			row["lan_reconfiguration"].(map[string]any)["failed_samples"] = counts["rf-lan"]["failed"] + counts["gimbal-lan"]["failed"]
+			for _, kind := range []string{"tcp-new", "udp", "independent-app"} {
+				if postRecoverySuccesses[kind] == 0 {
+					t.Fatal("application did not recover after admin reconfiguration", kind)
+				}
+			}
+			window := ready - begin
+			actionToRecovery := ready - row["action_completed_monotonic_ns"].(int64)
+			if actionToRecovery > int64(125*time.Second) || window > int64(170*time.Second) {
+				t.Fatal("admin reconfiguration recovery exceeded bounded observation window", time.Duration(window))
+			}
+			// Administrator-triggered Netplan apply is allowed to interrupt app
+			// payloads while the owned routes are rebuilt. Record that interval and
+			// require fresh traffic on both applications after route readiness.
+			row["external_reconfiguration"] = map[string]any{
+				"window_ms":                float64(window) / 1e6,
+				"failed_packets":           adminReconfigurationFailures,
+				"post_recovery_failures":   postRecoveryFailures,
+				"post_recovery_successes":  postRecoverySuccesses,
+				"recovery_after_action_ms": float64(actionToRecovery) / 1e6,
+			}
 		}
 		end := managerMono()
 		gaps := map[string]float64{}

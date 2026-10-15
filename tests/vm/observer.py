@@ -524,6 +524,69 @@ AUTO_MANAGER_STEPS = {
 INSTALL_MANAGER_STEPS = {'intent-enrolled', 'intent-controller-offline-valid', 'intent-expired-offline',
                          'intent-offline-relay-restart', 'intent-fresh-approval-recovery'}
 AUTO_PACKET_KINDS = {'tcp-new', 'tcp-existing', 'udp', 'independent-app', 'rf-lan', 'gimbal-lan'}
+ADMIN_RECONFIGURATION_PACKET_KINDS = {'tcp-new', 'tcp-existing', 'udp', 'independent-app'}
+
+def validate_external_reconfiguration(step, packets):
+    evidence = step.get('external_reconfiguration', {})
+    begin = step.get('begin_monotonic_ns', 0)
+    ready = step.get('ready_observed_monotonic_ns', 0)
+    end = step.get('end_monotonic_ns', 0)
+    if (not isinstance(evidence, dict)
+            or set(evidence) != {'window_ms', 'failed_packets', 'post_recovery_failures',
+                                'post_recovery_successes', 'recovery_after_action_ms'}
+            or not begin < ready <= end):
+        raise RuntimeError('missing external manager reconfiguration evidence')
+    expected_window = (ready - begin) / 1e6
+    if (type(evidence.get('window_ms')) not in (int, float)
+            or not math.isclose(evidence['window_ms'], expected_window, rel_tol=0, abs_tol=0.001)
+            or not 0 < evidence['window_ms'] <= 170_000
+            or type(evidence.get('recovery_after_action_ms')) not in (int, float)
+            or not 0 <= evidence['recovery_after_action_ms'] <= 125_000
+            or evidence['recovery_after_action_ms'] > evidence['window_ms']):
+        raise RuntimeError('invalid external manager recovery clock')
+    failed = {kind: 0 for kind in ADMIN_RECONFIGURATION_PACKET_KINDS}
+    post_failed = {kind: 0 for kind in ADMIN_RECONFIGURATION_PACKET_KINDS}
+    recovered = {kind: 0 for kind in ADMIN_RECONFIGURATION_PACKET_KINDS}
+    observed = {kind: {'ok': 0, 'failed': 0} for kind in AUTO_PACKET_KINDS}
+    for packet in packets:
+        kind = packet.get('kind')
+        at = packet.get('begin_monotonic_ns', 0)
+        if kind not in AUTO_PACKET_KINDS or not begin <= at <= end:
+            continue
+        if packet.get('ok') is True:
+            observed[kind]['ok'] += 1
+        elif packet.get('ok') is False:
+            observed[kind]['failed'] += 1
+        if kind not in ADMIN_RECONFIGURATION_PACKET_KINDS:
+            continue
+        if packet.get('ok') is False:
+            if at >= ready:
+                post_failed[kind] += 1
+                if kind != 'tcp-existing':
+                    raise RuntimeError('fresh application failure after admin reconfiguration recovery')
+            else:
+                failed[kind] += 1
+        elif packet.get('ok') is True and at >= ready:
+            recovered[kind] += 1
+    for kind, counts in observed.items():
+        reported = step.get('traffic', {}).get(kind, {})
+        if any(reported.get(result, 0) != counts[result] for result in ('ok', 'failed')):
+            raise RuntimeError('manager traffic counts do not match packet evidence')
+    failed_evidence = evidence.get('failed_packets')
+    post_failed_evidence = evidence.get('post_recovery_failures')
+    recovered_evidence = evidence.get('post_recovery_successes')
+    if (not isinstance(failed_evidence, dict) or not isinstance(post_failed_evidence, dict)
+            or not isinstance(recovered_evidence, dict)
+            or set(failed_evidence) != ADMIN_RECONFIGURATION_PACKET_KINDS
+            or failed_evidence != failed
+            or set(post_failed_evidence) != ADMIN_RECONFIGURATION_PACKET_KINDS
+            or post_failed_evidence != post_failed
+            or set(recovered_evidence) != ADMIN_RECONFIGURATION_PACKET_KINDS
+            or recovered_evidence != recovered):
+        raise RuntimeError('external manager interruption counts do not match packet evidence')
+    if any(recovered[kind] <= 0 for kind in ('tcp-new', 'udp', 'independent-app')):
+        raise RuntimeError('application did not recover after admin reconfiguration')
+    return evidence
 
 def validate_manager_auto_result(status, paths, installation=False):
     report = status.get('report', {})
@@ -600,6 +663,7 @@ def validate_manager_auto_result(status, paths, installation=False):
             raise RuntimeError('missing per-scenario packet evidence')
         if step['name'] == 'netplan-apply':
             lan = validate_lan_reconfiguration(step)
+            validate_external_reconfiguration(step, packets)
             recovered = lan['recovered_monotonic_ns']
             if (lan['action_completed_monotonic_ns'] != step['action_completed_monotonic_ns']
                     or recovered > step['ready_observed_monotonic_ns']):
