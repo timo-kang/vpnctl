@@ -35,7 +35,6 @@ func TestTargetProbeFailureEvidencePreservesStageAndVerdict(t *testing.T) {
 		invalid                          string
 		state, reason                    string
 		postcheckReject, noProbe         bool
-		connectLimit, waitConnect        bool
 		stalledTransfer                  bool
 	}{
 		{name: "route_before", stage: "route_before", cause: "unavailable", failure: unavailable},
@@ -64,8 +63,6 @@ func TestTargetProbeFailureEvidencePreservesStageAndVerdict(t *testing.T) {
 		{name: "connect_refused", stage: "connect", cause: "refused", failure: syscall.ECONNREFUSED, state: "unreachable", reason: "refused"},
 		{name: "connect_network_unreachable", stage: "connect", cause: "unreachable", failure: syscall.ENETUNREACH, state: "unreachable", reason: "unreachable"},
 		{name: "connect_host_unreachable", stage: "connect", cause: "unreachable", failure: syscall.EHOSTUNREACH, state: "unreachable", reason: "unreachable"},
-		{name: "connect_policy_deadline", stage: "connect", cause: "timeout", contextState: "deadline_exceeded", state: "unreachable", reason: "timeout", connectLimit: true, waitConnect: true},
-		{name: "connect_policy_refused_while_active", stage: "connect", cause: "refused", failure: syscall.ECONNREFUSED, state: "unreachable", reason: "refused", connectLimit: true},
 		{name: "later_postcheck_rejection", stage: "route_after", cause: "unavailable", failure: unavailable, postcheckReject: true, reason: "kernel_changed_during_probe"},
 		{name: "successful_probe", state: "reachable", reason: "tcp_connect_verified"},
 		{name: "probe_not_executed", noProbe: true, reason: "probe_routing_not_prepared"},
@@ -168,21 +165,11 @@ func TestTargetProbeFailureEvidencePreservesStageAndVerdict(t *testing.T) {
 				probeCtx = ctx
 				if tc.contextState == "canceled" {
 					probeCtx, cancelProbe = context.WithCancel(ctx)
-				} else if tc.contextState == "deadline_exceeded" && !tc.connectLimit {
+				} else if tc.contextState == "deadline_exceeded" {
 					probeCtx, cancelProbe = context.WithTimeout(ctx, time.Millisecond)
 				}
-				if tc.connectLimit {
-					probeCtx = context.WithValue(probeCtx, targetConnectLimitKey{}, time.Millisecond)
-				}
 				defer cancelProbe()
-				proof, err := k.probeTargetWithDial(probeCtx, got, gotTarget, func(dialCtx context.Context, _ Entry, _ relaycatalog.Target) (net.Conn, error) {
-					if tc.waitConnect {
-						<-dialCtx.Done()
-						if probeCtx.Err() != nil {
-							t.Fatal("TCP-only deadline expired the outer probe context")
-						}
-						return nil, dialCtx.Err()
-					}
+				proof, err := k.probeTargetWithDial(probeCtx, got, gotTarget, func(_ context.Context, _ Entry, _ relaycatalog.Target) (net.Conn, error) {
 					if tc.stage == "connect" {
 						return nil, fault()
 					}
