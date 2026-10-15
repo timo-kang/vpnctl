@@ -15,8 +15,8 @@ import (
 )
 
 // Private, one-use evidence for the current ownership lifetime only. It cannot
-// be serialized as authority or resumed by a new Engine. Releasing ownership
-// will additionally need a target transaction revision/ABA contract.
+// be serialized as authority or resumed by a new Engine. Cross-Engine use requires the separate
+// targetProbeHandoff identity and lifetime contract.
 type targetProbeAttempt struct {
 	owner        *Engine
 	node, domain string
@@ -139,6 +139,13 @@ func (e *Engine) finishTargetProbe(ctx context.Context, a *targetProbeAttempt) T
 	if !a.current(e) {
 		return fail("candidate_changed_during_probe")
 	}
+	return e.finishTargetProbeEvidence(ctx, a)
+}
+
+// Caller has consumed the attempt and validated its ownership contract.
+func (e *Engine) finishTargetProbeEvidence(ctx context.Context, a *targetProbeAttempt) TargetObservation {
+	out := a.observation
+	fail := func(reason string) TargetObservation { return unknownProbe(out, reason) }
 	if a.ctx.Err() != nil || ctx.Err() != nil {
 		return fail("observation_deadline")
 	}

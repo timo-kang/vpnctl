@@ -51,7 +51,9 @@ block another actor's newly applied target.
 
 That protocol must also release the cache admission ticket, preserve the original
 wave/approval/BOOTTIME budgets, join socket workers, and prevent reuse of a closed
-Engine's cache/save closures. There is no ownership-yield switch in this change.
+Engine's cache/save closures. There is no ownership-yield switch in this change. The subsequent private
+[handoff validation contract](probe-handoff-validation.md) validates a fresh
+Engine and Store; production scheduling remains ownership-retaining.
 
 ## Verification
 
