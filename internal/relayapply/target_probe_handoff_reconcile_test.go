@@ -26,7 +26,9 @@ type testObservationOwner struct {
 	edit                 func(*Engine)
 	reacquireErr         error
 	returnEngineOnError  bool
+	reacquireDelay       time.Duration
 	releaseErr           error
+	beforeRelease        func()
 	keepStore            bool
 	cloneDir             string
 }
@@ -35,6 +37,9 @@ func (o *testObservationOwner) Release(_ context.Context, e *Engine) error {
 	o.released++
 	if o.releaseErr != nil {
 		return o.releaseErr
+	}
+	if o.beforeRelease != nil {
+		o.beforeRelease()
 	}
 	e.Close()
 	if o.keepStore {
@@ -49,6 +54,15 @@ func (o *testObservationOwner) Release(_ context.Context, e *Engine) error {
 }
 func (o *testObservationOwner) Reacquire(ctx context.Context) (*Engine, error) {
 	o.reacquired++
+	if o.reacquireDelay > 0 {
+		timer := time.NewTimer(o.reacquireDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if o.reacquireErr != nil {
 		if o.returnEngineOnError {
 			c, err := relaycache.OpenQueued(ctx, o.dir, relaycache.Options{NodeID: o.source.journal.Node})
@@ -83,6 +97,7 @@ func (o *testObservationOwner) Reacquire(ctx context.Context) (*Engine, error) {
 		c.Close()
 		return nil, err
 	}
+	e.backend = o.source.backend
 	e.collector = o.source.collector
 	e.targets = targetKernel{kernel{run: o.machine.run}}
 	e.probe = o.source.probe
@@ -91,6 +106,24 @@ func (o *testObservationOwner) Reacquire(ctx context.Context) (*Engine, error) {
 		o.edit(e)
 	}
 	return e, nil
+}
+
+type delayedNodeObservationBackend struct {
+	*fakeNodeLease
+	delay time.Duration
+}
+
+func (b *delayedNodeObservationBackend) Check(ctx context.Context, entry Entry, fresh bool) (bool, error) {
+	if b.delay > 0 {
+		timer := time.NewTimer(b.delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	return b.fakeNodeLease.Check(ctx, entry, fresh)
 }
 
 func clonePrivateCache(from, to string) error {
@@ -152,6 +185,47 @@ func TestReconcileTargetYieldsOwnershipAndAppliesOnFreshEngine(t *testing.T) {
 	}
 	if owner.released != 2 || owner.reacquired != 2 {
 		t.Fatalf("ownership handoff count %d/%d", owner.released, owner.reacquired)
+	}
+}
+
+func TestReconcileTargetHandoffSeparatesPreparationProbeAndReentryBudgets(t *testing.T) {
+	e, m, k, dir := appFixture(t)
+	delayed := &delayedNodeObservationBackend{fakeNodeLease: k, delay: 1100 * time.Millisecond}
+	e.backend = delayed
+	t.Cleanup(func() {
+		e.Close()
+		e.cache.Close()
+	})
+	owner := &testObservationOwner{
+		dir: dir, source: e, machine: m, kernel: k,
+		reacquireDelay: 3100 * time.Millisecond,
+		beforeRelease:  func() { delayed.delay = 0 },
+	}
+	ctx, cancel := context.WithTimeout(relayobserve.WithUnderlayEvents(context.Background(), &testUnderlayEvents{}), 18*time.Second)
+	defer cancel()
+	out, fresh, err := e.ReconcileTargetWithHandoff(ctx, "app", "", appSelector(t), time.Second, owner)
+	if fresh != nil {
+		t.Cleanup(func() {
+			fresh.Close()
+			fresh.cache.Close()
+		})
+	}
+	if fresh == nil || fresh == e || len(out.Selection.Candidates) != 8 {
+		t.Fatalf("serial precheck or >3s FIFO reentry consumed the probe deadline: candidates=%d fresh=%t err=%v", len(out.Selection.Candidates), fresh != nil && fresh != e, err)
+	}
+	prepared := map[string]bool{"p0": true, "p1": true, "p2": true}
+	seen := 0
+	for _, candidate := range out.Selection.Candidates {
+		if !prepared[candidate.PathID] {
+			continue
+		}
+		seen++
+		if candidate.State != "reachable" || candidate.Reason != "tcp_connect_verified" {
+			t.Fatalf("candidate lost eligibility to precheck/reentry delay: %+v", candidate)
+		}
+	}
+	if err == nil || seen != len(prepared) {
+		t.Fatalf("expected only fixture candidates to be complete, err=%v prepared=%d", err, seen)
 	}
 }
 

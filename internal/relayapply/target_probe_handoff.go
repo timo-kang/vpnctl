@@ -62,7 +62,7 @@ func (e *Engine) prepareTargetProbeHandoff(parent context.Context, entry Entry, 
 	if err != nil || start < 0 {
 		return fail("observation_clock_unavailable")
 	}
-	ctx, cancel := context.WithTimeout(parent, targetObservationWaveDuration)
+	ctx, cancel := context.WithTimeout(parent, MaxTargetProbeDuration)
 	deadline, _ := ctx.Deadline()
 	remaining := time.Until(deadline)
 	if remaining <= 0 || start > time.Duration(1<<63-1)-remaining {
@@ -130,6 +130,10 @@ func (h *targetProbeHandoff) withinLifetime() bool {
 }
 
 func (h *targetProbeHandoff) run(probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) {
+	h.runWithin(nil, probe)
+}
+
+func (h *targetProbeHandoff) runWithin(limit context.Context, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) {
 	if h == nil || h.attempt == nil {
 		return
 	}
@@ -139,7 +143,7 @@ func (h *targetProbeHandoff) run(probe func(context.Context, Entry, relaycatalog
 		h.Close()
 		return
 	}
-	h.attempt.run(probe)
+	h.attempt.runWithin(limit, probe)
 }
 func (h *targetProbeHandoff) discard(reason string) TargetObservation {
 	if h == nil || h.attempt == nil {

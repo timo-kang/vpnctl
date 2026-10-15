@@ -106,14 +106,30 @@ func (e *Engine) prepareTargetProbe(ctx context.Context, entry Entry, target rel
 // The worker touches only its copied inputs, context and result. No Engine,
 // cache, journal or lease mutation is used while the socket proof runs.
 func (a *targetProbeAttempt) run(probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) {
+	a.runWithin(nil, probe)
+}
+
+// runWithin keeps the context and values captured during precheck while also
+// enforcing the independently bounded socket wave started after ownership is
+// released.
+func (a *targetProbeAttempt) runWithin(limit context.Context, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) {
 	if a == nil || a.ctx == nil || !a.state.CompareAndSwap(0, 1) {
 		return
 	}
-	ctx, done := relayobserve.Phase(a.ctx, "probe")
-	ctx, cancel := context.WithTimeout(ctx, a.timeout)
+	parent := a.ctx
+	var stop func() bool
+	var cancel context.CancelFunc
+	if limit != nil {
+		parent, cancel = context.WithCancel(a.ctx)
+		stop = context.AfterFunc(limit, cancel)
+		defer stop()
+		defer cancel()
+	}
+	ctx, done := relayobserve.Phase(parent, "probe")
+	ctx, probeCancel := context.WithTimeout(ctx, a.timeout)
 	a.proof, a.err = probe(ctx, cloneProbeEntry(a.entry), cloneProbeTarget(a.target))
 	a.observation.ObservedAt = time.Now()
-	cancel()
+	probeCancel()
 	done()
 	if _, shared := a.ctx.Value(observationCheckerKey{}).(ownedObservationChecker); shared {
 		a.floor, a.clockErr = leaseBootTime()

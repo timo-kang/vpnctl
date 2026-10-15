@@ -174,15 +174,17 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 		}
 		out.Paths = append(out.Paths, observation)
 	}
-	wave, stopWave := context.WithTimeout(ctx, targetObservationWaveDuration)
-	defer stopWave()
+	waveParent := ctx
 	if k, ok := e.backend.(nodeKernel); ok {
 		k.run = observationInventory(k.run, leaseBootTime)
 		// observePreparedGated checks the live lease at both boundaries itself.
 		// Avoid the duplicate middle LeaseStatus inside nodeKernel.Check; no
 		// lease/guard/timer data is shared or cached.
-		wave = context.WithValue(wave, observationCheckerKey{}, ownedObservationChecker{e, k.kernel.Check})
+		waveParent = context.WithValue(ctx, observationCheckerKey{}, ownedObservationChecker{e, k.kernel.Check})
 	}
+	wave, stopWave := context.WithTimeout(waveParent, targetObservationWaveDuration)
+	defer stopWave()
+	handoffBudgetExhausted := false
 	relayobserve.Mark(ctx, "observation_wave_started")
 	if ownership == nil {
 		gates := newObservationGates(len(jobs))
@@ -201,7 +203,7 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 		// tickets, then the complete cache/FIFO and namespace lifetime is yielded.
 		tickets := make([]*targetProbeHandoff, len(jobs))
 		for i, job := range jobs {
-			pre, done := relayobserve.Phase(wave, "precheck")
+			pre, done := relayobserve.Phase(waveParent, "precheck")
 			ticket, failed := e.prepareTargetProbeHandoff(pre, job.entry, target, timeout, out.Paths[job.index], leaseBootTime)
 			done()
 			if ticket == nil {
@@ -218,7 +220,7 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 			goto observationWaveComplete
 		}
 		oldEngine := e
-		if err := ownership.Release(wave, e); err != nil {
+		if err := ownership.Release(ctx, e); err != nil {
 			for _, ticket := range tickets {
 				if ticket != nil {
 					ticket.Close()
@@ -226,6 +228,7 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 			}
 			return out, e, errors.Join(errTargetObservationOwnership, err)
 		}
+		probeWave, stopProbeWave := context.WithTimeout(ctx, targetObservationWaveDuration)
 		var workers sync.WaitGroup
 		for i, ticket := range tickets {
 			if ticket == nil {
@@ -234,20 +237,27 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 			workers.Add(1)
 			go func(i int, ticket *targetProbeHandoff) {
 				defer workers.Done()
-				ticket.run(probe)
+				ticket.runWithin(probeWave, probe)
 			}(i, ticket)
 		}
 		workers.Wait()
-		if wave.Err() != nil {
+		probeErr := probeWave.Err()
+		probeDeadline, _ := probeWave.Deadline()
+		if probeErr == nil && !time.Now().Before(probeDeadline) {
+			probeErr = context.DeadlineExceeded
+		}
+		handoffBudgetExhausted = errors.Is(probeErr, context.DeadlineExceeded)
+		stopProbeWave()
+		if probeErr != nil {
 			for i, ticket := range tickets {
 				if ticket != nil {
 					out.Paths[jobs[i].index] = ticket.discard("observation_deadline")
 					ticket.Close()
 				}
 			}
-			return out, e, wave.Err()
+			return out, e, probeErr
 		}
-		fresh, err := ownership.Reacquire(wave)
+		fresh, err := ownership.Reacquire(ctx)
 		if fresh != nil {
 			e = fresh
 			resumed = fresh // Return every non-nil acquired owner, including rejected ones.
@@ -274,7 +284,7 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 			if ticket == nil {
 				continue
 			}
-			post, done := relayobserve.Phase(wave, "postcheck")
+			post, done := relayobserve.Phase(ctx, "postcheck")
 			out.Paths[jobs[i].index] = e.finishTargetProbeHandoff(post, ticket)
 			done()
 		}
@@ -285,7 +295,7 @@ observationWaveComplete:
 	// A candidate's deadline callback can finish its worker before the shared
 	// context publishes Err. Report exhaustion from the deadline itself too.
 	deadline, _ := wave.Deadline() // WithTimeout above always supplies one.
-	if errors.Is(wave.Err(), context.DeadlineExceeded) || !time.Now().Before(deadline) {
+	if ownership != nil && handoffBudgetExhausted || ownership == nil && (errors.Is(wave.Err(), context.DeadlineExceeded) || !time.Now().Before(deadline)) {
 		out.Reason = "observation_budget_exhausted"
 	}
 
