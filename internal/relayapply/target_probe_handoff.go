@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"vpnctl/internal/relaycache"
@@ -13,10 +14,11 @@ import (
 	"vpnctl/internal/relayobserve"
 )
 
+var errTargetObservationOwnership = errors.New("target observation ownership changed")
+
 // A process-local, one-use observation ticket. It carries no grant to renew a
-// lease or change routes. The caller must close the old Engine AND Store, then
-// acquire fresh ownership within this ticket's original context deadline.
-// CLI ownership release is deliberately not enabled by this validation contract.
+// lease or change routes. The coordinator closes the old Engine AND Store, then
+// acquires fresh ownership within this ticket's original context deadline.
 type targetProbeHandoff struct {
 	attempt                                        *targetProbeAttempt
 	scope                                          *relaycache.ObservationScope
@@ -25,6 +27,15 @@ type targetProbeHandoff struct {
 	startedBoot, untilBoot                         time.Duration
 	clock                                          func() (time.Duration, error)
 	cancel                                         context.CancelFunc
+}
+
+// TargetObservationOwnership releases and reacquires every process-wide
+// resource which serializes this node. Reacquire must load a new Store and
+// journal. It must honor ctx and return an Engine that the caller owns and
+// closes. Errors leave the prior Engine closed when Release succeeded.
+type TargetObservationOwnership interface {
+	Release(ctx context.Context, engine *Engine) error
+	Reacquire(ctx context.Context) (*Engine, error)
 }
 
 func preparationDigest(e *Engine, path string) [32]byte {
@@ -129,6 +140,12 @@ func (h *targetProbeHandoff) run(probe func(context.Context, Entry, relaycatalog
 		return
 	}
 	h.attempt.run(probe)
+}
+func (h *targetProbeHandoff) discard(reason string) TargetObservation {
+	if h == nil || h.attempt == nil {
+		return unknownProbe(TargetObservation{}, "probe_attempt_unavailable")
+	}
+	return h.attempt.discard(reason)
 }
 func (h *targetProbeHandoff) Close() {
 	if h == nil {

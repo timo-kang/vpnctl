@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -119,8 +120,13 @@ func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig,
 	if err != nil {
 		return relayapply.TargetReconcileResult{SchemaVersion: 1, StartedAt: started, FinishedAt: time.Now(), Selection: relayselect.Decision{SchemaVersion: 1, NodeID: node.Name, TargetID: target, State: "unknown", Reason: nodeAdmissionReason(err), Candidates: []relayselect.Candidate{}}, Application: relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: target, State: "blocked", Reason: nodeAdmissionReason(err)}}, err
 	}
-	defer closeNodeRelayEngine(ctx, cache, engine)
-	return engine.ReconcileTarget(ctx, target, controller, selector, timeout)
+	ownership := &nodeRelayObservationOwnership{node: node, dir: dir, cache: cache, engine: engine}
+	defer ownership.Close(ctx)
+	out, resumed, err := engine.ReconcileTargetWithHandoff(ctx, target, controller, selector, timeout, ownership)
+	if resumed != ownership.engine {
+		err = errors.Join(err, fmt.Errorf("reconcile returned an engine outside its ownership session"))
+	}
+	return out, err
 }
 
 func collectTargetObservation(ctx context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration) (out relayapply.TargetReport) {

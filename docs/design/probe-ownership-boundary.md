@@ -1,11 +1,11 @@
 # Candidate probe ownership boundary
 
-Candidate observation currently holds the node cache/FIFO and namespace ownership
-through preparation, overlapping socket proofs, final checks and application.
-Reducing that lifetime requires a separate transaction protocol. This change
-makes the existing proof boundary explicit and rejects stale evidence before it
-can affect a different journal owner. It does not release ownership or establish
-a latency improvement.
+The standard `ObserveTarget` path holds node cache/FIFO and namespace ownership
+through preparation, overlapping socket proofs and final checks. The explicit
+`ReconcileTargetWithHandoff` path now releases both while bounded candidate TCP
+proofs run, then reacquires and reloads before using those results. It keeps
+application proof and route transactions under fresh ownership. This safety
+boundary does not by itself establish a latency or continuity improvement.
 
 ## Current contract
 
@@ -68,7 +68,6 @@ A current lease failure must still invoke its existing fail-closed enforcement;
 a stale identity must not invoke it. Existing wave ordering, overlap, connect
 limits and cancellation tests remain applicable.
 
-The journal-change tests deliberately model the proposed future handoff boundary.
-They do not imply that another supported actor can change a journal while the
-current production ownership lock is held. Performance qualification belongs to
-the later implementation that actually changes that lock lifetime.
+The journal-change tests exercise the real release/reentry path and reject
+stale reservations before route mutation. They do not qualify end-to-end
+recovery latency or production fleet behavior.

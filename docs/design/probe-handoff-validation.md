@@ -1,9 +1,10 @@
 # Candidate observation across ownership lifetimes
 
-This is the private validation boundary for a future ownership handoff. The
-production CLI still holds ownership during observation. No scheduling, route
-actuation, observation threshold or lease-renewal policy changes here, and no
-latency improvement is claimed.
+This is the ownership handoff contract used by `vpnctl node relay target`.
+Plain `ObserveTarget` retains ownership. Reconciliation releases cache/FIFO and
+namespace ownership during bounded candidate TCP proofs, then reloads state
+before selecting or applying. It does not change thresholds or lease policy,
+and no latency improvement is claimed.
 
 ## Identity and authority
 
@@ -31,8 +32,8 @@ old Engine's shared inventory checker cannot serve the new Engine.
 
 A current, owned lease found inactive still receives the existing blocking
 behavior. Successful observation never renews/rearms a lease or authorizes a
-route write. Application proof, selection, commit and rollback need their own
-fresh ownership checks in the later coordinator.
+route write. Selection, application proof, commit and rollback continue only on the fresh
+Engine while its ownership remains held.
 
 ## Lifetime and worker discipline
 
