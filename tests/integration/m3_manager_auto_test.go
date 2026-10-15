@@ -207,6 +207,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		if err != "" {
 			t.Fatal(err)
 		}
+		row["packet_snapshot_sequence"] = len(packets)
 		counts := map[string]map[string]int{}
 		adminReconfigurationFailures := map[string]int{
 			"tcp-new": 0, "tcp-existing": 0, "udp": 0, "independent-app": 0,

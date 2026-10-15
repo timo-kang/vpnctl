@@ -531,10 +531,14 @@ def validate_external_reconfiguration(step, packets):
     begin = step.get('begin_monotonic_ns', 0)
     ready = step.get('ready_observed_monotonic_ns', 0)
     end = step.get('end_monotonic_ns', 0)
+    offset = step.get('packet_offset')
+    snapshot = step.get('packet_snapshot_sequence')
     if (not isinstance(evidence, dict)
             or set(evidence) != {'window_ms', 'failed_packets', 'post_recovery_failures',
                                 'post_recovery_successes', 'recovery_after_action_ms'}
-            or not begin < ready <= end):
+            or not begin < ready <= end
+            or type(offset) is not int or type(snapshot) is not int
+            or not 0 <= offset <= snapshot <= len(packets)):
         raise RuntimeError('missing external manager reconfiguration evidence')
     expected_window = (ready - begin) / 1e6
     if (type(evidence.get('window_ms')) not in (int, float)
@@ -551,7 +555,9 @@ def validate_external_reconfiguration(step, packets):
     for packet in packets:
         kind = packet.get('kind')
         at = packet.get('begin_monotonic_ns', 0)
-        if kind not in AUTO_PACKET_KINDS or not begin <= at <= end:
+        sequence = packet.get('sequence', 0)
+        if (kind not in AUTO_PACKET_KINDS or not begin <= at <= end
+                or not offset < sequence <= snapshot):
             continue
         if packet.get('ok') is True:
             observed[kind]['ok'] += 1
