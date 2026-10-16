@@ -305,13 +305,13 @@ func TestBootGuardWorker(t *testing.T) {
 
 // Public read-only kernel evidence; no approval cache or relay mutations.
 func snapshotBootGuards() error {
-	links, err := netlink.LinkList()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	links, err := guardSamplingLinks(ctx, netlink.LinkList)
 	if err != nil {
 		return err
 	}
 	out := map[string]any{}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	for _, l := range links {
 		a := l.Attrs()
 		if l.Type() != "wireguard" || (!strings.HasPrefix(a.Name, "vd") && !strings.HasPrefix(a.Name, "vr")) {

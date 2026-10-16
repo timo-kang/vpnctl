@@ -13,6 +13,22 @@ type observationCheckerKey struct{}
 type observationFloorKey struct{}
 type observationChecker func(context.Context, Entry, bool) (bool, error)
 
+// A wave cache belongs to one Engine lifetime; another Engine must collect afresh.
+type ownedObservationChecker struct {
+	owner *Engine
+	check observationChecker
+}
+
+func (e *Engine) targetProbeChecker(ctx context.Context) observationChecker {
+	if shared, ok := ctx.Value(observationCheckerKey{}).(ownedObservationChecker); ok && shared.owner == e {
+		return shared.check
+	}
+	if k, ok := e.backend.(nodeKernel); ok {
+		return k.kernel.Check
+	}
+	return e.backend.Check
+}
+
 // Only the serialized pre/post ownership checks within one wave share these
 // public namespace inventories. Per-interface state, nft/BPF leases, approvals,
 // underlay collection and the TCP/route proof remain live. A postcheck cannot
