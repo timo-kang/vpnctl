@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -55,6 +56,36 @@ func appVMRead(t *testing.T, path string) appVMProgress {
 	return r
 }
 
+// drainAppVMClient gives failed trials the same chance to emit final request
+// events as the normal termination path. It never changes the test verdict or
+// stops another client's cleanup. These clients write directly to files, so
+// Wait joins only the child (there is no inherited stdout pipe to drain).
+func drainAppVMClient(p *networkProcess, timeout time.Duration) string {
+	if p == nil {
+		return "not_started"
+	}
+	if p.stopped {
+		return "already_stopped"
+	}
+	p.stopped = true
+	_ = p.cmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan error, 1)
+	go func() { done <- p.cmd.Wait() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			return "failed"
+		}
+		return "drained"
+	case <-timer.C:
+		_ = p.cmd.Process.Kill()
+		<-done
+		return "forced"
+	}
+}
+
 // All mutations below require a provisioned VM identity before fixture/cgroup
 // creation. Neither the host namespace nor physical network devices are used.
 func TestVMUplinkApplications(t *testing.T) {
@@ -92,8 +123,11 @@ add rule ip m3 postrouting oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr { 19
 		"publication_boot_ns": nil, "receipt_boot_ns": nil, "route_applied_boot_ns": nil}
 	phases := []map[string]any{}
 	var clients [2]*networkProcess
+	clientCleanup := map[string]string{}
+	report["client_cleanup"] = clientCleanup
 	// Registered before process cleanups: failures preserve available final/progress
-	// evidence, but never qualify killed clients as completed trials.
+	// evidence after bounded client drain. Cleanup-time responses are diagnostic
+	// only: they cannot finish a phase or qualify a failed trial.
 	t.Cleanup(func() {
 		report["completed"] = !t.Failed()
 		report["phases"] = phases
@@ -164,6 +198,10 @@ add rule ip m3 postrouting oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr { 19
 		command = append(command, "--address", addresses[i]+":9193", "--server-name", "uplink.test", "--ca", ca,
 			"--runtime", dirs[i], "--server-uid", "0", "--target", name, "--duration", duration, "--progress", progress[i])
 		clients[i] = startNetworkProcessInGroup(t, robot.file, f.robot, filepath.Join(f.results, "client-"+name+".json"), []string{"GOMAXPROCS=1"}, command...)
+		// Register immediately, before membership/readiness can fail. LIFO runs
+		// this before the generic forced stop and before report collection.
+		client := clients[i]
+		t.Cleanup(func() { clientCleanup[name] = drainAppVMClient(client, 12*time.Second) })
 		robot.requireMembership(t, watches[i].cmd.Process.Pid, true)
 		robot.requireMembership(t, clients[i].cmd.Process.Pid, true)
 		eventually(t, 5*time.Second, "app progress ready", func() error { _, err := os.Stat(progress[i]); return err })

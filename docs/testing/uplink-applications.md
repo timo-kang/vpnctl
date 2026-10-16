@@ -73,6 +73,16 @@ progress snapshots, phase boundaries, sampled route results, and resource costs.
 `observer.jsonl` contains the validated per-app measurements. Reports and failed
 private VM disks are retained; do not publish unreviewed logs or private disks.
 
+On a test failure, each started app gets SIGTERM and up to 12 seconds to emit its
+final bounded request history before forced termination. `client_cleanup`
+records `drained`, `failed`, `forced`, or `already_stopped` per started app.
+Cleanup-time events are diagnostic only: the original failed verdict and
+unfinished phase remain unchanged. An unresponsive client may still lack final
+events; its last progress is not a replacement for the complete history.
+Terminal worker results also include a filtered 32 KiB log tail, or
+`worker_log_error: unavailable` if that optional log cannot be read safely.
+Missing or unsafe logs never replace the original worker exit or reports.
+
 Every operation has a new request ID and nonce. Only an exact response over a
 verified TLS connection counts as correct. The validator reconciles counters
 against the complete history, rejects duplicate/out-of-order IDs and socket

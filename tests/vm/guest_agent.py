@@ -398,6 +398,12 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError('app fixture not started')
                 result = {'exit': WORKER.poll()}
                 if result['exit'] is not None:
+                    # Optional diagnostics must retain the original exit and
+                    # reports even if the worker log is absent or unsafe.
+                    try:
+                        result['worker_log'] = direct_artifact(ROOT / 'worker.log', 32768, tail=True)
+                    except (OSError, RuntimeError):
+                        result['worker_log_error'] = 'unavailable'
                     result['reports'] = []
                     total = 0
                     for path in sorted((ROOT / 'results').glob('*/uplink-applications.json')):
