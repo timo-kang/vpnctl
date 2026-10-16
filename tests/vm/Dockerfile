@@ -27,5 +27,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=guest / /guest-root/
 RUN rm -rf /guest-root/run /guest-root/.dockerenv && mkdir /guest-root/run
 COPY observer.py /opt/vpnctl-vm/observer.py
+COPY app_recovery.py /opt/vpnctl-vm/app_recovery.py
 COPY make_image.py /opt/vpnctl-vm/make_image.py
 ENTRYPOINT ["python3", "/opt/vpnctl-vm/observer.py"]

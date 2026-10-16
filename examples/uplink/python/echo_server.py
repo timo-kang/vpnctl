@@ -10,7 +10,11 @@ import threading
 import time
 
 
-def serve(address, cert, key, stop, *, ready=None):
+def serve(address, cert, key, stop, *, ready=None, session_seconds=30,
+          max_requests=256):
+    if (type(session_seconds) not in (int, float) or not 0 < session_seconds <= 600
+            or type(max_requests) is not int or not 1 <= max_requests <= 12000):
+        raise ValueError('invalid session bounds')
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
     context.load_cert_chain(cert, key)
@@ -22,9 +26,9 @@ def serve(address, cert, key, stop, *, ready=None):
         try:
             raw.settimeout(2)
             with context.wrap_socket(raw, server_side=True) as conn:
-                deadline = time.monotonic() + 30
+                deadline = time.monotonic() + session_seconds
                 buffer = bytearray()
-                for _ in range(256):
+                for _ in range(max_requests):
                     if stop.is_set() or time.monotonic() >= deadline:
                         return
                     read_deadline = min(deadline, time.monotonic() + 2)
@@ -88,6 +92,8 @@ def main():
     parser.add_argument('--cert', required=True)
     parser.add_argument('--key', required=True)
     parser.add_argument('--duration', type=float, default=120)
+    parser.add_argument('--session-seconds', type=float, default=30)
+    parser.add_argument('--max-requests', type=int, default=256)
     args = parser.parse_args()
     if not 1 <= args.duration <= 600 or not 1 <= args.port <= 65535:
         raise ValueError('invalid duration or port')
@@ -97,7 +103,8 @@ def main():
     timer = threading.Timer(args.duration, stop.set)
     timer.start()
     try:
-        serve((args.host, args.port), args.cert, args.key, stop)
+        serve((args.host, args.port), args.cert, args.key, stop,
+              session_seconds=args.session_seconds, max_requests=args.max_requests)
     finally:
         stop.set()
         timer.cancel()

@@ -37,7 +37,9 @@ def guard():
 @lru_cache(maxsize=1)
 def binary_hashes():
     result = {}
-    for name in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1', 'vpnctl-lease-v2'):
+    names = ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1', 'vpnctl-lease-v2', 'uplink-go')
+    modules = tuple('uplink-python/' + name + '.py' for name in ('main', 'probe', 'transport', 'vpnctl_uplink', 'echo_server'))
+    for name in names + modules:
         with (Path('/opt/vpnctl-vm') / name).open('rb') as f:
             result[name] = hashlib.file_digest(f, 'sha256').hexdigest()
     return result
@@ -202,10 +204,24 @@ def direct_artifact_guard(path, tail=False):
 
 def direct_artifact(path, limit, tail=False):
     direct_artifact_guard(path, tail)
-    with path.open('rb') as stream:
-        offset = max(0, path.stat().st_size - limit) if tail else 0
-        stream.seek(offset)
-        raw = stream.read(limit if tail else limit + 1)
+    # Guarding a name does not pin the file: a producer may replace it before
+    # open. Never follow the replacement or block on a FIFO/device. Size and
+    # content must come from the same verified, regular file descriptor.
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    finally:
+        os.close(parent)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError('direct artifact must be a regular file')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            offset = max(0, info.st_size - limit) if tail else 0
+            stream.seek(offset)
+            raw = stream.read(limit if tail else limit + 1)
+    finally:
+        os.close(fd)
     if len(raw) > limit:
         raise RuntimeError('direct artifact exceeds size limit: ' + path.name)
     if offset:
@@ -362,6 +378,39 @@ class Handler(BaseHTTPRequestHandler):
                 result = start_direct(req)
             elif action == 'direct-result':
                 result = direct_result(req)
+            elif action == 'uplink-apps-start':
+                paths = req.get('paths')
+                if type(paths) is not int or paths not in (4, 8):
+                    raise ValueError('explicit 4/8 app path profile required')
+                with LOCK:
+                    if WORKER is not None:
+                        raise RuntimeError('only one fixture per VM')
+                    env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
+                               VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
+                               VPNCTL_APP_PATHS=str(paths), TMPDIR='/tmp', GOMAXPROCS='2', GORACE='atexit_sleep_ms=0')
+                    with (ROOT / 'worker.log').open('wb') as log:
+                        WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test',
+                            '-test.run=^TestVMUplinkApplications$', '-test.v', '-test.timeout=12m'],
+                            env=env, stdout=log, stderr=log, start_new_session=True)
+                result = {'started': True}
+            elif action == 'uplink-apps-result':
+                if WORKER is None:
+                    raise RuntimeError('app fixture not started')
+                result = {'exit': WORKER.poll()}
+                if result['exit'] is not None:
+                    # Optional diagnostics must retain the original exit and
+                    # reports even if the worker log is absent or unsafe.
+                    try:
+                        result['worker_log'] = direct_artifact(ROOT / 'worker.log', 32768, tail=True)
+                    except (OSError, RuntimeError):
+                        result['worker_log_error'] = 'unavailable'
+                    result['reports'] = []
+                    total = 0
+                    for path in sorted((ROOT / 'results').glob('*/uplink-applications.json')):
+                        total += path.stat().st_size
+                        if total > 8 * 1024 * 1024:
+                            raise RuntimeError('app diagnostics exceed limit')
+                        result['reports'].append({'report': json.loads(path.read_text())})
             elif action in ('application-mixed-start', 'application-preparation-start', 'application-approval-start', 'application-capacity-start'):
                 with LOCK:
                     if WORKER is not None:
@@ -396,6 +445,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError('mixed application fixture not started')
                 result = {'exit': WORKER.poll()}
                 if result['exit'] is not None:
+                    # Keep the actual test assertion even when setup/cleanup
+                    # fails before a structured measurement exists. Optional
+                    # diagnostics must never hide the original worker exit.
+                    try:
+                        result['worker_log'] = direct_artifact(ROOT / 'worker.log', 32768, tail=True)
+                    except (OSError, RuntimeError):
+                        result['worker_log_error'] = 'unavailable'
                     reports, total = [], 0
                     filename = 'application-mixed-candidates.json' if action != 'application-approval-result' else 'application-approval.json'
                     for report in sorted((ROOT / 'results').glob('*/' + filename)):
