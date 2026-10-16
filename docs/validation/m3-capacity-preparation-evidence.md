@@ -35,13 +35,29 @@ The VM collector preserves early reports and logs, while its existing exit,
 case-count, payload, lease, freshness and steady-window requirements still reject
 an incomplete case. No timeout or qualification threshold changes in this fix.
 
+## Worker diagnostics
+
+A completed mixed/preparation/approval/capacity worker includes at most 32 KiB
+of its final log using the existing sensitive-keyword filtering. A cut first
+line is discarded, and diagnostics do not change the worker exit or verdict.
+Missing or rejected logs produce `worker_log_error: unavailable` while retaining
+the reports. Running workers do not export a partial log.
+
+Artifact reads pin the parent directory and open the file without following a
+symlink. They reject non-regular files before reading, so a FIFO cannot block
+result collection. File size and content come from the same descriptor, and
+all opened descriptors close even when validation or reading fails. These
+checks apply to the shared direct-artifact reader as well as the new worker tail.
+
 ## Verification and limits
 
 Host-safe subprocess regressions inject preparation Fatal, Skip, cleanup Fatal,
 successful completion and a failure after completion. They exercise the real Go
 cleanup order without creating network namespaces or cgroups. VM runner tests
 exercise result collection and rejection of unmeasured cases without starting a
-VM. The reliability workflow runs these regressions and the existing real VM
+VM. Worker-log regressions also cover a blocking FIFO, a symlink replacement
+after the path check, and repeated directory rejection without descriptor
+leaks. The reliability workflow runs these regressions and the existing real VM
 capacity matrix.
 
 This change does not recover missing measurements from older runs and does not

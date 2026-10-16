@@ -2,6 +2,9 @@
 """Bounded worker diagnostics without a VM or network worker."""
 import io
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -63,8 +66,64 @@ class CapacityWorkerFailureEvidenceTests(unittest.TestCase):
                     result = self.request(root, 1)
                     self.assertEqual(result['exit'], 1)
                     self.assertEqual(result['reports'], [])
-                    self.assertEqual(result['worker_log_error'], 'unavailable')
+                    self.assertEqual(result.get('worker_log_error'), 'unavailable')
                     self.assertNotIn('sensitive', json.dumps(result))
+
+    def test_fifo_log_does_not_block_terminal_result(self):
+        # Bound the regression itself: the old blocking open must fail this
+        # test without hanging the full suite or leaving a blocked thread.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            os.mkfifo(root / 'worker.log', 0o600)
+            code = """
+import json, sys
+from pathlib import Path
+from test_worker_failure_evidence import CapacityWorkerFailureEvidenceTests
+result = CapacityWorkerFailureEvidenceTests().request(Path(sys.argv[1]), 1)
+print(json.dumps(result))
+"""
+            try:
+                child = subprocess.run([sys.executable, '-c', code, str(root)],
+                                       cwd=Path(__file__).parent, capture_output=True,
+                                       text=True, timeout=5, check=True)
+            except subprocess.TimeoutExpired:
+                self.fail('non-regular log blocked terminal worker result')
+            result = json.loads(child.stdout)
+            self.assertEqual(result['exit'], 1)
+            self.assertEqual(result['reports'], [])
+            self.assertEqual(result.get('worker_log_error'), 'unavailable')
+            self.assertNotIn('worker_log', result)
+
+    def test_directory_log_rejection_does_not_leak_descriptors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'worker.log').mkdir()
+            before = len(os.listdir('/proc/self/fd'))
+            for _ in range(10):
+                result = self.request(root, 1)
+                self.assertEqual(result.get('worker_log_error'), 'unavailable')
+                self.assertEqual(result['exit'], 1)
+            self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+
+    def test_log_replaced_after_guard_does_not_export_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log, private = root / 'worker.log', root / 'private.txt'
+            log.write_text('original worker output')
+            private.write_text('sensitive replacement contents')
+            original_guard = guest_agent.direct_artifact_guard
+
+            def swap_after_guard(path, tail=False):
+                original_guard(path, tail)
+                log.unlink()
+                log.symlink_to(private)
+
+            with mock.patch.object(guest_agent, 'direct_artifact_guard', swap_after_guard):
+                result = self.request(root, 1)
+            self.assertEqual(result['exit'], 1)
+            self.assertEqual(result['reports'], [])
+            self.assertEqual(result.get('worker_log_error'), 'unavailable')
+            self.assertNotIn('sensitive replacement contents', json.dumps(result))
 
     def test_running_worker_does_not_read_partial_log(self):
         with tempfile.TemporaryDirectory() as directory:
