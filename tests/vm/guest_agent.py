@@ -204,10 +204,24 @@ def direct_artifact_guard(path, tail=False):
 
 def direct_artifact(path, limit, tail=False):
     direct_artifact_guard(path, tail)
-    with path.open('rb') as stream:
-        offset = max(0, path.stat().st_size - limit) if tail else 0
-        stream.seek(offset)
-        raw = stream.read(limit if tail else limit + 1)
+    # Guarding a name does not pin the file: a producer may replace it before
+    # open. Never follow the replacement or block on a FIFO/device. Size and
+    # content must come from the same verified, regular file descriptor.
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    finally:
+        os.close(parent)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError('direct artifact must be a regular file')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            offset = max(0, info.st_size - limit) if tail else 0
+            stream.seek(offset)
+            raw = stream.read(limit if tail else limit + 1)
+    finally:
+        os.close(fd)
     if len(raw) > limit:
         raise RuntimeError('direct artifact exceeds size limit: ' + path.name)
     if offset:
