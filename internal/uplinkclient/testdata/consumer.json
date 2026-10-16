@@ -1,0 +1,1189 @@
+{
+  "clock_domain": "v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "now": "2000000000",
+  "base": {
+    "schema_version": 1,
+    "type": "snapshot",
+    "cursor": "cccccccccccccccccccccccccccccccc:1",
+    "snapshot": {
+      "schema_version": 1,
+      "target_id": "app",
+      "producer_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": "1",
+      "availability": "reachable",
+      "freshness": "fresh",
+      "reason": "unbound_tcp_connect_verified",
+      "clock_domain": "v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "observed_boot_ns": "1000000000",
+      "valid_until_boot_ns": "11000000000",
+      "observed_age_ms": 1000,
+      "remaining_validity_ms": 9000,
+      "path_id": "p00",
+      "path_revision": "1",
+      "evidence": "unbound_tcp_connect",
+      "session_continuity": "not_established"
+    }
+  },
+  "cases": [
+    {
+      "name": "fresh_snapshot",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        }
+      ]
+    },
+    {
+      "name": "additive_fields",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "extra": {
+              "bounded": true
+            },
+            "snapshot": {
+              "extra": 17
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        }
+      ]
+    },
+    {
+      "name": "expiry_without_publication",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "clock",
+          "now": "11000000000",
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "delayed_delivery",
+      "steps": [
+        {
+          "op": "clock",
+          "now": "11000000000"
+        },
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "clock_failure_latches",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "clock",
+          "fail": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        },
+        {
+          "op": "clock",
+          "fail": false
+        },
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "revision": "2",
+              "observed_boot_ns": "1500000000",
+              "valid_until_boot_ns": "11500000000"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        }
+      ]
+    },
+    {
+      "name": "clock_reversal_latches",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "clock",
+          "now": "1900000000",
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        },
+        {
+          "op": "clock",
+          "now": "2100000000"
+        },
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "api_loss_does_not_imply_payload_failure",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "disconnect",
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh",
+            "api_available": false
+          }
+        },
+        {
+          "op": "clock",
+          "now": "11000000000",
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "duplicate_does_not_extend_deadline",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "clock",
+          "now": "10999999999"
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "remaining_validity_ms": 30000
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "clock",
+          "now": "11000000000",
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "same_revision_cannot_extend_deadline",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "valid_until_boot_ns": "12000000000"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "out_of_order",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "revision": "2"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {},
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "revision_reversal",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "revision": "2"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:3"
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "producer_restart",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "revision": "19"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "type": "reset",
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "producer_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh",
+            "reset": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "transport_restart",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "begin"
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "type": "reset",
+            "cursor": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:1"
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh",
+            "reset": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "retired_stream_cannot_replace_new",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "begin"
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "type": "reset",
+            "cursor": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:1",
+            "snapshot": {
+              "producer_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh",
+            "reset": true
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {},
+          "error": true,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          },
+          "epoch": 1
+        }
+      ]
+    },
+    {
+      "name": "publisher_expiry_same_revision",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "availability": "unknown",
+              "freshness": "stale",
+              "path_id": "",
+              "evidence": "",
+              "reason": "observation_expired",
+              "remaining_validity_ms": 0
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:3"
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unknown_snapshot",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "availability": "unknown",
+              "freshness": "unknown",
+              "reason": "observation_unavailable",
+              "observed_boot_ns": null,
+              "valid_until_boot_ns": null,
+              "observed_age_ms": null,
+              "path_id": null,
+              "evidence": null,
+              "remaining_validity_ms": 0
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "blocked_snapshot",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "availability": "blocked",
+              "reason": "approval_denied_or_expired",
+              "evidence": "",
+              "path_id": ""
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "blocked",
+            "freshness": "fresh"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unreachable_snapshot",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "availability": "unreachable",
+              "reason": "approved_candidates_unreachable",
+              "evidence": "bound_tcp_connect",
+              "path_id": ""
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "unreachable",
+            "freshness": "fresh"
+          }
+        }
+      ]
+    },
+    {
+      "name": "schema",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "schema_version": 2
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "float_schema",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "schema_version": 1.0
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "boolean_schema",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "schema_version": true
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "target",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "target_id": "other"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "numeric_revision",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "revision": 1
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "noncanonical_revision",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "revision": "01"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "overflow_revision",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "revision": "18446744073709551616"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing_evidence",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "evidence": null
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing_deadline",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "valid_until_boot_ns": null
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "false_session_claim",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "session_continuity": "preserved"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unbounded_ttl",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "valid_until_boot_ns": "32000000000"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid_cursor",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "truncated"
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "boolean_remaining",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "remaining_validity_ms": true
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "null_target",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "target_id": null
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "large_uint64",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "revision": "18446744073709551615"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        }
+      ]
+    },
+    {
+      "name": "clock_domain_mismatch",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "clock_domain": "v1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "duplicate_key",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          },
+          "raw": "{\"schema_version\":2,\"schema_version\":1,\"type\":\"snapshot\",\"cursor\":\"cccccccccccccccccccccccccccccccc:1\",\"snapshot\":{\"schema_version\":1,\"target_id\":\"app\",\"producer_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":\"1\",\"availability\":\"reachable\",\"freshness\":\"fresh\",\"reason\":\"unbound_tcp_connect_verified\",\"clock_domain\":\"v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"observed_boot_ns\":\"1000000000\",\"valid_until_boot_ns\":\"11000000000\",\"observed_age_ms\":1000,\"remaining_validity_ms\":9000,\"path_id\":\"p00\",\"path_revision\":\"1\",\"evidence\":\"unbound_tcp_connect\",\"session_continuity\":\"not_established\"}}"
+        }
+      ]
+    },
+    {
+      "name": "trailing_json",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          },
+          "raw": "{\"schema_version\":1,\"type\":\"snapshot\",\"cursor\":\"cccccccccccccccccccccccccccccccc:1\",\"snapshot\":{\"schema_version\":1,\"target_id\":\"app\",\"producer_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":\"1\",\"availability\":\"reachable\",\"freshness\":\"fresh\",\"reason\":\"unbound_tcp_connect_verified\",\"clock_domain\":\"v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"observed_boot_ns\":\"1000000000\",\"valid_until_boot_ns\":\"11000000000\",\"observed_age_ms\":1000,\"remaining_validity_ms\":9000,\"path_id\":\"p00\",\"path_revision\":\"1\",\"evidence\":\"unbound_tcp_connect\",\"session_continuity\":\"not_established\"}}{}"
+        }
+      ]
+    },
+    {
+      "name": "new_revision_needs_new_observation",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "revision": "2",
+              "valid_until_boot_ns": "12000000000"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "additive_duplicate_metadata",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "extra": 1
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "extra": 2
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        }
+      ]
+    },
+    {
+      "name": "future_clock_does_not_revive",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "clock",
+          "now": "100000000000",
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        },
+        {
+          "op": "clock",
+          "now": "2000000000"
+        },
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "escaped_canonical_decimal",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          },
+          "raw": "{\"schema_version\": 1, \"type\": \"snapshot\", \"cursor\": \"cccccccccccccccccccccccccccccccc:1\", \"snapshot\": {\"schema_version\": 1, \"target_id\": \"app\", \"producer_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"revision\": \"\\u0031\", \"availability\": \"reachable\", \"freshness\": \"fresh\", \"reason\": \"unbound_tcp_connect_verified\", \"clock_domain\": \"v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\", \"observed_boot_ns\": \"1000000000\", \"valid_until_boot_ns\": \"11000000000\", \"observed_age_ms\": 1000, \"remaining_validity_ms\": 9000, \"path_id\": \"p00\", \"path_revision\": \"1\", \"evidence\": \"unbound_tcp_connect\", \"session_continuity\": \"not_established\"}}"
+        }
+      ]
+    },
+    {
+      "name": "within_stream_transport_change",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:1"
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "same_cursor_conflicting_payload",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "snapshot": {
+              "path_id": "p01"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "closed_stream_callbacks_retired",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false
+        },
+        {
+          "op": "disconnect"
+        },
+        {
+          "op": "receive",
+          "patch": {},
+          "error": true,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh",
+            "api_available": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "negative_zero_integer",
+      "steps": [
+        {
+          "op": "receive",
+          "raw": "{\"schema_version\": 1, \"type\": \"snapshot\", \"cursor\": \"cccccccccccccccccccccccccccccccc:1\", \"snapshot\": {\"schema_version\": 1, \"target_id\": \"app\", \"producer_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"revision\": \"1\", \"availability\": \"reachable\", \"freshness\": \"fresh\", \"reason\": \"unbound_tcp_connect_verified\", \"clock_domain\": \"v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\", \"observed_boot_ns\": \"1000000000\", \"valid_until_boot_ns\": \"11000000000\", \"observed_age_ms\": 1000, \"remaining_validity_ms\": -0, \"path_id\": \"p00\", \"path_revision\": \"1\", \"evidence\": \"unbound_tcp_connect\", \"session_continuity\": \"not_established\"}}",
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "sequence_reversal_same_publication",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2"
+          },
+          "error": false
+        },
+        {
+          "op": "receive",
+          "patch": {},
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "revision_reversal_ascending_sequence",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "revision": "2"
+            }
+          },
+          "error": false
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:3"
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unknown_cannot_erase_observation_watermark",
+      "steps": [
+        {
+          "op": "receive",
+          "patch": {},
+          "error": false
+        },
+        {
+          "op": "clock",
+          "fail": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        },
+        {
+          "op": "clock",
+          "fail": false
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:2",
+            "snapshot": {
+              "revision": "2",
+              "availability": "unknown",
+              "freshness": "unknown",
+              "reason": "observation_unavailable",
+              "path_id": null,
+              "evidence": null,
+              "observed_boot_ns": null,
+              "valid_until_boot_ns": null
+            }
+          },
+          "error": false
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:3",
+            "snapshot": {
+              "revision": "3"
+            }
+          },
+          "error": true,
+          "expect": {
+            "availability": "unknown",
+            "freshness": "stale"
+          }
+        },
+        {
+          "op": "receive",
+          "patch": {
+            "cursor": "cccccccccccccccccccccccccccccccc:4",
+            "snapshot": {
+              "revision": "4",
+              "observed_boot_ns": "1500000000",
+              "valid_until_boot_ns": "11500000000"
+            }
+          },
+          "error": false,
+          "expect": {
+            "availability": "reachable",
+            "freshness": "fresh"
+          }
+        }
+      ]
+    }
+  ]
+}
