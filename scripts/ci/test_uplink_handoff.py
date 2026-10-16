@@ -52,7 +52,7 @@ class FixedUplinkValidationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.validate_trial(root, row, prepared, 0)
             runner.validate_trial(root, row, prepared, 1)  # Retain early failure.
-            evidence = {'image': prepared['image'], 'cpu_layout': 'split', 'guest_vcpus': 2, 'cpu_max': ['200000', '100000'], 'cost_details': row['cost_details']}
+            evidence = {'image': prepared['image'], 'cpu_layout': 'split', 'guest_vcpus': 2, 'cpu_max': ['200000', '100000'], 'cost_details': row['cost_details'], 'runtime_costs': row['runtime_costs']}
             (artifacts / 'runner.json').write_text(json.dumps(evidence))
             verdict = {'case': row['case'], 'completed': True, 'qualified': False, 'unsupported_reason':'diagnostic_only_no_qualification'}
             for change in ({'qualified': True}, {'completed': False}, {'case': 'another-case'}, {'unsupported_reason': 'other'}):

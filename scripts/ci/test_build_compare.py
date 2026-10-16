@@ -10,12 +10,14 @@ class BuildComparisonTests(unittest.TestCase):
     def test_predeclared_build_pairs_and_reverse_order(self):
         rows = runner.schedule()
         self.assertEqual(len(rows), 8)
-        pairs = [(r['build_race'], r['cost_details']) for r in rows]
+        pairs = [(r['build_race'], r['runtime_costs']) for r in rows]
         self.assertEqual(pairs[:4], [('1',False), ('0',False), ('0',True), ('1',True)])
         self.assertEqual(pairs[4:], list(reversed(pairs[:4])))
         self.assertTrue(all(r['case']=='application-capacity-8' for r in rows))
         for row in rows:
-            self.assertEqual('--cost-details' in runner.arguments(row), row['cost_details'])
+            self.assertIs(row['cost_details'], True)
+            self.assertIn('--cost-details', runner.arguments(row))
+            self.assertEqual('--runtime-costs' in runner.arguments(row), row['runtime_costs'])
         self.assertTrue(all(r['robot_cpus']=='0.5' and r['outer_cpus']=='2' and
                             r['layout']=='split' and r['api_load'] is False for r in rows))
         self.assertFalse(any(r.get('expected_injected_failure') for r in rows))
@@ -66,7 +68,7 @@ class BuildComparisonTests(unittest.TestCase):
                 root=Path(directory);(root/'artifacts').mkdir()
                 row=dict(runner.schedule()[0],case=case,build_race='0')
                 prepared={'image':{'hash':'fixed'}}
-                evidence=dict(image=prepared['image'],cpu_layout='split',guest_vcpus=2,cpu_max=['200000','100000'],cost_details=row['cost_details'])
+                evidence=dict(image=prepared['image'],cpu_layout='split',guest_vcpus=2,cpu_max=['200000','100000'],cost_details=row['cost_details'],runtime_costs=row['runtime_costs'])
                 (root/'artifacts/runner.json').write_text(json.dumps(evidence))
                 verdict=dict(case=case,completed=True,qualified=False)
                 path=root/'artifacts/verdicts.json';path.write_text(json.dumps([verdict]))
@@ -84,13 +86,33 @@ class BuildComparisonTests(unittest.TestCase):
                 root=Path(directory);artifacts=root/'artifacts';artifacts.mkdir()
                 row=dict(runner.schedule()[0],cost_details=details)
                 prepared={'image':{'fixed':'hash'}}
-                evidence=dict(image=prepared['image'],cpu_layout='split',guest_vcpus=2,cpu_max=['200000','100000'])
+                evidence=dict(image=prepared['image'],cpu_layout='split',guest_vcpus=2,cpu_max=['200000','100000'],runtime_costs=row['runtime_costs'])
                 (artifacts/'verdicts.json').write_text(json.dumps([dict(case=row['case'],completed=True,qualified=True)]))
                 for value in (None,not details,1 if details else 0):
                     (artifacts/'runner.json').write_text(json.dumps(dict(evidence,cost_details=value)))
                     with self.assertRaises(ValueError): runner.validate_trial(root,row,prepared,0)
                 (artifacts/'runner.json').write_text(json.dumps(dict(evidence,cost_details=details)))
                 runner.validate_trial(root,row,prepared,0)
+
+    def test_recorded_runtime_mode_cannot_be_missing_or_mislabeled(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); artifacts = root/'artifacts'; artifacts.mkdir()
+                row = dict(runner.schedule()[0], runtime_costs=enabled)
+                prepared = {'image': {'fixed': 'hash'}}
+                evidence = dict(image=prepared['image'], cpu_layout='split', guest_vcpus=2,
+                                cpu_max=['200000', '100000'], cost_details=True)
+                (artifacts/'verdicts.json').write_text(json.dumps([dict(case=row['case'], completed=True, qualified=True)]))
+                for change in ({}, {'runtime_costs': None}, {'runtime_costs': not enabled}, {'runtime_costs': int(enabled)}):
+                    (artifacts/'runner.json').write_text(json.dumps(dict(evidence, **change)))
+                    for exit_code in (0, 1):
+                        with self.subTest(change=change, exit_code=exit_code), self.assertRaises(ValueError):
+                            runner.validate_trial(root, row, prepared, exit_code)
+                (artifacts/'runner.json').write_text(json.dumps(dict(evidence, runtime_costs=enabled)))
+                runner.validate_trial(root, row, prepared, 0)
 
     def test_build_environment_reuses_base_and_removes_external_overrides(self):
         row={'build_race':'0','outer_cpus':'2'}
