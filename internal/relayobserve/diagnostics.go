@@ -42,6 +42,7 @@ type Diagnostics struct {
 	BootAvailable      bool                 `json:"boottime_available"`
 	Phases             map[string]PhaseCost `json:"phases"`
 	Details            *CostDetails         `json:"details,omitempty"`
+	RuntimeCost        *RuntimeCost         `json:"runtime_cost,omitempty"`
 }
 type Recorder struct {
 	mu                 sync.Mutex
@@ -54,6 +55,7 @@ type Recorder struct {
 	bootOK             bool
 	phases             map[string]PhaseCost
 	details            *CostDetails
+	runtimeStart       *runtimeSample
 }
 type scope struct {
 	recorder *Recorder
@@ -104,14 +106,21 @@ func Start(ctx context.Context) (context.Context, *Recorder) {
 	if os.Getenv("VPNCTL_COST_DETAILS") == "1" {
 		r.details = &CostDetails{Steps: map[string]PhaseCost{}, Commands: map[string]ProcessCost{}}
 	}
+	if os.Getenv("VPNCTL_RUNTIME_COSTS") == "1" {
+		r.runtimeStart = readRuntimeSample()
+	}
 	return context.WithValue(ctx, scopeKey{}, scope{r, "other"}), r
 }
 func (r *Recorder) Snapshot() *Diagnostics {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var runtimeCost *RuntimeCost
+	if r.runtimeStart != nil {
+		runtimeCost = runtimeCostBetween(r.runtimeStart, readRuntimeSample())
+	}
 	boot, ok := bootTime()
 	mono, monoOK := monotonicTime()
-	d := &Diagnostics{Elapsed: time.Since(r.started), BootAvailable: ok && r.bootOK && boot >= r.boot, Phases: map[string]PhaseCost{},
+	d := &Diagnostics{RuntimeCost: runtimeCost, Elapsed: time.Since(r.started), BootAvailable: ok && r.bootOK && boot >= r.boot, Phases: map[string]PhaseCost{},
 		MonotonicAvailable: monoOK && r.monoOK && mono >= r.mono, CheckpointsDropped: r.checkpointsDropped,
 		Checkpoints: append([]Checkpoint(nil), r.checkpoints...)}
 	if d.MonotonicAvailable {

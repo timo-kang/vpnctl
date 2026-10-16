@@ -48,7 +48,7 @@ predeclared order. Filter completed cycles using the original frozen receive
 window and retain original failures, missing/truncated evidence and command CPU
 availability. Do not substitute a later cleanup observation for a failed window.
 
-This slice does not yet measure GC or Go runnable latency. If substantial parent
-runtime cost remains plausible after command attribution, collect bounded
-runtime/metrics or traces in a separate controlled experiment. Do not rewrite in
+The independent [runtime cost experiment](runtime-cost-attribution.md) adds
+optional parent CPU and bounded Go counters with its own off/on controls. Child
+accounting alone does not measure GC or Go runnable latency. Do not rewrite in
 Rust based on elapsed-minus-child-CPU or on non-reproduction.

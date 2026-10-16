@@ -32,6 +32,13 @@ def cost_detail_env(request):
     return {'VPNCTL_COST_DETAILS': '1' if value else '0'}
 
 
+def runtime_cost_env(request):
+    value = request.get('runtime_costs', False)
+    if type(value) is not bool:
+        raise ValueError('runtime costs must be boolean')
+    return {'VPNCTL_RUNTIME_COSTS': '1' if value else '0'}
+
+
 def guard():
     if 'vpnctl_vm_test' not in ARGS or len(TOKEN) != 32:
         raise RuntimeError('not an explicitly provisioned disposable VM')
@@ -457,6 +464,7 @@ class Handler(BaseHTTPRequestHandler):
                                    VPNCTL_CAPACITY_REBUILD='1' if rebuild else '0',
                                    VPNCTL_CAPACITY_UPLINK_API='load' if uplink_api else 'off')
                         env.update(cost_detail_env(req))
+                        env.update(runtime_cost_env(req))
                     with (ROOT / 'worker.log').open('wb') as log:
                         test = {'application-mixed-start': 'TestNetns_M3TargetApplicationMixedCandidates',
                                 'application-preparation-start': 'TestNetns_M3PreparationCapacity',
