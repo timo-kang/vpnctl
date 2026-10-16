@@ -12,7 +12,7 @@ import traceback
 from isolated_evidence import (checked_source, digest, prepare_kvm, read_command,
                               require_disposable_runner, work_directories, write_json)
 
-SOURCE = '63eccecea58fa8b82a410fc015a15439cc0efbc9'
+SOURCE = '2fd9b52858ea95a8505833fab78b428c49344dc9'
 BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
             'vpnctl-lease-v2', 'uplink-go'} | {
     'uplink-python/' + name + '.py' for name in

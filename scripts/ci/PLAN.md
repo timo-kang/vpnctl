@@ -4,11 +4,23 @@ Experiment-only branch; never merge this workflow into main. Existing PR CI
 and all prior failures remain unchanged. This is functional integration and
 resource-bound qualification, not a performance adoption claim.
 
-Product and harness source: `63eccecea58fa8b82a410fc015a15439cc0efbc9`.
+Product and harness source: `2fd9b52858ea95a8505833fab78b428c49344dc9`.
 The original publisher time/withdrawal, fresh ownership and safety gates remain
 unchanged. The source combines #230, its downstream consumers and #247 plus the
-reviewed publisher/handoff integration fix. Its local race/vet/build and Python
-regressions passed; this experiment provides the missing guest-kernel exercise.
+reviewed publisher/handoff integration fix and #248 observation-cache lifetime
+repair. The original and reacquired Engines restore live kernel checks after
+observation. Local race/vet/build and the focused lifetime regressions passed;
+this experiment exercises that repaired composition in the guest kernel.
+
+The earlier source `63eccec` completed all ten trials in run 38838720264; four
+passed and six failed. All 8-candidate capacity profiles failed, including API
+off. Both actual app profiles passed on that earlier source only. The encrypted
+evidence remains intact. This new source includes a required correctness repair
+that changes which live checks execute; it is not an unchanged-source retry.
+No broader capacity or performance improvement is assumed. The same predeclared
+schedule is kept to expose the impact of restoring those checks, not to select
+only passing profiles. Compare outcomes with their source/image identities;
+these separate builds cannot establish a matched performance improvement.
 
 One disposable GitHub-hosted ubuntu-24.04 runner builds race binaries and the
 Docker image once via the original `scripts/test-vm.sh`. The first scheduled
