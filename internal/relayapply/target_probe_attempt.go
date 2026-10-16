@@ -66,6 +66,7 @@ func (a *targetProbeAttempt) current(e *Engine) bool {
 func (e *Engine) prepareTargetProbe(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation) (*targetProbeAttempt, TargetObservation) {
 	entry = cloneProbeEntry(entry)
 	out.ObservedAt = time.Time{}
+	out.ProbeFailure = nil
 	fail := func(reason string) (*targetProbeAttempt, TargetObservation) { return nil, unknownProbe(out, reason) }
 	generation, err := relayobserve.UnderlayGeneration(ctx, entry.Candidate.UnderlayID)
 	if err != nil {
@@ -113,6 +114,11 @@ func (a *targetProbeAttempt) run(probe func(context.Context, Entry, relaycatalog
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	a.proof, a.err = probe(ctx, cloneProbeEntry(a.entry), cloneProbeTarget(a.target))
 	a.observation.ObservedAt = time.Now()
+	var evidenceFailure *targetProbeError
+	if errors.As(a.err, &evidenceFailure) {
+		failure := evidenceFailure.failure
+		a.observation.ProbeFailure = &failure
+	}
 	cancel()
 	done()
 	if _, shared := a.ctx.Value(observationCheckerKey{}).(ownedObservationChecker); shared {
