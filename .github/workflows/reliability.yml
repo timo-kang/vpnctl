@@ -1,5 +1,5 @@
 # Experiment-only branch; the main reliability gates are unchanged.
-name: Race versus ordinary build experiment
+name: Maintenance cost attribution experiment
 on:
   workflow_dispatch:
 permissions:
@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validation:
-    name: Fixed source and kernel, race versus ordinary build
+    name: Fixed source and kernel, detail accounting controls
     runs-on: ubuntu-24.04
     timeout-minutes: 310
     env:

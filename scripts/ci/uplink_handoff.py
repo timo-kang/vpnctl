@@ -12,7 +12,7 @@ import traceback
 from isolated_evidence import (checked_source, digest, prepare_kvm, read_command,
                               require_disposable_runner, work_directories, write_json)
 
-SOURCE = '7af8b777a13a0acef5c685c6cbf817201a945b9e'
+SOURCE = 'b53147e9862601c308f79381c1e6807518639696'
 BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
             'vpnctl-lease-v2', 'uplink-go'} | {
     'uplink-python/' + name + '.py' for name in
@@ -20,14 +20,12 @@ BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
 
 
 def schedule():
-    # Two repetitions per diagnostic cell, then original full app contracts.
-    cells = [('application-capacity-8', '1'), ('application-capacity-8', '0'),
-             ('uplink-diag-api', '0'), ('uplink-diag-api', '1')]
+    # Same binary/image within each build; detail overhead has its own control.
+    cells = [('1', False), ('0', False), ('0', True), ('1', True)]
     cells += list(reversed(cells))
-    cells += [('uplink-apps-8', '1'), ('uplink-apps-8', '0')]
-    return [dict(sequence=i, case=case, layout='split', api_load=False,
-                 outer_cpus='2', robot_cpus='0.5', build_race=race)
-            for i, (case, race) in enumerate(cells, 1)]
+    return [dict(sequence=i, case='application-capacity-8', layout='split', api_load=False,
+                 outer_cpus='2', robot_cpus='0.5', build_race=race, cost_details=details)
+            for i, (race, details) in enumerate(cells, 1)]
 
 
 def binary_build_info(path, race):
@@ -86,7 +84,7 @@ def build_environment(row, artifacts, base_image=None):
 def arguments(row):
     args = ['--case', row['case'], '--robot-cpus', row['robot_cpus'],
             '--cpu-layout', row['layout']]
-    return args + (['--uplink-api-load'] if row['api_load'] else [])
+    return args + (['--uplink-api-load'] if row['api_load'] else []) + (['--cost-details'] if row['cost_details'] else [])
 
 
 def execute_schedule(root, invoke):
@@ -173,6 +171,7 @@ def validate_trial(destination, row, prepared, exit_code):
         runner = json.loads(evidence.read_text())
         if (runner['image'] != prepared['image'] or runner['cpu_layout'] != row['layout']
                 or runner['guest_vcpus'] != int(row['outer_cpus'])
+                or runner.get('cost_details') is not row['cost_details']
                 or int(runner['cpu_max'][0]) != int(row['outer_cpus']) * int(runner['cpu_max'][1])):
             raise ValueError('trial_image_or_cpu_drift')
     elif exit_code == 0:

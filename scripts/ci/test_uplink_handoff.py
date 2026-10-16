@@ -27,32 +27,32 @@ class FixedUplinkValidationTests(unittest.TestCase):
                     raise RuntimeError('unavailable image')
                 return 1 if row['sequence'] == 1 else 0
             self.assertEqual(runner.execute_schedule(root, invoke), 1)
-            self.assertEqual(seen, list(range(1,11)))
+            self.assertEqual(seen, list(range(1,9)))
             progress = json.loads((root / 'progress.json').read_text())
-            self.assertEqual([r['exit_code'] for r in progress], [1, 125]+[0]*8)
-            self.assertEqual(json.loads((root / 'complete.json').read_text()), {'invocations': 10, 'all_exit_zero': False})
+            self.assertEqual([r['exit_code'] for r in progress], [1, 125]+[0]*6)
+            self.assertEqual(json.loads((root / 'complete.json').read_text()), {'invocations': 8, 'all_exit_zero': False})
             with self.assertRaises(FileExistsError):
                 runner.execute_schedule(root, invoke)
 
     def test_late_failure_is_preserved_not_converted_to_success(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
-            self.assertEqual(runner.execute_schedule(root, lambda row, destination: 1 if row['sequence']==10 else 0),1)
+            self.assertEqual(runner.execute_schedule(root, lambda row, destination: 1 if row['sequence']==8 else 0),1)
             progress=json.loads((root/'progress.json').read_text())
-            self.assertEqual([row['exit_code'] for row in progress],[0]*9+[1])
-            self.assertEqual(json.loads((root/'complete.json').read_text()),{'invocations':10,'all_exit_zero':False})
+            self.assertEqual([row['exit_code'] for row in progress],[0]*7+[1])
+            self.assertEqual(json.loads((root/'complete.json').read_text()),{'invocations':8,'all_exit_zero':False})
 
     def test_zero_exit_requires_explicit_diagnostic_nonqualification(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifacts = root / 'artifacts'
             artifacts.mkdir()
-            row = runner.schedule()[2]
+            row = dict(runner.schedule()[2], case='uplink-diag-api')
             prepared = {'image': {'fixed': 'hash'}}
             with self.assertRaises(ValueError):
                 runner.validate_trial(root, row, prepared, 0)
             runner.validate_trial(root, row, prepared, 1)  # Retain early failure.
-            evidence = {'image': prepared['image'], 'cpu_layout': 'split', 'guest_vcpus': 2, 'cpu_max': ['200000', '100000']}
+            evidence = {'image': prepared['image'], 'cpu_layout': 'split', 'guest_vcpus': 2, 'cpu_max': ['200000', '100000'], 'cost_details': row['cost_details']}
             (artifacts / 'runner.json').write_text(json.dumps(evidence))
             verdict = {'case': row['case'], 'completed': True, 'qualified': False, 'unsupported_reason':'diagnostic_only_no_qualification'}
             for change in ({'qualified': True}, {'completed': False}, {'case': 'another-case'}, {'unsupported_reason': 'other'}):
