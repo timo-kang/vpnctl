@@ -12,7 +12,7 @@ import traceback
 from isolated_evidence import (checked_source, digest, prepare_kvm, read_command,
                               require_disposable_runner, work_directories, write_json)
 
-SOURCE = '2fd9b52858ea95a8505833fab78b428c49344dc9'
+SOURCE = '9c0700fd393657a51d7b696eb6ba834b0c713a4d'
 BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
             'vpnctl-lease-v2', 'uplink-go'} | {
     'uplink-python/' + name + '.py' for name in
@@ -20,15 +20,7 @@ BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
 
 
 def schedule():
-    profiles = [('application-capacity-4', 'split', False),
-                ('application-capacity-4', 'split', True),
-                ('application-capacity-8', 'split', True),
-                ('application-capacity-8', 'split', False),
-                ('application-capacity-rebuild-8', 'split', False),
-                ('application-capacity-rebuild-8', 'split', True),
-                ('application-capacity-8', 'shared', True),
-                ('application-capacity-8', 'shared', False),
-                ('uplink-apps-4', 'split', False), ('uplink-apps-8', 'split', False)]
+    profiles = [('uplink-apps-4', 'split', False), ('uplink-apps-8', 'split', False)]
     return [dict(sequence=i, case=case, layout=layout, api_load=load,
                  outer_cpus='2' if layout == 'split' else '1', robot_cpus='0.5')
             for i, (case, layout, load) in enumerate(profiles, 1)]

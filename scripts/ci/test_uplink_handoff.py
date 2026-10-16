@@ -10,15 +10,14 @@ from isolated_evidence import digest
 
 
 class FixedUplinkValidationTests(unittest.TestCase):
-    def test_exact_schedule_keeps_each_off_on_pair_and_apps(self):
+    def test_exact_schedule_keeps_only_the_two_diagnostic_app_profiles(self):
         rows = runner.schedule()
-        self.assertEqual(len(rows), 10)
-        self.assertEqual([r['sequence'] for r in rows], list(range(1, 11)))
-        self.assertEqual([r['api_load'] for r in rows[:8]], [False, True, True, False, False, True, True, False])
-        for a, b in zip(rows[:8:2], rows[1:8:2]):
-            for key in ('case', 'layout', 'outer_cpus', 'robot_cpus'):
-                self.assertEqual(a[key], b[key])
-        self.assertEqual([r['case'] for r in rows[8:]], ['uplink-apps-4', 'uplink-apps-8'])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([r['sequence'] for r in rows], [1, 2])
+        self.assertEqual([r['case'] for r in rows], ['uplink-apps-4', 'uplink-apps-8'])
+        for row in rows:
+            self.assertEqual((row['layout'], row['outer_cpus'], row['robot_cpus'], row['api_load']),
+                             ('split', '2', '0.5', False))
         for r in rows:
             args = runner.arguments(r)
             self.assertEqual('--uplink-api-load' in args, r['api_load'])
@@ -35,10 +34,10 @@ class FixedUplinkValidationTests(unittest.TestCase):
                     raise RuntimeError('unavailable image')
                 return 1 if row['sequence'] == 1 else 0
             self.assertEqual(runner.execute_schedule(root, invoke), 1)
-            self.assertEqual(seen, list(range(1, 11)))
+            self.assertEqual(seen, [1, 2])
             progress = json.loads((root / 'progress.json').read_text())
-            self.assertEqual([r['exit_code'] for r in progress], [1, 125] + [0]*8)
-            self.assertEqual(json.loads((root / 'complete.json').read_text()), {'invocations': 10, 'all_exit_zero': False})
+            self.assertEqual([r['exit_code'] for r in progress], [1, 125])
+            self.assertEqual(json.loads((root / 'complete.json').read_text()), {'invocations': 2, 'all_exit_zero': False})
             with self.assertRaises(FileExistsError):
                 runner.execute_schedule(root, invoke)
 
@@ -131,7 +130,7 @@ class FixedUplinkValidationTests(unittest.TestCase):
         self.assertIn('--read-only', args)
         self.assertIn('type=bind,src=/tmp/private/image,dst=/input,readonly', args)
         self.assertIn('type=bind,src=/tmp/private/runtime-02,dst=/work', args)
-        self.assertIn('--uplink-api-load', args)
+        self.assertNotIn('--uplink-api-load', args)
         self.assertNotIn('--privileged', args)
 
     def test_runtime_is_retained_until_container_termination_is_confirmed(self):

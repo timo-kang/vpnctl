@@ -1,5 +1,5 @@
 # Experiment-only branch; the main reliability gates are unchanged.
-name: Uplink handoff isolated qualification
+name: Uplink app failure evidence validation
 on:
   workflow_dispatch:
 permissions:
@@ -9,9 +9,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validation:
-    name: Fixed source and guest image, API load and app recovery
+    name: Fixed source and guest image, 4/8-path app evidence
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    timeout-minutes: 90
     env:
       GOMAXPROCS: '2'
       PYTHONDONTWRITEBYTECODE: '1'
@@ -38,7 +38,7 @@ jobs:
       - name: Verify fixed schedule, failure retention, and resource boundaries
         run: python3 -B -m unittest discover -s scripts/ci -p test_uplink_handoff.py -v
       - name: Execute the fixed schedule and retain every failure
-        timeout-minutes: 270
+        timeout-minutes: 75
         run: python3 -B scripts/ci/uplink_handoff.py > "$VPNCTL_MATCHED_ROOT/controller.log" 2>&1
       - name: Encrypt evidence using the off-runner private key recipient
         id: seal
