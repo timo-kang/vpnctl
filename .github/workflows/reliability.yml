@@ -1,5 +1,5 @@
 # Experiment-only branch; the main reliability gates are unchanged.
-name: App outage hypothesis experiment
+name: Race versus ordinary build experiment
 on:
   workflow_dispatch:
 permissions:
@@ -9,9 +9,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validation:
-    name: Fixed image API and CPU controls, injected stall
+    name: Fixed source and kernel, race versus ordinary build
     runs-on: ubuntu-24.04
-    timeout-minutes: 270
+    timeout-minutes: 310
     env:
       GOMAXPROCS: '2'
       PYTHONDONTWRITEBYTECODE: '1'
@@ -36,9 +36,9 @@ jobs:
           install -d -m 700 "$VPNCTL_MATCHED_ROOT"
           printf 'VPNCTL_MATCHED_ROOT=%s\n' "$VPNCTL_MATCHED_ROOT" >> "$GITHUB_ENV"
       - name: Verify fixed schedule, failure retention, and resource boundaries
-        run: python3 -B -m unittest discover -s scripts/ci -p test_uplink_handoff.py -v
+        run: python3 -B -m unittest discover -s scripts/ci -p 'test_*.py' -v
       - name: Execute the fixed schedule and retain every failure
-        timeout-minutes: 245
+        timeout-minutes: 285
         run: python3 -B scripts/ci/uplink_handoff.py > "$VPNCTL_MATCHED_ROOT/controller.log" 2>&1
       - name: Encrypt evidence using the off-runner private key recipient
         id: seal

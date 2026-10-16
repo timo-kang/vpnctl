@@ -10,22 +10,12 @@ from isolated_evidence import digest
 
 
 class FixedUplinkValidationTests(unittest.TestCase):
-    def test_exact_schedule_reverses_cells_and_retains_injected_failure(self):
-        rows = runner.schedule()
-        self.assertEqual(len(rows), 9)
-        self.assertEqual([r['sequence'] for r in rows], list(range(1,10)))
-        cells=[(r['case'],r['robot_cpus']) for r in rows]
-        self.assertEqual(cells[:4], [('uplink-diag-control','0.5'),('uplink-diag-api','0.5'),('uplink-diag-api','1'),('uplink-diag-control','1')])
-        self.assertEqual(cells[4:8],list(reversed(cells[:4])))
-        self.assertEqual(cells[8],('uplink-diag-stall','0.5'))
-        self.assertEqual([r['expected_injected_failure'] for r in rows],[False]*8+[True])
-        for row in rows:
-            self.assertEqual((row['layout'],row['outer_cpus'],row['api_load']),('split','2',False))
-        for r in rows:
-            args = runner.arguments(r)
-            self.assertEqual('--uplink-api-load' in args, r['api_load'])
-            self.assertEqual(args[args.index('--case')+1], r['case'])
-            self.assertEqual(args[args.index('--cpu-layout')+1], r['layout'])
+    def test_arguments_preserve_case_layout_and_load(self):
+        for row in runner.schedule():
+            args = runner.arguments(row)
+            self.assertEqual('--uplink-api-load' in args, row['api_load'])
+            self.assertEqual(args[args.index('--case')+1], row['case'])
+            self.assertEqual(args[args.index('--cpu-layout')+1], row['layout'])
 
     def test_failures_and_infrastructure_errors_do_not_retry_or_stop_schedule(self):
         seen = []
@@ -37,27 +27,27 @@ class FixedUplinkValidationTests(unittest.TestCase):
                     raise RuntimeError('unavailable image')
                 return 1 if row['sequence'] == 1 else 0
             self.assertEqual(runner.execute_schedule(root, invoke), 1)
-            self.assertEqual(seen, list(range(1,10)))
+            self.assertEqual(seen, list(range(1,11)))
             progress = json.loads((root / 'progress.json').read_text())
-            self.assertEqual([r['exit_code'] for r in progress], [1, 125]+[0]*7)
-            self.assertEqual(json.loads((root / 'complete.json').read_text()), {'invocations': 9, 'all_exit_zero': False})
+            self.assertEqual([r['exit_code'] for r in progress], [1, 125]+[0]*8)
+            self.assertEqual(json.loads((root / 'complete.json').read_text()), {'invocations': 10, 'all_exit_zero': False})
             with self.assertRaises(FileExistsError):
                 runner.execute_schedule(root, invoke)
 
-    def test_expected_stall_failure_is_preserved_not_converted_to_success(self):
+    def test_late_failure_is_preserved_not_converted_to_success(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
-            self.assertEqual(runner.execute_schedule(root, lambda row, destination: 1 if row['expected_injected_failure'] else 0),1)
+            self.assertEqual(runner.execute_schedule(root, lambda row, destination: 1 if row['sequence']==10 else 0),1)
             progress=json.loads((root/'progress.json').read_text())
-            self.assertEqual([row['exit_code'] for row in progress],[0]*8+[1])
-            self.assertEqual(json.loads((root/'complete.json').read_text()),{'invocations':9,'all_exit_zero':False})
+            self.assertEqual([row['exit_code'] for row in progress],[0]*9+[1])
+            self.assertEqual(json.loads((root/'complete.json').read_text()),{'invocations':10,'all_exit_zero':False})
 
     def test_zero_exit_requires_explicit_diagnostic_nonqualification(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifacts = root / 'artifacts'
             artifacts.mkdir()
-            row = runner.schedule()[0]
+            row = runner.schedule()[2]
             prepared = {'image': {'fixed': 'hash'}}
             with self.assertRaises(ValueError):
                 runner.validate_trial(root, row, prepared, 0)
@@ -118,17 +108,18 @@ class FixedUplinkValidationTests(unittest.TestCase):
             fields = f'suite_commit={runner.SOURCE}\nsuite_dirty=false\nsuite_race=1\nimage_id=sha256:' + 'a'*64 + '\n'
             manifest.write_text(fields)
             st = work.stat()
-            with mock.patch.object(runner, 'work_directories', return_value={str(work): (st.st_dev, st.st_ino)}):
-                prepared = runner.prepared_image(root, destination, {})
+            with mock.patch.object(runner, 'work_directories', return_value={str(work): (st.st_dev, st.st_ino)}), \
+                    mock.patch.object(runner, 'binary_build_info', return_value={'fixed': True}):
+                prepared = runner.prepared_image(root, destination, {}, '1')
                 self.assertEqual(prepared['image'], image)
                 self.assertEqual(len(list((root / 'binaries').iterdir())), len(runner.BINARIES))
                 manifest.write_text(fields.replace('suite_race=1', 'suite_race=0'))
                 with self.assertRaises(ValueError):
-                    runner.prepared_image(root, destination, {})
+                    runner.prepared_image(root, destination, {}, '1')
                 manifest.write_text(fields)
                 (work / 'input/vpnctl').write_text('other build')
                 with self.assertRaises(ValueError):
-                    runner.prepared_image(root, destination, {})
+                    runner.prepared_image(root, destination, {}, '1')
 
     def test_container_isolation_preserves_fixed_image_and_distinct_runtime(self):
         row = runner.schedule()[1]

@@ -20,13 +20,67 @@ BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
 
 
 def schedule():
-    # Two predeclared repetitions per cell, reversed order in the second block.
-    cells = [('control', '0.5'), ('api', '0.5'), ('api', '1'), ('control', '1'),
-             ('control', '1'), ('api', '1'), ('api', '0.5'), ('control', '0.5'),
-             ('stall', '0.5')]
-    return [dict(sequence=i, case='uplink-diag-' + mode, layout='split', api_load=False,
-                 outer_cpus='2', robot_cpus=cpu, expected_injected_failure=mode == 'stall')
-            for i, (mode, cpu) in enumerate(cells, 1)]
+    # Two repetitions per diagnostic cell, then original full app contracts.
+    cells = [('application-capacity-8', '1'), ('application-capacity-8', '0'),
+             ('uplink-diag-api', '0'), ('uplink-diag-api', '1')]
+    cells += list(reversed(cells))
+    cells += [('uplink-apps-8', '1'), ('uplink-apps-8', '0')]
+    return [dict(sequence=i, case=case, layout='split', api_load=False,
+                 outer_cpus='2', robot_cpus='0.5', build_race=race)
+            for i, (case, race) in enumerate(cells, 1)]
+
+
+def binary_build_info(path, race):
+    lines = read_command(['go', 'version', '-m', str(path)]).splitlines()
+    if not lines or not re.fullmatch(r'.+: go[0-9]+\.[^ ]+', lines[0]):
+        raise ValueError('Go_build_information_missing')
+    settings = {}
+    for line in lines[1:]:
+        fields = line.strip().split('\t', 1)
+        if len(fields) == 2 and fields[0] == 'build' and '=' in fields[1]:
+            key, value = fields[1].split('=', 1)
+            if key in settings:
+                raise ValueError('duplicate_Go_build_setting')
+            settings[key] = value
+    if (race not in ('0', '1') or (settings.get('-race') == 'true') != (race == '1')
+            or settings.get('-race') not in (None, 'true', 'false')
+            or settings.get('GOOS') != 'linux' or settings.get('GOARCH') != 'amd64'):
+        raise ValueError('Go_build_mode_mismatch')
+    return dict(version=lines[0].rsplit(': ', 1)[1], settings=settings)
+
+
+def validate_build_pair(race, ordinary):
+    if (race['build_race'] != '1' or ordinary['build_race'] != '0'
+            or race['image_id'] != ordinary['image_id']
+            or race['image']['kernel'] != ordinary['image']['kernel']):
+        raise ValueError('build_pair_base_mismatch')
+    for name in ('vmlinuz', 'initrd'):
+        if race['image']['sha256'][name] != ordinary['image']['sha256'][name]:
+            raise ValueError('build_pair_kernel_mismatch')
+    for name in BINARIES:
+        if name.startswith('uplink-python/') and race['image']['binaries'][name] != ordinary['image']['binaries'][name]:
+            raise ValueError('build_pair_python_mismatch')
+    for name in ('vpnctl', 'integration.test', 'uplink-go'):
+        first, second = race['build_info'][name], ordinary['build_info'][name]
+        # -race is the only allowed compiler setting difference. Legacy
+        # migration fixtures use separate temporary paths and are not executed
+        # by these cases; retain their hashes without claiming byte equality.
+        settings = [{k: v for k, v in item['settings'].items() if k != '-race'}
+                    for item in (first, second)]
+        if (first['version'] != second['version'] or settings[0] != settings[1]
+                or race['image']['binaries'][name] == ordinary['image']['binaries'][name]):
+            raise ValueError('build_pair_compiler_mismatch')
+
+
+def build_environment(row, artifacts, base_image=None):
+    env = dict(os.environ, GOMAXPROCS='2', VPNCTL_VM_CPUS=row['outer_cpus'],
+               VPNCTL_VM_RACE=row['build_race'], VPNCTL_ARTIFACT_DIR=str(artifacts),
+               VPNCTL_KEEP_VM_WORK='1')
+    for key in ('GOFLAGS', 'VPNCTL_TEST_BINARY', 'VPNCTL_VM_IMAGE', 'VPNCTL_VM_MANAGERS'):
+        env.pop(key, None)
+    if base_image is not None:
+        env['VPNCTL_VM_IMAGE'] = base_image
+    return env
 
 
 def arguments(row):
@@ -57,7 +111,7 @@ def execute_schedule(root, invoke):
     return 0 if passed else 1
 
 
-def prepared_image(root, destination, before):
+def prepared_image(root, destination, before, race):
     created = {name: identity for name, identity in work_directories().items() if name not in before}
     write_json(destination / 'work-ownership.json', dict(before=before, created=created))
     if len(created) != 1:
@@ -74,7 +128,7 @@ def prepared_image(root, destination, before):
     if len(manifests) != 1:
         raise ValueError('image_manifest_missing_or_ambiguous')
     fields = dict(line.split('=', 1) for line in manifests[0].read_text().splitlines() if '=' in line)
-    if fields.get('suite_commit') != SOURCE or fields.get('suite_dirty') != 'false' or fields.get('suite_race') != '1':
+    if fields.get('suite_commit') != SOURCE or fields.get('suite_dirty') != 'false' or fields.get('suite_race') != race:
         raise ValueError('initial_source_or_build_mismatch')
     image = fields.get('image_id', '')
     if not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
@@ -82,7 +136,9 @@ def prepared_image(root, destination, before):
     metadata = json.loads((work / 'image/image.json').read_text())
     if set(metadata['sha256']) != {'vmlinuz', 'initrd', 'guest.qcow2'} or set(metadata['binaries']) != BINARIES:
         raise ValueError('guest_manifest_members_invalid')
-    prepared = dict(work=str(work), identity=identity, image_id=image, image=metadata)
+    prepared = dict(work=str(work), identity=identity, image_id=image, image=metadata,
+                    build_race=race, build_info={name: binary_build_info(work / 'input' / name, race)
+                    for name in ('vpnctl', 'integration.test', 'uplink-go')})
     verify_image(prepared)
     for name, expected in metadata['binaries'].items():
         binary = work / 'input' / name
@@ -93,7 +149,7 @@ def prepared_image(root, destination, before):
             shutil.copyfile(binary, target)
         if digest(target) != expected:
             raise ValueError('retained_binary_digest_mismatch')
-    write_json(root / 'prepared.json', prepared)
+    write_json(root / ('prepared-race' + race + '.json'), prepared)
     return prepared
 
 
@@ -123,10 +179,12 @@ def validate_trial(destination, row, prepared, exit_code):
         raise ValueError('successful_trial_missing_runner_evidence')
     if exit_code == 0:
         verdicts = json.loads((artifacts / 'verdicts.json').read_text())
+        diagnostic = row['case'].startswith('uplink-diag-')
         if (len(verdicts) != 1 or verdicts[0].get('case') != row['case']
-                or verdicts[0].get('completed') is not True or verdicts[0].get('qualified') is not False
-                or verdicts[0].get('unsupported_reason') != 'diagnostic_only_no_qualification'):
-            raise ValueError('diagnostic_trial_missing_explicit_nonqualification')
+                or verdicts[0].get('completed') is not True
+                or verdicts[0].get('qualified') is not (not diagnostic)
+                or (diagnostic and verdicts[0].get('unsupported_reason') != 'diagnostic_only_no_qualification')):
+            raise ValueError('successful_trial_verdict_contract_invalid')
 
 
 def container_command(row, destination, prepared, name, runtime):
@@ -171,31 +229,35 @@ def main():
         github_run_id=os.environ['GITHUB_RUN_ID'], host_boot_id=boot.strip(),
         go_version=read_command(['go', 'version'])))
     shutil.copyfile(repo / 'scripts/ci/PLAN.md', root / 'PLAN.md')
-    prepared = None
+    images, attempted = {}, set()
 
     def invoke(row, destination):
-        nonlocal prepared
         if not checked_source(source, SOURCE) or Path('/proc/sys/kernel/random/boot_id').read_text() != boot:
             raise RuntimeError('source_or_host_boot_changed')
         prepare_kvm(destination)
         with (destination / 'runner.log').open('xb') as log:
-            if row['sequence'] == 1:
+            race = row['build_race']
+            if race not in attempted:
+                attempted.add(race)  # Failed preparation is never rebuilt.
+                if race == '0' and '1' not in images:
+                    raise RuntimeError('shared_base_unavailable_no_independent_rebuild')
                 before = work_directories()
-                env = dict(os.environ, GOMAXPROCS='2', VPNCTL_VM_CPUS=row['outer_cpus'],
-                           VPNCTL_VM_RACE='1', VPNCTL_ARTIFACT_DIR=str(destination / 'artifacts'),
-                           VPNCTL_KEEP_VM_WORK='1')
-                for key in ('GOFLAGS', 'VPNCTL_TEST_BINARY', 'VPNCTL_VM_IMAGE', 'VPNCTL_VM_MANAGERS'):
-                    env.pop(key, None)
+                base = images['1']['image_id'] if race == '0' else None
+                env = build_environment(row, destination / 'artifacts', base)
                 result = subprocess.run(['timeout', '-k', '30s', '35m', 'bash', 'scripts/test-vm.sh',
                                          *arguments(row)], cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT)
                 write_json(destination / 'process-exit.json', dict(exit_code=result.returncode))
-                prepared = prepared_image(root, destination, before)
+                prepared = prepared_image(root, destination, before, race)
+                images[race] = prepared
                 work = Path(prepared['work'])
                 cleanup_runtime(work / 'runtime', 'vpnctl-vm-test-' + work.name.removeprefix('vpnctl-vm.'), log)
             else:
-                if prepared is None:
+                if race not in images:
                     raise RuntimeError('initial_image_unavailable_no_rebuild')
+                prepared = images[race]
                 verify_image(prepared)
+                if len(images) == 2:
+                    validate_build_pair(images['1'], images['0'])
                 runtime = Path(prepared['work']) / f"runtime-{row['sequence']:02d}"
                 runtime.mkdir(mode=0o700)
                 name = 'vpnctl-uplink-' + os.environ['GITHUB_RUN_ID'] + '-' + str(row['sequence'])
@@ -207,6 +269,8 @@ def main():
                 finally:
                     cleanup_runtime(runtime, name, log)
             write_json(destination / 'fixed-image.json', prepared)
+            if len(images) == 2:
+                validate_build_pair(images['1'], images['0'])
             verify_image(prepared)
             validate_trial(destination, row, prepared, result.returncode)
             if Path('/proc/sys/kernel/random/boot_id').read_text() != boot:
