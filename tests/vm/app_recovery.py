@@ -154,3 +154,33 @@ def validate_report(row, paths):
             require(len(routes) == 2 and all(r.get('applied') is True and r.get('selection', {}).get('desired_path_id') == path for r in routes), 'required route change unproven')
         measurements.append(measured)
     return measurements
+
+
+def validate_diagnostic(row, mode, cpu):
+    """Experimental two-phase evidence only; never a 15-phase qualification."""
+    require(row.get('completed') is True and row.get('schema_version') == 1
+            and row.get('paths') == 8 and row.get('diagnostic_mode') == mode
+            and mode in ('control', 'api', 'stall') and cpu in ('0.5', '1')
+            and row.get('diagnostic_robot_cpu') == cpu
+            and row.get('diagnostic_window_seconds') == 45
+            and row.get('role_membership_verified') is True, 'incomplete diagnostic identity')
+    require(row.get('app_slo_ns', 'missing') is None, 'diagnostic is not an app SLO')
+    phases = row.get('phases', [])
+    require([p.get('name') for p in phases] == ['baseline', 'diagnostic_window'], 'wrong diagnostic phases')
+    baseline, window = phases
+    cutoff, end = ns(window.get('fault_completed_boot_ns')), ns(window.get('finished_boot_ns'))
+    require(ns(baseline.get('finished_boot_ns')) <= ns(window.get('started_boot_ns')) <= cutoff
+            and 45_000_000_000 <= end-cutoff <= 78_000_000_000, 'missing fixed diagnostic window')
+    require(window.get('healthy') == [True, True], 'diagnostic payload scope changed')
+    before, after = baseline.get('after', []), window.get('after', [])
+    routes = window.get('routes', [])
+    require(len(before) == len(after) == len(routes) == 2, 'missing app progress/route evidence')
+    for i, (name, language) in enumerate((('app', 'go'), ('app2', 'python'))):
+        events = app_events(row.get(name, {}), language, name)
+        require(any(e['correct'] and cutoff < ns(e['started_boot_ns']) <= ns(e['finished_boot_ns']) <= end for e in events), 'no payload in diagnostic window')
+        require(cutoff < ns(after[i].get('snapshot_boot_ns')) <= end, 'stale diagnostic progress')
+        require(before[i].get('api', {}).get('api_available') is True
+                and after[i].get('api', {}).get('api_available') is (mode != 'api'), 'API intervention not observed')
+        require(count(after[i]['payload']['authenticated_connections']) == count(before[i]['payload']['authenticated_connections']), 'diagnostic socket replaced')
+        require(routes[i].get('applied') is True and routes[i].get('selection', {}).get('desired_path_id') == 'p00', 'diagnostic route changed')
+    return {'diagnostic_only': True, 'qualification': False}

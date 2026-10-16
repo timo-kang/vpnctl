@@ -100,7 +100,15 @@ func TestVMUplinkApplications(t *testing.T) {
 	server := newCapacityGroup(t, "1", "1")
 	server.scope = "controller-relays-and-measurement"
 	server.moveWorker(t)
-	robot := newCapacityGroup(t, "0.5", "0")
+	hypothesis := os.Getenv("VPNCTL_APP_HYPOTHESIS")
+	robotCPU := "0.5"
+	if hypothesis != "" {
+		robotCPU = os.Getenv("VPNCTL_APP_DIAGNOSTIC_CPU")
+		if paths != 8 || (hypothesis != "control" && hypothesis != "api" && hypothesis != "stall") || (robotCPU != "0.5" && robotCPU != "1") {
+			t.Fatal("invalid isolated diagnostic profile")
+		}
+	}
+	robot := newCapacityGroup(t, robotCPU, "0")
 	robot.scope = "robot-supervisor-two-actuators-and-two-apps"
 	f := applicationFixtureWithGroup(t, true, paths, false, robot.file)
 	// The older deployment fixture forwards/SNATs only its plaintext probe
@@ -121,6 +129,11 @@ add rule ip m3 postrouting oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr { 19
 		"app_slo_ns": nil, "server_session_seconds": 600, "server_max_requests": 12000,
 		"selector_probe_port": 9192, "application_tls_port": 9193,
 		"publication_boot_ns": nil, "receipt_boot_ns": nil, "route_applied_boot_ns": nil}
+	if hypothesis != "" {
+		report["diagnostic_mode"] = hypothesis
+		report["diagnostic_robot_cpu"] = robotCPU
+		report["diagnostic_window_seconds"] = 45
+	}
 	phases := []map[string]any{}
 	var clients [2]*networkProcess
 	clientCleanup := map[string]string{}
@@ -159,9 +172,13 @@ add rule ip m3 postrouting oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr { 19
 		t.Fatal(err)
 	}
 	const root = "/opt/vpnctl-vm"
-	startNetworkProcess(t, f.target, filepath.Join(f.results, "echo-server.log"), nil,
-		"python3", "-B", root+"/uplink-python/echo_server.py", "--host", "0.0.0.0", "--port", "9193",
-		"--cert", cert, "--key", key, "--duration", "600", "--session-seconds", "600", "--max-requests", "12000")
+	serverCommand := []string{"python3", "-B", root + "/uplink-python/echo_server.py", "--host", "0.0.0.0", "--port", "9193",
+		"--cert", cert, "--key", key, "--duration", "600", "--session-seconds", "600", "--max-requests", "12000"}
+	if hypothesis != "" {
+		serverCommand = append(serverCommand, "--diagnostics")
+	}
+	startNetworkProcess(t, f.target, filepath.Join(f.results, "echo-server.log"), nil, serverCommand...)
+
 	applicationFallback(t, f)
 	addresses := []string{m3Target, "198.18.0.3"}
 	var dirs, progress, watchLogs [2]string
@@ -215,6 +232,7 @@ add rule ip m3 postrouting oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr { 19
 
 	// A phase timeout reports failed/unrecovered evidence; it is not an app SLO.
 	// Blocking phases deliberately last 20 s, enough for multiple capped retries.
+	var diagnosticWindowStart uint64
 	phase := func(name string, healthy [2]bool, path string, action func(), extra func([2]appVMProgress) bool) {
 		t.Helper()
 		p := map[string]any{"name": name, "started_boot_ns": strconv.FormatUint(appVMBoot(t), 10), "healthy": healthy}
@@ -223,6 +241,9 @@ add rule ip m3 postrouting oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr { 19
 			action()
 		}
 		cutoff := appVMBoot(t)
+		if name == "diagnostic_window" {
+			diagnosticWindowStart = cutoff
+		}
 		p["fault_completed_boot_ns"] = strconv.FormatUint(cutoff, 10)
 		before := [2]appVMProgress{appVMRead(t, progress[0]), appVMRead(t, progress[1])}
 		p["before"] = before
@@ -279,6 +300,49 @@ add rule ip m3 postrouting oifname "uplink0" ip saddr 10.78.0.0/16 ip daddr { 19
 		return r[0].Records > 0 && r[1].Records > 0 && r[0].API.APIAvailable && r[1].API.APIAvailable
 	})
 	initial := [2]appVMProgress{appVMRead(t, progress[0]), appVMRead(t, progress[1])}
+	if hypothesis != "" {
+		initial = phases[0]["after"].([2]appVMProgress)
+		report["diagnostic_resource_before"] = robot.evidence(t)
+		phase("diagnostic_window", both, "p00", func() {
+			fault := map[string]any{"started_boot_ns": strconv.FormatUint(appVMBoot(t), 10)}
+			report["diagnostic_fault"] = fault
+			if hypothesis == "api" {
+				for _, dir := range dirs {
+					if err := os.Rename(filepath.Join(dir, "uplink.sock"), filepath.Join(dir, "offline.sock")); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else if hypothesis == "stall" {
+				// Positive control: only this disposable guest's Go app pauses.
+				// Resume even if the action fails; never pause the guest/host.
+				func() {
+					defer clients[0].cmd.Process.Signal(syscall.SIGCONT)
+					if err := clients[0].cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+						t.Fatal(err)
+					}
+					time.Sleep(3 * time.Second)
+					if err := clients[0].cmd.Process.Signal(syscall.SIGCONT); err != nil {
+						t.Fatal(err)
+					}
+				}()
+			}
+			fault["completed_boot_ns"] = strconv.FormatUint(appVMBoot(t), 10)
+		}, func(r [2]appVMProgress) bool {
+			wantAPI := hypothesis != "api"
+			return appVMBoot(t)-diagnosticWindowStart >= uint64(45*time.Second) && r[0].API.APIAvailable == wantAPI && r[1].API.APIAvailable == wantAPI
+		})
+		report["diagnostic_resource_after"] = robot.evidence(t)
+		for i := range clients {
+			current := appVMRead(t, progress[i])
+			if current.Payload.Connections != initial[i].Payload.Connections {
+				t.Fatalf("diagnostic app %d replaced initial authenticated connection", i)
+			}
+		}
+		for _, client := range clients {
+			client.terminate(t)
+		}
+		return // Diagnostic windows never qualify the original 15-phase trial.
+	}
 	phase("api_outage", both, "p00", func() {
 		// Existing streams expire naturally; selectors and routes keep running.
 		for _, dir := range dirs {

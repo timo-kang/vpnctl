@@ -17,6 +17,9 @@ import urllib.request
 import uuid
 from pathlib import Path
 from app_recovery import validate_report as validate_app_recovery
+from app_recovery import validate_diagnostic as validate_app_diagnostic
+
+APP_DIAGNOSTICS = {"uplink-diag-control": "control", "uplink-diag-api": "api", "uplink-diag-stall": "stall"}
 
 def open_lease_guards(snapshot):
     """A TCP timeout alone can be caused by WireGuard rekeying after sleep.
@@ -753,6 +756,30 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
                 return result
             time.sleep(2)
         raise RuntimeError('direct fixture timed out')
+    if case in APP_DIAGNOSTICS:
+        if cpu_layout != 'split' or robot_cpus not in ('0.5', '1'):
+            raise RuntimeError('diagnostics require split guest and explicit robot quota')
+        result['unsupported_reason'] = 'diagnostic_only_no_qualification'
+        hypothesis = APP_DIAGNOSTICS[case]
+        vm.call('uplink-apps-start', {'paths': 8, 'diagnostic_mode': hypothesis, 'diagnostic_robot_cpu': robot_cpus})
+        until = time.monotonic() + 13*60
+        while time.monotonic() < until:
+            status = vm.call('uplink-apps-result')
+            if status.get('exit') is not None:
+                result[case] = status
+                vm.record(case + '-result', status)
+                if status['exit'] != 0 or len(status.get('reports', [])) != 1:
+                    raise RuntimeError('app diagnostic failed; original exit retained')
+                row = status['reports'][0]['report']
+                quota = '50000 100000' if robot_cpus == '0.5' else '100000 100000'
+                validate_capacity_accounting(row, 'resource_profile', quota,
+                    'robot-supervisor-two-actuators-and-two-apps', 2, '0')
+                validate_capacity_accounting(row, 'server_resource_profile', '100000 100000',
+                    'controller-relays-and-measurement', 2, '1')
+                vm.record(case + '-diagnostic', validate_app_diagnostic(row, hypothesis, robot_cpus))
+                return result
+            time.sleep(2)
+        raise RuntimeError('app diagnostic timed out')
     if case in ('uplink-apps-4', 'uplink-apps-8'):
         if cpu_layout != 'split' or robot_cpus != '0.5':
             raise RuntimeError('app trial requires declared split 0.5 robot CPU profile')
@@ -1066,7 +1093,7 @@ def capacity_vcpus(layout, cases, quota, period):
     if layout == 'shared' and quota <= period:
         return 1
     if (layout == 'split' and cases
-            and set(cases) <= {'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'uplink-apps-4', 'uplink-apps-8'}
+            and set(cases) <= {'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'uplink-apps-4', 'uplink-apps-8'} | set(APP_DIAGNOSTICS)
             and quota == 2 * period):
         return 2
     raise RuntimeError('shared layout requires <=1 outer CPU; split requires capacity cases and exactly 2 outer CPUs')
@@ -1082,7 +1109,7 @@ def main():
     parser.add_argument('--cpu-layout', default='shared', choices=['shared', 'split'])
     parser.add_argument('--uplink-api-load', action='store_true')
     # Keep application trials explicit without widening the existing cases.
-    cases_argument.choices += ['uplink-apps-4', 'uplink-apps-8']
+    cases_argument.choices += ['uplink-apps-4', 'uplink-apps-8'] + list(APP_DIAGNOSTICS)
     args = parser.parse_args()
     if args.uplink_api_load and any(not case.startswith('application-capacity-') for case in args.case):
         raise SystemExit('API load requires capacity cases')

@@ -382,12 +382,18 @@ class Handler(BaseHTTPRequestHandler):
                 paths = req.get('paths')
                 if type(paths) is not int or paths not in (4, 8):
                     raise ValueError('explicit 4/8 app path profile required')
+                hypothesis = req.get('diagnostic_mode', '')
+                cpu = req.get('diagnostic_robot_cpu', '0.5')
+                if (hypothesis not in ('', 'control', 'api', 'stall') or cpu not in ('0.5', '1')
+                        or hypothesis and paths != 8 or not hypothesis and cpu != '0.5'):
+                    raise ValueError('invalid app diagnostic profile')
                 with LOCK:
                     if WORKER is not None:
                         raise RuntimeError('only one fixture per VM')
                     env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
-                               VPNCTL_APP_PATHS=str(paths), TMPDIR='/tmp', GOMAXPROCS='2', GORACE='atexit_sleep_ms=0')
+                               VPNCTL_APP_PATHS=str(paths), TMPDIR='/tmp', GOMAXPROCS='2', GORACE='atexit_sleep_ms=0',
+                               VPNCTL_APP_HYPOTHESIS=hypothesis, VPNCTL_APP_DIAGNOSTIC_CPU=cpu)
                     with (ROOT / 'worker.log').open('wb') as log:
                         WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test',
                             '-test.run=^TestVMUplinkApplications$', '-test.v', '-test.timeout=12m'],
@@ -410,7 +416,19 @@ class Handler(BaseHTTPRequestHandler):
                         total += path.stat().st_size
                         if total > 8 * 1024 * 1024:
                             raise RuntimeError('app diagnostics exceed limit')
-                        result['reports'].append({'report': json.loads(path.read_text())})
+                        row = {'report': json.loads(path.read_text())}
+                        if row['report'].get('diagnostic_mode'):
+                            row['logs'], row['log_errors'] = {}, {}
+                            for name in ('watch-app.jsonl', 'watch-app2.jsonl', 'application-node-supervisor.jsonl', 'echo-server.log'):
+                                try:
+                                    value = direct_artifact(path.parent / name, 1024*1024)
+                                    if total + len(value.encode()) > 8*1024*1024:
+                                        raise RuntimeError('diagnostic budget exhausted')
+                                    total += len(value.encode())
+                                    row['logs'][name] = value
+                                except (OSError, RuntimeError):
+                                    row['log_errors'][name] = 'unavailable'
+                        result['reports'].append(row)
             elif action in ('application-mixed-start', 'application-preparation-start', 'application-approval-start', 'application-capacity-start'):
                 with LOCK:
                     if WORKER is not None:
