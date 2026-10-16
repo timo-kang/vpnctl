@@ -175,7 +175,8 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 		out.Paths = append(out.Paths, observation)
 	}
 	waveParent := ctx
-	if enableTargetObservationInventory(e) {
+	if restore := enableTargetObservationInventory(e); restore != nil {
+		defer restore()
 		k := e.backend.(nodeKernel)
 		// observePreparedGated checks the live lease at both boundaries itself.
 		// Avoid the duplicate middle LeaseStatus inside nodeKernel.Check; no
@@ -282,7 +283,9 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 		}
 		// Rebuild the public-inventory cache after every socket proof completed.
 		// Fresh per-interface, lease, guard, and underlay checks remain uncached.
-		enableTargetObservationInventory(fresh)
+		if restore := enableTargetObservationInventory(fresh); restore != nil {
+			defer restore()
+		}
 		for i, ticket := range tickets {
 			if ticket == nil {
 				continue

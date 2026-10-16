@@ -30,6 +30,11 @@ against a replacement. Only an unchanged identity reaches the existing live
 kernel, underlay inventory, approval, lease and event-generation checks. The
 old Engine's shared inventory checker cannot serve the new Engine.
 
+Public inventory sharing ends when observation returns, on success and failure.
+Both the issuing and reacquired Engine restore their original command runners
+before application, inspection, maintenance or mutation can proceed. Those later
+checks must not reuse link, route or rule snapshots from the observation wave.
+
 A current, owned lease found inactive still receives the existing blocking
 behavior. Successful observation never renews/rearms a lease or authorizes a
 route write. Selection, application proof, commit and rollback continue only on the fresh

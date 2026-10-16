@@ -79,9 +79,11 @@ func TestFreshObservationEngineSharesOnlyPostProofPublicInventory(t *testing.T) 
 		}}}}
 	}
 	readForTwoCandidates := func(e *Engine) {
-		if !enableTargetObservationInventory(e) {
+		restore := enableTargetObservationInventory(e)
+		if restore == nil {
 			t.Fatal("node observation inventory was not enabled")
 		}
+		defer restore()
 		k := e.backend.(nodeKernel)
 		for i := 0; i < 2; i++ {
 			b, err := k.run(context.Background(), "", "ip", "-j", "-N", "-4", "rule", "show")

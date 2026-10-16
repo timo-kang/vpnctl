@@ -19,20 +19,22 @@ type ownedObservationChecker struct {
 	check observationChecker
 }
 
-// Share only the public namespace inventory within one serialized observation
-// phase. A fresh Engine gets a fresh cache so its postchecks cannot reuse state
-// collected before the candidate socket proofs completed.
-func enableTargetObservationInventory(e *Engine) bool {
+// Share only the public namespace inventory within one observation. The caller
+// must defer the returned restoration so later inspection, application proof,
+// maintenance and mutation checks read live state, including after failed waves.
+// A fresh Engine gets a fresh cache for its postchecks.
+func enableTargetObservationInventory(e *Engine) func() {
 	if e == nil {
-		return false
+		return nil
 	}
 	k, ok := e.backend.(nodeKernel)
 	if !ok {
-		return false
+		return nil
 	}
+	original := e.backend
 	k.run = observationInventory(k.run, leaseBootTime)
 	e.backend = k
-	return true
+	return func() { e.backend = original }
 }
 
 func (e *Engine) targetProbeChecker(ctx context.Context) observationChecker {
