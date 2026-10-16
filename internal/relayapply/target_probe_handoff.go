@@ -199,6 +199,10 @@ func (e *Engine) finishTargetProbeHandoff(caller context.Context, h *targetProbe
 		return unknownProbe(TargetObservation{}, "probe_attempt_unavailable")
 	}
 	a := h.attempt
+	// Keep the original lifetime and underlay monitor, but do not inherit the
+	// preparation phase when attributing commands on the fresh Engine.
+	ctx, done := relayobserve.Phase(a.ctx, "postcheck")
+	defer done()
 	fail := func(reason string) TargetObservation { return unknownProbe(a.observation, reason) }
 	if caller.Err() != nil || !h.withinLifetime() {
 		return fail("observation_deadline")
@@ -208,7 +212,7 @@ func (e *Engine) finishTargetProbeHandoff(caller context.Context, h *targetProbe
 	}
 	// Keep the original monitor and its generation history. A caller cannot
 	// replace a lost/restarted stream with a new provider reporting the same ID.
-	ctx, cancel := context.WithCancel(a.ctx)
+	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(caller, cancel)
 	defer func() { stop(); cancel() }()
 	if deadline, ok := caller.Deadline(); ok {

@@ -287,9 +287,7 @@ func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targ
 			if ticket == nil {
 				continue
 			}
-			post, done := relayobserve.Phase(ctx, "postcheck")
-			out.Paths[jobs[i].index] = e.finishTargetProbeHandoff(post, ticket)
-			done()
+			out.Paths[jobs[i].index] = e.finishTargetProbeHandoff(ctx, ticket)
 		}
 	}
 

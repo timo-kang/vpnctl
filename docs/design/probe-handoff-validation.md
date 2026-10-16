@@ -54,6 +54,16 @@ premature consumption permanently invalidates late completion. `Close` cancels
 work and releases identity pins, but the coordinator must still join workers.
 The Engine as a whole does not become safe for concurrent mutation/Close.
 
+## Diagnostic attribution
+
+Fresh-Engine verification starts a `postcheck` diagnostic phase on the original
+attempt context. This keeps the original lifetime and underlay event history
+while attributing fresh commands to postcheck rather than the captured precheck
+phase. The coordinator does not add a second phase around the same operation.
+Phase durations remain summed work and are not additive wall-clock latency
+when phases overlap. Earlier artifacts retain their original counters; the
+attribution correction does not retroactively change their verdicts.
+
 ## Verification
 
 Regression tests use real private cache files, journal reopening and FIFO
@@ -66,12 +76,15 @@ duplicate consumption, cancellation, BOOTTIME expiry/rollback and final-check
 expiry. Virtual time exercises the original context deadline without host power
 or clock changes. Failure paths release and join test workers.
 
-## Remaining integration
+## Integration and remaining qualification
 
-The next coordinator must release Engine, Store and FIFO ownership together,
-reenter with this same deadline, close tickets on failed admission, and join all
-workers on every exit. It must bound fanout/queue pressure and keep route
-transactions under fresh ownership. The full target digest deliberately rejects
-even a concurrent verification-time update; its effect on progress must be
-measured when the coordinator is connected. This private contract alone does
-not establish application continuity, fair scheduling, or faster recovery.
+The target reconciliation coordinator releases Engine, Store and FIFO ownership
+together, reacquires within the original reconciliation deadline, closes tickets
+on failed admission, and joins every socket worker before proceeding. Route
+transactions remain under fresh ownership. The full target digest deliberately
+rejects even a concurrent verification-time update; tests cover that rejection.
+
+Resource-constrained application continuity and scheduling remain qualification
+work. Correct ownership transfer and isolated contract tests do not establish
+faster recovery or a supported deployment capacity. Preserve failed VM evidence
+and evaluate the complete unchanged fault/resource matrix before merging.
