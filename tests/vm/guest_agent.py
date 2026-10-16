@@ -395,6 +395,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError('mixed application fixture not started')
                 result = {'exit': WORKER.poll()}
                 if result['exit'] is not None:
+                    # Keep the actual test assertion even when setup/cleanup
+                    # fails before a structured measurement exists. Optional
+                    # diagnostics must never hide the original worker exit.
+                    try:
+                        result['worker_log'] = direct_artifact(ROOT / 'worker.log', 32768, tail=True)
+                    except (OSError, RuntimeError):
+                        result['worker_log_error'] = 'unavailable'
                     reports, total = [], 0
                     filename = 'application-mixed-candidates.json' if action != 'application-approval-result' else 'application-approval.json'
                     for report in sorted((ROOT / 'results').glob('*/' + filename)):
