@@ -25,6 +25,13 @@ DIRECT_NODES = None
 DIRECT_FAULT = 'outer-wg'
 LOCK = threading.Lock()
 
+def cost_detail_env(request):
+    value = request.get('cost_details', False)
+    if type(value) is not bool:
+        raise ValueError('cost details must be boolean')
+    return {'VPNCTL_COST_DETAILS': '1' if value else '0'}
+
+
 def guard():
     if 'vpnctl_vm_test' not in ARGS or len(TOKEN) != 32:
         raise RuntimeError('not an explicitly provisioned disposable VM')
@@ -449,6 +456,7 @@ class Handler(BaseHTTPRequestHandler):
                         env.update(VPNCTL_CAPACITY_PATHS=str(paths), VPNCTL_CAPACITY_ROBOT_CPU=cpu, VPNCTL_CAPACITY_CPU_LAYOUT=layout,
                                    VPNCTL_CAPACITY_REBUILD='1' if rebuild else '0',
                                    VPNCTL_CAPACITY_UPLINK_API='load' if uplink_api else 'off')
+                        env.update(cost_detail_env(req))
                     with (ROOT / 'worker.log').open('wb') as log:
                         test = {'application-mixed-start': 'TestNetns_M3TargetApplicationMixedCandidates',
                                 'application-preparation-start': 'TestNetns_M3PreparationCapacity',

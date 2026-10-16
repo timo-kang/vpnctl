@@ -736,7 +736,10 @@ def validate_manager_auto_result(status, paths, installation=False):
             or summary.get('required_samples_per_class') != 20):
         raise RuntimeError('incomplete or misleading SLO summary')
 
-def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared', uplink_api=False):
+def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared', uplink_api=False, cost_details=False):
+    if type(cost_details) is not bool or (cost_details and not case.startswith('application-capacity-')):
+        raise ValueError('cost details require an explicit capacity profile')
+    result['cost_details'] = cost_details
     vm.launch()
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
@@ -809,6 +812,8 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
         action = 'application-capacity' if capacity else case
         paths = int(case.rsplit('-', 1)[1]) if capacity else 8
         request = {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout, 'rebuild': preparation} if capacity else {}
+        if cost_details:
+            request['cost_details'] = True
         if uplink_api:
             if not capacity:
                 raise RuntimeError('API load requires a capacity profile')
@@ -1108,11 +1113,14 @@ def main():
     parser.add_argument('--robot-cpus', default='0.5', choices=['1', '0.5', '0.25'])
     parser.add_argument('--cpu-layout', default='shared', choices=['shared', 'split'])
     parser.add_argument('--uplink-api-load', action='store_true')
+    parser.add_argument('--cost-details', action='store_true')
     # Keep application trials explicit without widening the existing cases.
     cases_argument.choices += ['uplink-apps-4', 'uplink-apps-8'] + list(APP_DIAGNOSTICS)
     args = parser.parse_args()
     if args.uplink_api_load and any(not case.startswith('application-capacity-') for case in args.case):
         raise SystemExit('API load requires capacity cases')
+    if args.cost_details and any(not case.startswith('application-capacity-') for case in args.case):
+        raise SystemExit('cost details require capacity cases')
     if not Path('/.dockerenv').exists() or set(os.listdir('/sys/class/net')) != {'lo'}:
         raise SystemExit('run only inside the dedicated network-none container')
     caps = next(s.split()[1] for s in Path('/proc/self/status').read_text().splitlines() if s.startswith('CapEff:'))
@@ -1134,7 +1142,7 @@ def main():
             if hashlib.file_digest(f, 'sha256').hexdigest() != expected:
                 raise SystemExit('guest image digest mismatch: ' + name)
     Path('/results/runner.json').write_text(json.dumps({'qemu': subprocess.check_output(['qemu-system-x86_64', '--version'], text=True),
-        'cpu_max': [quota, period], 'cpu_layout': args.cpu_layout, 'guest_vcpus': vcpus, 'memory_max': memory, 'swap_max': swap, 'cap_eff': caps, 'image': image}, indent=2) + '\n')
+        'cpu_max': [quota, period], 'cpu_layout': args.cpu_layout, 'guest_vcpus': vcpus, 'memory_max': memory, 'swap_max': swap, 'cap_eff': caps, 'image': image, 'cost_details': args.cost_details}, indent=2) + '\n')
     cases = [(case, args.mode, args.delta, args.rtc) for case in args.case]
     if 'matrix' in args.case:
         if args.case != ['matrix']:
@@ -1154,7 +1162,7 @@ def main():
         verdict = {'schema_version': 1, 'case': case, 'mode': mode, 'delta': delta, 'rtc': rtc, 'completed': False, 'qualified': False}
         try:
             with record_container_resources(verdict):
-                exercise(vm, case, mode, delta, verdict, args.robot_cpus, args.cpu_layout, args.uplink_api_load)
+                exercise(vm, case, mode, delta, verdict, args.robot_cpus, args.cpu_layout, args.uplink_api_load, args.cost_details)
             verdict['completed'] = True
             if 'unsupported_reason' not in verdict and 'defect_reason' not in verdict:
                 verdict['qualified'] = True

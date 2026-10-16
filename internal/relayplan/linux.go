@@ -42,12 +42,12 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	return b.buffer.Write(p)
 }
 func readIP(ctx context.Context, args ...string) ([]byte, error) {
-	done := relayobserve.Command(ctx, true)
-	defer done()
+	done := relayobserve.ProcessCommand(ctx, true, "ip")
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	out, stderr := &cappedBuffer{limit: MaxOutputBytes}, &cappedBuffer{limit: 4096}
 	cmd := exec.CommandContext(ctx, "ip", args...)
+	defer func() { done(cmd.ProcessState) }()
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	cmd.Stdout, cmd.Stderr = out, stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

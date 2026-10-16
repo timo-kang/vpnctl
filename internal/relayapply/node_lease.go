@@ -41,14 +41,18 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 	if !ok {
 		return failure("", "lease_backend_unavailable", ErrRecovery)
 	}
+	_, approvalDone := relayobserve.Detail(ctx, "maintenance_approval")
 	r, statusErr := e.cache.Status()
 	w, at, boot, approvalErr := e.cache.LeaseApproval()
+	approvalDone()
 	if e.uncertain {
 		statusErr = errors.Join(statusErr, relaycache.ErrUncertain)
 	}
 	var plan relayplan.Plan
 	if statusErr == nil && approvalErr == nil && w.Domain == e.journal.Domain {
-		plan, approvalErr = relayplan.Build(ctx, r.NodeID, "", r, e.underlays, e.collector)
+		work, planDone := relayobserve.Detail(ctx, "maintenance_plan")
+		plan, approvalErr = relayplan.Build(work, r.NodeID, "", r, e.underlays, e.collector)
+		planDone()
 	} else {
 		approvalErr = errors.Join(approvalErr, statusErr, ErrRecovery)
 	}
@@ -61,6 +65,11 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 		// Only public ownership inventories are shared; lease data is not.
 		check = k.kernel.Check
 	}
+	block := func(entry Entry) error {
+		work, blockDone := relayobserve.Detail(ctx, "maintenance_block")
+		defer blockDone()
+		return b.Block(work, entry)
+	}
 	var all error
 	for i, old := range e.journal.Entries {
 		if old.LeaseVersion == 0 {
@@ -69,6 +78,7 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 		p := PathResult{PathID: old.Candidate.PathID, Phase: old.Phase}
 		entry := old
 		approved := false
+		_, eligibilityDone := relayobserve.Detail(ctx, "maintenance_eligibility")
 		consent, consentErr := e.preparationAllowed(old.Candidate.PathID)
 		if consent && consentErr == nil && !e.uncertain && !e.pendingTargetReferences(old.Candidate.PathID) && approvalErr == nil && old.Phase == "prepared" && old.Controller == w.Controller && old.Node == w.Node && w.Generation >= old.Generation {
 			for _, candidate := range plan.Paths {
@@ -78,33 +88,42 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 				}
 			}
 		}
+		eligibilityDone()
 		var err error
 		if !approved {
 			p.Reason = "approval_or_inventory_unavailable"
-			err = errors.Join(ErrRecovery, approvalErr, b.Block(ctx, old))
+			err = errors.Join(ErrRecovery, approvalErr, block(old))
 		} else {
 			entry.Generation, entry.ApprovalUntil, entry.ApprovalBootNS = w.Generation, w.ExpiresAt, w.UntilBootNS
-			ready, x := check(ctx, old, false)
+			work, checkDone := relayobserve.Detail(ctx, "maintenance_kernel")
+			ready, x := check(work, old, false)
+			checkDone()
 			if x != nil || !ready {
 				p.Reason = "kernel_conflict_or_unavailable"
-				err = errors.Join(ErrRecovery, x, b.Block(ctx, old))
+				err = errors.Join(ErrRecovery, x, block(old))
 			} else {
 				// Commit the authority change before granting any longer deadline.
 				if entry.Generation != old.Generation || !entry.ApprovalUntil.Equal(old.ApprovalUntil) || entry.ApprovalBootNS != old.ApprovalBootNS {
+					_, persistDone := relayobserve.Detail(ctx, "maintenance_persist")
 					e.journal.Entries[i] = entry
 					err = e.persist()
+					persistDone()
 				}
 				if err == nil {
+					_, authorityDone := relayobserve.Detail(ctx, "maintenance_authority")
 					err = e.stillApproved(entry)
+					authorityDone()
 				}
 				if err == nil {
+					work, leaseDone := relayobserve.Detail(ctx, "maintenance_lease")
 					var lease DeploymentLease
-					lease, err = b.Lease(ctx, entry, FreshApproval{at, boot})
+					lease, err = b.Lease(work, entry, FreshApproval{at, boot})
 					if err == nil && lease.rearmed && lease.Active {
 						// Continue immediately so the first short grant does not
 						// expire while checking the remaining seven candidates.
-						lease, err = b.Lease(ctx, entry, FreshApproval{})
+						lease, err = b.Lease(work, entry, FreshApproval{})
 					}
+					leaseDone()
 					p.Lease = &lease
 					if err == nil && !lease.Active {
 						err = ErrLeaseExpired
@@ -112,7 +131,7 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 				}
 				if err != nil {
 					p.Reason = "lease_renewal_failed"
-					err = errors.Join(err, b.Block(ctx, entry))
+					err = errors.Join(err, block(entry))
 				} else {
 					p.KernelReady = true
 					e.maintained[old.Candidate.PathID] = true

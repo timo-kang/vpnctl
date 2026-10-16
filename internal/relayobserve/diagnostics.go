@@ -4,6 +4,7 @@ package relayobserve
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ type Diagnostics struct {
 	BootElapsed        time.Duration        `json:"boottime_elapsed_ns"`
 	BootAvailable      bool                 `json:"boottime_available"`
 	Phases             map[string]PhaseCost `json:"phases"`
+	Details            *CostDetails         `json:"details,omitempty"`
 }
 type Recorder struct {
 	mu                 sync.Mutex
@@ -51,6 +53,7 @@ type Recorder struct {
 	boot               time.Duration
 	bootOK             bool
 	phases             map[string]PhaseCost
+	details            *CostDetails
 }
 type scope struct {
 	recorder *Recorder
@@ -98,6 +101,9 @@ func Start(ctx context.Context) (context.Context, *Recorder) {
 	boot, ok := bootTime()
 	mono, monoOK := monotonicTime()
 	r := &Recorder{started: time.Now(), mono: mono, monoOK: monoOK, boot: boot, bootOK: ok, phases: map[string]PhaseCost{}}
+	if os.Getenv("VPNCTL_COST_DETAILS") == "1" {
+		r.details = &CostDetails{Steps: map[string]PhaseCost{}, Commands: map[string]ProcessCost{}}
+	}
 	return context.WithValue(ctx, scopeKey{}, scope{r, "other"}), r
 }
 func (r *Recorder) Snapshot() *Diagnostics {
@@ -116,6 +122,15 @@ func (r *Recorder) Snapshot() *Diagnostics {
 	}
 	for k, v := range r.phases {
 		d.Phases[k] = v
+	}
+	if r.details != nil {
+		d.Details = &CostDetails{Steps: map[string]PhaseCost{}, Commands: map[string]ProcessCost{}}
+		for k, v := range r.details.Steps {
+			d.Details.Steps[k] = v
+		}
+		for k, v := range r.details.Commands {
+			d.Details.Commands[k] = v
+		}
 	}
 	return d
 }
@@ -136,22 +151,56 @@ func Phase(ctx context.Context, name string) (context.Context, func()) {
 	}
 }
 func Command(ctx context.Context, inventory bool) func() {
+	done := ProcessCommand(ctx, inventory, "other")
+	return func() { done(nil) }
+}
+
+// ProcessCommand preserves the original command accounting even when details
+// are disabled. Pass ProcessState after Run/Wait, including a nonzero exit or
+// signal. A failed start has no usage sample; it must not look like zero CPU.
+func ProcessCommand(ctx context.Context, inventory bool, executable string) func(*os.ProcessState) {
 	s, ok := ctx.Value(scopeKey{}).(scope)
 	if !ok {
-		return func() {}
+		return func(*os.ProcessState) {}
 	}
 	started := time.Now()
-	return func() {
+	step, _ := ctx.Value(detailKey{}).(string)
+	return func(state *os.ProcessState) {
+		elapsed := time.Since(started)
 		r := s.recorder
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		p := r.phases[s.phase]
-		if inventory {
-			p.InventoryCommands++
-		} else {
-			p.KernelCommands++
-		}
-		p.CommandDuration += time.Since(started)
+		addCommand(&p, inventory, elapsed)
 		r.phases[s.phase] = p
+		if r.details != nil {
+			if step != "" {
+				p = r.details.Steps[step]
+				addCommand(&p, inventory, elapsed)
+				r.details.Steps[step] = p
+			}
+			key := s.phase + "/" + step + "/" + commandFamily(executable)
+			cost := r.details.Commands[key]
+			cost.Calls++
+			cost.Wall += elapsed
+			cost.MaxWall = max(cost.MaxWall, elapsed)
+			if state == nil {
+				cost.CPUUnavailable++
+			} else {
+				cost.CPUAvailable++
+				cost.User += state.UserTime()
+				cost.System += state.SystemTime()
+			}
+			r.details.Commands[key] = cost
+		}
 	}
+}
+
+func addCommand(p *PhaseCost, inventory bool, elapsed time.Duration) {
+	if inventory {
+		p.InventoryCommands++
+	} else {
+		p.KernelCommands++
+	}
+	p.CommandDuration += elapsed
 }

@@ -36,11 +36,11 @@ func command(ctx context.Context, input, name string, args ...string) ([]byte, e
 	if input == "" && name == "cat" && len(args) == 1 && rpFilterPath(args[0]) {
 		return readProcSetting(ctx, args[0])
 	}
-	done := relayobserve.Command(ctx, false)
-	defer done()
+	done := relayobserve.ProcessCommand(ctx, false, name)
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	c := exec.CommandContext(ctx, name, args...)
+	defer func() { done(c.ProcessState) }()
 	c.Env = append(os.Environ(), "LC_ALL=C")
 	if name == "nft" {
 		c.Env = append(c.Env, "TZ=UTC")
