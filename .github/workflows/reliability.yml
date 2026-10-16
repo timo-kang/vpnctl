@@ -474,13 +474,20 @@ jobs:
       matrix:
         include:
           - profile: '4'
-            label: '4 candidates'
+            label: '4 candidates, 0.5 CPU'
+            robot_cpus: '0.5'
           - profile: '8'
-            label: '8 candidates'
+            label: '8 candidates, 0.5 CPU'
+            robot_cpus: '0.5'
           - profile: rebuild-4
-            label: '4 candidates, rebuild'
+            label: '4 candidates, rebuild, 0.5 CPU'
+            robot_cpus: '0.5'
           - profile: rebuild-8
-            label: '8 candidates, rebuild'
+            label: '8 candidates, rebuild, 0.5 CPU'
+            robot_cpus: '0.5'
+          - profile: rebuild-8
+            label: '8 candidates, rebuild, 1 CPU'
+            robot_cpus: '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -499,16 +506,16 @@ jobs:
           fi
       - name: Reject incomplete and incorrectly scoped resource evidence
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/vm -p test_runner.py
-      - name: Robot CPU 0 and server/measurement CPU 1 with verified thread placement
+      - name: Robot CPU budget ${{ matrix.robot_cpus }} with verified thread placement
         env:
           VPNCTL_VM_RACE: '1'
           VPNCTL_VM_CPUS: '2'
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-robot-capacity-split
-        run: ./scripts/test-vm.sh --case application-capacity-${{ matrix.profile }} --robot-cpus 0.5 --cpu-layout split
+        run: ./scripts/test-vm.sh --case application-capacity-${{ matrix.profile }} --robot-cpus ${{ matrix.robot_cpus }} --cpu-layout split
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: m3-robot-capacity-split-${{ matrix.profile }}
+          name: m3-robot-capacity-split-${{ matrix.profile }}-cpu${{ matrix.robot_cpus }}
           path: ${{ runner.temp }}/vpnctl-robot-capacity-split
           if-no-files-found: warn
           retention-days: 14

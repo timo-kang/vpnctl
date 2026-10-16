@@ -18,21 +18,39 @@ import (
 // publishes only an in-process interpretation of its committed result. Status
 // failures withdraw observations; they never grant, renew or modify a route.
 func (e *Engine) ReconcileTargetObserved(ctx context.Context, id, controller string, selector *relayselect.Selector, timeout time.Duration, publisher *UplinkPublisher) (TargetReconcileResult, error) {
+	out, _, err := e.reconcileTargetObserved(ctx, id, controller, selector, timeout, publisher, nil)
+	return out, err
+}
+
+// ReconcileTargetObservedWithHandoff preserves the producer's original clock
+// stamp across ownership release and returns the Engine owned by the caller.
+// The snapshot is still observation only, never authority for route changes.
+func (e *Engine) ReconcileTargetObservedWithHandoff(ctx context.Context, id, controller string, selector *relayselect.Selector, timeout time.Duration, publisher *UplinkPublisher, ownership TargetObservationOwnership) (TargetReconcileResult, *Engine, error) {
+	if ownership == nil {
+		if publisher != nil {
+			publisher.Unavailable()
+		}
+		return TargetReconcileResult{}, e, errors.New("target ownership handoff unavailable")
+	}
+	return e.reconcileTargetObserved(ctx, id, controller, selector, timeout, publisher, ownership)
+}
+
+func (e *Engine) reconcileTargetObserved(ctx context.Context, id, controller string, selector *relayselect.Selector, timeout time.Duration, publisher *UplinkPublisher, ownership TargetObservationOwnership) (TargetReconcileResult, *Engine, error) {
 	if publisher == nil || publisher.target != id {
 		if publisher != nil {
 			publisher.Unavailable()
 		}
-		return TargetReconcileResult{}, errors.New("status publisher target mismatch")
+		return TargetReconcileResult{}, e, errors.New("status publisher target mismatch")
 	}
 	withdrawal := publisher.withdrawal.Load()
 	start, clockErr := publisher.clock()
-	out, err := e.ReconcileTarget(ctx, id, controller, selector, timeout)
+	out, current, err := e.reconcileTarget(ctx, id, controller, selector, timeout, ownership)
 	observation := statusObservation{withdrawal: withdrawal, stamp: start, maxAge: out.Selection.Policy.MaxAge}
-	if clockErr == nil && ctx.Err() == nil && !e.uncertain && start.domain == statusDomain(e.journal.Domain) {
-		observation = e.uplinkObservation(out, observation)
+	if clockErr == nil && ctx.Err() == nil && current != nil && !current.closed && !current.uncertain && !errors.Is(err, errTargetObservationOwnership) && start.domain == statusDomain(current.journal.Domain) {
+		observation = current.uplinkObservation(out, observation)
 	}
 	publisher.publish(observation)
-	return out, err
+	return out, current, err
 }
 
 func (e *Engine) uplinkObservation(out TargetReconcileResult, o statusObservation) statusObservation {

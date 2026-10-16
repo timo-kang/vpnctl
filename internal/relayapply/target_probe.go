@@ -68,7 +68,13 @@ func (e *Engine) observeTarget(parent context.Context, targetID, controller stri
 // select. Keep their diagnostic rows and maintain ALL candidate leases before
 // probing; a target-specific exclusion must never exempt another candidate from
 // approval, consent, inventory or kernel enforcement.
-func (e *Engine) observeTargetFiltered(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), exclude func(string, int) string) (out TargetReport, err error) {
+func (e *Engine) observeTargetFiltered(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), exclude func(string, int) string) (TargetReport, error) {
+	out, _, err := e.observeTargetFilteredWithOwnership(parent, targetID, controller, timeout, probe, exclude, nil)
+	return out, err
+}
+
+func (e *Engine) observeTargetFilteredWithOwnership(parent context.Context, targetID, controller string, timeout time.Duration, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), exclude func(string, int) string, ownership TargetObservationOwnership) (out TargetReport, resumed *Engine, err error) {
+	resumed = e
 	parent, recorder := relayobserve.Start(parent)
 	defer func() { out.Diagnostics = recorder.Snapshot() }()
 	out = TargetReport{SchemaVersion: 1, TargetID: targetID, StartedAt: time.Now(), Paths: []TargetObservation{}}
@@ -85,33 +91,33 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 		}
 	}()
 	if targetID == "" || timeout <= 0 || timeout > 2*time.Second {
-		return out, errors.New("target ID and probe timeout in (0,2s] required")
+		return out, e, errors.New("target ID and probe timeout in (0,2s] required")
 	}
 	if e.uncertain {
-		return out, errors.New("reopen uncertain journal before observation")
+		return out, e, errors.New("reopen uncertain journal before observation")
 	}
 	events, eventsDone := relayobserve.Phase(parent, "underlay_events")
 	err = e.syncTerminalScopes(events)
 	eventsDone()
 	if err != nil {
 		out.Reason = "underlay_events_unavailable"
-		return out, err
+		return out, e, err
 	}
 	ctx, cancel := context.WithTimeout(parent, MaxTargetProbeDuration)
 	defer cancel()
 	report, err := e.cache.Status()
 	if err != nil {
-		return out, err
+		return out, e, err
 	}
 	out.ControllerID, out.NodeID, out.Generation = report.ControllerID, report.NodeID, report.ObservedGeneration
 	if report.Catalog == nil || report.Validity != "valid" || report.BlockedReason != "" || report.Refresh.Result == "in_progress" {
 		out.Reason = "approval_unavailable"
-		return out, nil
+		return out, e, nil
 	}
 	view := report.Catalog
 	if controller != "" && controller != view.ControllerID {
 		out.Reason = "controller_identity_mismatch"
-		return out, nil
+		return out, e, nil
 	}
 	out.ApprovalUntil = view.ExpiresAt
 	var target relaycatalog.Target
@@ -122,11 +128,11 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 	}
 	if target.ID == "" || view.Validate(out.NodeID, time.Now()) != nil {
 		out.Reason = "target_or_catalog_invalid"
-		return out, nil
+		return out, e, nil
 	}
 	startedBoot, err := leaseBootTime()
 	if err != nil {
-		return out, err
+		return out, e, err
 	}
 	remaining := time.Until(view.ExpiresAt)
 	// One full sweep precedes the bounded wave. There is no journal/lease
@@ -168,32 +174,129 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 		}
 		out.Paths = append(out.Paths, observation)
 	}
-	wave, stopWave := context.WithTimeout(ctx, targetObservationWaveDuration)
-	defer stopWave()
-	if k, ok := e.backend.(nodeKernel); ok {
-		k.run = observationInventory(k.run, leaseBootTime)
+	waveParent := ctx
+	if enableTargetObservationInventory(e) {
+		k := e.backend.(nodeKernel)
 		// observePreparedGated checks the live lease at both boundaries itself.
 		// Avoid the duplicate middle LeaseStatus inside nodeKernel.Check; no
 		// lease/guard/timer data is shared or cached.
-		wave = context.WithValue(wave, observationCheckerKey{}, ownedObservationChecker{e, k.kernel.Check})
+		waveParent = context.WithValue(ctx, observationCheckerKey{}, ownedObservationChecker{e, k.kernel.Check})
 	}
+	wave, stopWave := context.WithTimeout(waveParent, targetObservationWaveDuration)
+	defer stopWave()
+	handoffBudgetExhausted := false
 	relayobserve.Mark(ctx, "observation_wave_started")
-	gates := newObservationGates(len(jobs))
-	var workers sync.WaitGroup
-	for i, job := range jobs {
-		gate := gates[i]
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			out.Paths[job.index] = e.observePreparedGated(wave, job.entry, target, timeout, out.Paths[job.index], probe, gate)
-		}()
+	if ownership == nil {
+		gates := newObservationGates(len(jobs))
+		var workers sync.WaitGroup
+		for i, job := range jobs {
+			gate := gates[i]
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				out.Paths[job.index] = e.observePreparedGated(wave, job.entry, target, timeout, out.Paths[job.index], probe, gate)
+			}()
+		}
+		workers.Wait() // No probe may outlive the cache/namespace ownership.
+	} else if len(jobs) != 0 {
+		// Prepare serially under current ownership. Workers receive only immutable
+		// tickets, then the complete cache/FIFO and namespace lifetime is yielded.
+		tickets := make([]*targetProbeHandoff, len(jobs))
+		for i, job := range jobs {
+			pre, done := relayobserve.Phase(waveParent, "precheck")
+			ticket, failed := e.prepareTargetProbeHandoff(pre, job.entry, target, timeout, out.Paths[job.index], leaseBootTime)
+			done()
+			if ticket == nil {
+				out.Paths[job.index] = failed
+				continue
+			}
+			tickets[i] = ticket
+		}
+		active := false
+		for _, ticket := range tickets {
+			active = active || ticket != nil
+		}
+		if !active {
+			goto observationWaveComplete
+		}
+		oldEngine := e
+		if err := ownership.Release(ctx, e); err != nil {
+			for _, ticket := range tickets {
+				if ticket != nil {
+					ticket.Close()
+				}
+			}
+			return out, e, errors.Join(errTargetObservationOwnership, err)
+		}
+		probeWave, stopProbeWave := context.WithTimeout(ctx, targetObservationWaveDuration)
+		var workers sync.WaitGroup
+		for i, ticket := range tickets {
+			if ticket == nil {
+				continue
+			}
+			workers.Add(1)
+			go func(i int, ticket *targetProbeHandoff) {
+				defer workers.Done()
+				ticket.runWithin(probeWave, probe)
+			}(i, ticket)
+		}
+		workers.Wait()
+		probeErr := probeWave.Err()
+		probeDeadline, _ := probeWave.Deadline()
+		if probeErr == nil && !time.Now().Before(probeDeadline) {
+			probeErr = context.DeadlineExceeded
+		}
+		handoffBudgetExhausted = errors.Is(probeErr, context.DeadlineExceeded)
+		stopProbeWave()
+		if probeErr != nil {
+			for i, ticket := range tickets {
+				if ticket != nil {
+					out.Paths[jobs[i].index] = ticket.discard("observation_deadline")
+					ticket.Close()
+				}
+			}
+			return out, e, probeErr
+		}
+		fresh, err := ownership.Reacquire(ctx)
+		if fresh != nil {
+			e = fresh
+			resumed = fresh // Return every non-nil acquired owner, including rejected ones.
+		}
+		if err != nil || fresh == nil || fresh == oldEngine || fresh.closed || fresh.uncertain {
+			for _, ticket := range tickets {
+				ticket.Close()
+			}
+			return out, e, errors.Join(errTargetObservationOwnership, err, errors.New("fresh observation ownership unavailable"))
+		}
+		// Scope is a batch-level authority. Reject before exporting any ticket
+		// result or letting reconcile select/quarantine under a replacement cache.
+		for _, ticket := range tickets {
+			if ticket != nil && !ticket.scope.Matches(fresh.cache) {
+				for _, pending := range tickets {
+					if pending != nil {
+						pending.Close()
+					}
+				}
+				return out, fresh, errors.Join(errTargetObservationOwnership, errors.New("reacquired cache scope does not match observation owner"))
+			}
+		}
+		// Rebuild the public-inventory cache after every socket proof completed.
+		// Fresh per-interface, lease, guard, and underlay checks remain uncached.
+		enableTargetObservationInventory(fresh)
+		for i, ticket := range tickets {
+			if ticket == nil {
+				continue
+			}
+			out.Paths[jobs[i].index] = e.finishTargetProbeHandoff(ctx, ticket)
+		}
 	}
-	workers.Wait() // No probe may outlive the cache/namespace ownership.
+
+observationWaveComplete:
 	relayobserve.Mark(ctx, "observation_wave_complete")
 	// A candidate's deadline callback can finish its worker before the shared
 	// context publishes Err. Report exhaustion from the deadline itself too.
 	deadline, _ := wave.Deadline() // WithTimeout above always supplies one.
-	if errors.Is(wave.Err(), context.DeadlineExceeded) || !time.Now().Before(deadline) {
+	if ownership != nil && handoffBudgetExhausted || ownership == nil && (errors.Is(wave.Err(), context.DeadlineExceeded) || !time.Now().Before(deadline)) {
 		out.Reason = "observation_budget_exhausted"
 	}
 
@@ -217,18 +320,18 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 	endBoot, bootErr := leaseBootTime()
 	after, statusErr := e.cache.Status()
 	if bootErr != nil || statusErr != nil {
-		return out, errors.Join(bootErr, statusErr)
+		return out, e, errors.Join(bootErr, statusErr)
 	}
 	if ctx.Err() != nil {
 		out.Reason = "observation_deadline"
-		return out, ctx.Err()
+		return out, e, ctx.Err()
 	}
 	if !after.UsableCache || after.Validity != "valid" || after.ObservedGeneration != out.Generation || !time.Now().Before(view.ExpiresAt) || time.Since(out.StartedAt) >= remaining || endBoot < startedBoot || endBoot-startedBoot >= remaining {
 		out.Reason = "approval_expired_or_changed"
-		return out, nil
+		return out, e, nil
 	}
 	out.Valid = true
-	return out, nil
+	return out, e, nil
 }
 
 func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) TargetObservation {

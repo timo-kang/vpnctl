@@ -56,6 +56,15 @@ func managerLANReconfigurationSample(phase string, p managerAutoEvent, begin, re
 		begin > 0 && recovered >= begin && p.Begin >= begin && p.End >= p.Begin && p.End <= recovered
 }
 
+func managerApplicationPacketKind(kind string) bool {
+	switch kind {
+	case "tcp-new", "tcp-existing", "udp", "independent-app":
+		return true
+	default:
+		return false
+	}
+}
+
 // Changing fixture authority resets health confirmation. Do not inject the
 // subsequent controller fault while either app is still confirming that change.
 func managerApprovalReady(generation uint64, app, independent relayapply.TargetReconcileResult) bool {

@@ -37,6 +37,17 @@ requiring or renewing an approval. These are evidence budgets, not outage SLOs.
 Private lease metadata is lost on JSON serialization; CLI output cannot be
 replayed into current reachable evidence.
 
+When reconciliation yields ownership during candidate TCP probes, the producer
+must inspect the returned Engine after the cache and journal have been reopened.
+The original Engine is closed and cannot supply the committed route's approval
+or installation proof. `ReconcileTargetObservedWithHandoff` returns that current
+Engine to the caller for cleanup, including a non-nil Engine returned on failure.
+Its observation stamp and withdrawal token are captured before reconciliation;
+reentry does not restart the observation budget or undo concurrent withdrawal.
+Missing ownership, a mismatched publisher, failed reentry, cancellation, or an
+uncertain/closed owner cannot preserve a prior reachable publication. API-enabled
+and API-disabled watches both use the same ownership handoff coordinator.
+
 ## Wire fields and clocks
 
 Snapshots have `schema_version: 1`, fixed `target_id`, random `producer_id`,
