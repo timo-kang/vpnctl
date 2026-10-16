@@ -150,6 +150,8 @@ func (k deploymentKernel) stagedLeaseBounded(ctx context.Context, e DeploymentEn
 	if !exists {
 		return state, errors.New("relay lease missing")
 	}
+	// A shared nft invocation can narrow the global flowtable inventory to
+	// this lease's table; preserve the independent global check.
 	if err = k.noFlowtables(ctx); err != nil {
 		return state, err
 	}

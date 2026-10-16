@@ -7,6 +7,7 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -101,10 +102,15 @@ func TestNetns_M3PreparationRecovery(t *testing.T) {
 	f := applicationFixture(t, true, 4)
 	managed := enablePreparation(t, f, "p00")
 	logs := map[string]string{}
+	independent := newPublicationStream()
 	for target, path := range map[string]string{"app": "p00", "app2": "p01"} {
 		log := filepath.Join(f.results, "rebuild-"+target+".jsonl")
 		logs[target] = log
-		startNetworkProcess(t, f.robot, log, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", target, "--watch", "--interval", "500ms", "--mode", "manual", "--path-id", path)
+		var observer io.Writer
+		if target == "app2" {
+			observer = independent
+		}
+		startNetworkProcessWithObserver(t, nil, f.robot, log, observer, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", target, "--watch", "--interval", "500ms", "--mode", "manual", "--path-id", path)
 	}
 	eventually(t, 45*time.Second, "two apps before rebuild", func() error {
 		for _, log := range logs {
@@ -112,12 +118,17 @@ func TestNetns_M3PreparationRecovery(t *testing.T) {
 				return fmt.Errorf("app not active")
 			}
 		}
+		rows := independent.snapshot().Records
+		if len(rows) == 0 || !rows[len(rows)-1].Record.Applied {
+			return fmt.Errorf("independent app applied receipt pending")
+		}
 		return nil
 	})
 	supervision := filepath.Join(f.results, "application-node-supervisor.jsonl")
 	source := "192.0.2.10"
 	steps := []string{"missing_endpoint", "source_change", "gateway_change", "link_down_up", "rename_restore", "new_ifindex", "reused_ifindex"}
-	results := map[string]any{}
+	results := map[string]any{"sampled_contract_version": 2, "continuity_window_contract_version": 1,
+		"sampled_qualification_status": "incomplete", "independent_continuity_window": 0}
 	t.Cleanup(func() {
 		results["completed"] = !t.Failed()
 		writeM3Report(t, filepath.Join(f.results, "preparation-recovery.json"), results)
@@ -128,7 +139,12 @@ func TestNetns_M3PreparationRecovery(t *testing.T) {
 			t.Fatal("missing prior candidate")
 		}
 		baseline := len(applicationResults(logs["app"]))
-		independentBaseline := len(applicationResults(logs["app2"]))
+		window, err := independent.beginContinuityWindow("app2", results)
+		if err != nil {
+			results["sampled_qualification_status"] = "fail"
+			t.Fatal(err)
+		}
+		results["independent_continuity_window"] = window
 		started := time.Now()
 		switch fault {
 		case "missing_endpoint":
@@ -155,12 +171,11 @@ func TestNetns_M3PreparationRecovery(t *testing.T) {
 			recreatePreparationUnderlay(t, f, true, source)
 		}
 		sawConfirmation := false
-		var gap time.Duration
 		eventually(t, 120*time.Second, "owned rebuild "+fault, func() error {
 			if p := applicationPayload(t, f, "198.18.0.3"); !p.OK {
 				t.Fatal("independent payload lost during rebuild", fault, p)
 			}
-			_, gap = applicationContinuity(t, logs["app2"], independentBaseline, "app2", results)
+			independent.requireContinuity(t, 1, "app2", results)
 			managed = latestPreparation(supervision, "p00")
 			for _, r := range applicationResults(logs["app"])[baseline:] {
 				for _, c := range r.Selection.Candidates {
@@ -192,8 +207,12 @@ func TestNetns_M3PreparationRecovery(t *testing.T) {
 			}
 			return nil
 		})
-		results[fault] = map[string]any{"previous": old, "current": managed.Current, "recovery_seconds": time.Since(started).Seconds(), "independent_maximum_gap_seconds": gap.Seconds(), "new_confirmation": sawConfirmation}
+		// Include rows received during the successful recovery payload check.
+		// The final stage has no subsequent rotation to catch a late failure.
+		cycles, gap := independent.requireContinuity(t, 1, "app2", results)
+		results[fault] = map[string]any{"previous": old, "current": managed.Current, "recovery_seconds": time.Since(started).Seconds(), "independent_maximum_gap_seconds": gap.Seconds(), "independent_applied_cycles": cycles, "independent_continuity_window": window, "new_confirmation": sawConfirmation}
 	}
+	results["sampled_qualification_status"] = "pass"
 	// Release must remain an opt-out even while the same supervisor continues.
 	nodeAdmissionOutput(t, f, integrationBinary(t), "node", "relay", "release", "--config", f.node, "--path-id", "p00")
 	until := time.Now().Add(4 * time.Second)
