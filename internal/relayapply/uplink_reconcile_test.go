@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,6 +172,46 @@ func TestUplinkReconcileRejectsDifferentTargetAndSaturatedRevision(t *testing.T)
 	e.ReconcileTargetObserved(context.Background(), "app", "", s, time.Second, p)
 	if p.Snapshot().Availability != "unknown" {
 		t.Fatal("exhausted path revision claimed current route")
+	}
+}
+
+func TestUplinkSaturationWithdrawsPriorReachabilityAndPreventsNewProofs(t *testing.T) {
+	e, _, _, _ := uplinkAppFixture(t)
+	s := activateApp(t, e)
+	p, err := NewUplinkPublisher("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := e.ReconcileTargetObserved(ctx, "app", "", s, time.Second, p); err != nil {
+		t.Fatal(err)
+	}
+	before := p.Snapshot()
+	if before.Availability != "reachable" {
+		t.Fatal("reachable baseline missing")
+	}
+	var candidateCalls, applicationCalls atomic.Int32
+	e.probe = func(context.Context, Entry, relaycatalog.Target) (targetProof, error) {
+		candidateCalls.Add(1)
+		return targetProof{}, nil
+	}
+	probe := e.appProbe
+	e.appProbe = func(ctx context.Context, g TargetGuard, entry Entry, target relaycatalog.Target) (ApplicationProof, error) {
+		applicationCalls.Add(1)
+		return probe(ctx, g, entry, target)
+	}
+	e.journal.Targets[0].RouteRevision = ^uint64(0)
+	out, err := e.ReconcileTargetObserved(ctx, "app", "", s, time.Second, p)
+	if !errors.Is(err, ErrRecovery) || out.Applied || !out.Application.Guarded || candidateCalls.Load() != 0 || applicationCalls.Load() != 0 {
+		t.Fatal("saturated route accepted new work or lost safety quarantine")
+	}
+	g := e.journal.Targets[0]
+	if g.RouteRevision != ^uint64(0) || g.Phase != "guarded" || g.Active != nil || g.Pending != nil {
+		t.Fatal("saturation wrapped or retained an active route")
+	}
+	after := p.Snapshot()
+	if after.Availability != "unknown" || after.Freshness != "unknown" || after.ValidUntilBootNS != 0 || after.PathID != "" || after.Revision <= before.Revision {
+		t.Fatal("saturation retained prior reachable evidence")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"vpnctl/internal/config"
 	"vpnctl/internal/relayapply"
 	"vpnctl/internal/relaycache"
+	"vpnctl/internal/relayobserve"
 )
 
 // Waiting carries no observations or authority. Keep the FIFO ticket through
@@ -25,11 +26,14 @@ func openNodeRelayEngine(ctx context.Context, node *config.NodeConfig, dir strin
 	if err != nil {
 		return nil, nil, err
 	}
-	e, err := retrySupervisedLock(locks, func() (*relayapply.Engine, error) { return relayapply.Open(c, node.RelayUnderlays) }, relayapply.ErrKernelBusy)
+	kernel, kernelDone := relayobserve.Phase(locks, "admission_kernel")
+	e, err := retrySupervisedLock(kernel, func() (*relayapply.Engine, error) { return relayapply.Open(c, node.RelayUnderlays) }, relayapply.ErrKernelBusy)
+	kernelDone()
 	if err != nil {
 		c.Close()
 		return nil, nil, err
 	}
+	relayobserve.Mark(ctx, "admission_kernel_ready")
 	return c, e, nil
 }
 

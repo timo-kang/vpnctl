@@ -35,7 +35,10 @@ func TestUplinkAPIWithdrawsOnAdmissionFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := p.Snapshot().Revision
-	_, err = reconcileApplicationTarget(context.Background(), node, node.PKIDir+"/missing", "app", "", time.Second, nil, p)
+	out, err := reconcileApplicationTarget(context.Background(), node, node.PKIDir+"/missing", "app", "", time.Second, nil, p)
+	if out.Diagnostics == nil || !out.Diagnostics.MonotonicAvailable || out.Diagnostics.Phases["admission"].Calls != 1 {
+		t.Fatal("API admission failure lost coordinator diagnostics")
+	}
 	if err == nil || p.Snapshot().Revision <= before || p.Snapshot().Availability != "unknown" {
 		t.Fatal("admission failure did not withdraw status")
 	}
