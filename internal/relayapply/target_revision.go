@@ -34,7 +34,17 @@ func (e *Engine) targetObservationFence(g TargetGuard) targetObservationFence {
 }
 
 func (f targetObservationFence) current(e *Engine) (int, TargetGuard, bool) {
-	if f.owner != e || e.closed || e.uncertain || f.node != e.journal.Node || f.domain != e.journal.Domain {
+	return f.currentGuard(e, f.owner == e && !e.closed)
+}
+
+// currentAfterHandoff accepts a different Engine only after the issuing Engine
+// closed and only when the complete durable target reservation is unchanged.
+func (f targetObservationFence) currentAfterHandoff(e *Engine) (int, TargetGuard, bool) {
+	return f.currentGuard(e, f.owner != nil && f.owner != e && f.owner.closed)
+}
+
+func (f targetObservationFence) currentGuard(e *Engine, ownerClosed bool) (int, TargetGuard, bool) {
+	if !ownerClosed || e == nil || e.closed || e.uncertain || f.node != e.journal.Node || f.domain != e.journal.Domain {
 		return -1, TargetGuard{}, false
 	}
 	i := e.targetIndex(f.target)

@@ -15,8 +15,8 @@ import (
 )
 
 // Private, one-use evidence for the current ownership lifetime only. It cannot
-// be serialized as authority or resumed by a new Engine. Releasing ownership
-// will additionally need a target transaction revision/ABA contract.
+// be serialized as authority or resumed by a new Engine. Cross-Engine use requires the separate
+// targetProbeHandoff identity and lifetime contract.
 type targetProbeAttempt struct {
 	owner        *Engine
 	node, domain string
@@ -106,14 +106,30 @@ func (e *Engine) prepareTargetProbe(ctx context.Context, entry Entry, target rel
 // The worker touches only its copied inputs, context and result. No Engine,
 // cache, journal or lease mutation is used while the socket proof runs.
 func (a *targetProbeAttempt) run(probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) {
+	a.runWithin(nil, probe)
+}
+
+// runWithin keeps the context and values captured during precheck while also
+// enforcing the independently bounded socket wave started after ownership is
+// released.
+func (a *targetProbeAttempt) runWithin(limit context.Context, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error)) {
 	if a == nil || a.ctx == nil || !a.state.CompareAndSwap(0, 1) {
 		return
 	}
-	ctx, done := relayobserve.Phase(a.ctx, "probe")
-	ctx, cancel := context.WithTimeout(ctx, a.timeout)
+	parent := a.ctx
+	var stop func() bool
+	var cancel context.CancelFunc
+	if limit != nil {
+		parent, cancel = context.WithCancel(a.ctx)
+		stop = context.AfterFunc(limit, cancel)
+		defer stop()
+		defer cancel()
+	}
+	ctx, done := relayobserve.Phase(parent, "probe")
+	ctx, probeCancel := context.WithTimeout(ctx, a.timeout)
 	a.proof, a.err = probe(ctx, cloneProbeEntry(a.entry), cloneProbeTarget(a.target))
 	a.observation.ObservedAt = time.Now()
-	cancel()
+	probeCancel()
 	done()
 	if _, shared := a.ctx.Value(observationCheckerKey{}).(ownedObservationChecker); shared {
 		a.floor, a.clockErr = leaseBootTime()
@@ -139,6 +155,13 @@ func (e *Engine) finishTargetProbe(ctx context.Context, a *targetProbeAttempt) T
 	if !a.current(e) {
 		return fail("candidate_changed_during_probe")
 	}
+	return e.finishTargetProbeEvidence(ctx, a)
+}
+
+// Caller has consumed the attempt and validated its ownership contract.
+func (e *Engine) finishTargetProbeEvidence(ctx context.Context, a *targetProbeAttempt) TargetObservation {
+	out := a.observation
+	fail := func(reason string) TargetObservation { return unknownProbe(out, reason) }
 	if a.ctx.Err() != nil || ctx.Err() != nil {
 		return fail("observation_deadline")
 	}

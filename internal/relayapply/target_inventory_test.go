@@ -67,6 +67,45 @@ func TestObservationInventoryCannotReusePreProofOrFailedEvidence(t *testing.T) {
 		t.Fatal(string(b), err, calls)
 	}
 }
+
+func TestFreshObservationEngineSharesOnlyPostProofPublicInventory(t *testing.T) {
+	values := []string{"before proof", "after proof"}
+	phase := 0
+	calls := 0
+	newEngine := func(value string) *Engine {
+		return &Engine{backend: nodeKernel{kernel{run: func(context.Context, string, string, ...string) ([]byte, error) {
+			calls++
+			return []byte(value), nil
+		}}}}
+	}
+	readForTwoCandidates := func(e *Engine) {
+		restore := enableTargetObservationInventory(e)
+		if restore == nil {
+			t.Fatal("node observation inventory was not enabled")
+		}
+		defer restore()
+		k := e.backend.(nodeKernel)
+		for i := 0; i < 2; i++ {
+			b, err := k.run(context.Background(), "", "ip", "-j", "-N", "-4", "rule", "show")
+			if err != nil || string(b) != values[phase] {
+				t.Fatalf("phase %d candidate %d saw %q: %v", phase, i, b, err)
+			}
+		}
+		phase++
+	}
+
+	readForTwoCandidates(newEngine(values[0]))
+	if calls != 1 {
+		t.Fatalf("precheck snapshot was not shared across candidates: calls=%d", calls)
+	}
+	// Reacquisition must create a new snapshot after all socket proofs finish;
+	// it may not reuse the earlier precheck inventory.
+	readForTwoCandidates(newEngine(values[1]))
+	if calls != 2 {
+		t.Fatalf("fresh postcheck snapshot was not shared or reused old state: calls=%d", calls)
+	}
+}
+
 func TestObservationInventoryNeverSharesLeasePrivateOrInterfaceState(t *testing.T) {
 	calls := 0
 	run := observationInventory(func(context.Context, string, string, ...string) ([]byte, error) {

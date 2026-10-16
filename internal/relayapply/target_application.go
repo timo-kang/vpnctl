@@ -275,10 +275,28 @@ func (e *Engine) quarantineTarget(parent context.Context, id string) (TargetGuar
 
 // ReconcileTarget obtains and consumes observations under this engine's shared
 // cache/namespace ownership. No API accepts serialized decisions as authority.
-func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, selector *relayselect.Selector, timeout time.Duration) (out TargetReconcileResult, err error) {
+func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, selector *relayselect.Selector, timeout time.Duration) (TargetReconcileResult, error) {
+	out, _, err := e.reconcileTarget(parent, id, controller, selector, timeout, nil)
+	return out, err
+}
+
+// ReconcileTargetWithHandoff releases node ownership during the bounded TCP
+// wave and returns the fresh Engine which completed decision/application work.
+// The caller owns that Engine even when application reconciliation reports an
+// error. It also returns any non-nil Engine supplied by a failed reacquisition
+// so the caller can close the acquired resources.
+func (e *Engine) ReconcileTargetWithHandoff(parent context.Context, id, controller string, selector *relayselect.Selector, timeout time.Duration, ownership TargetObservationOwnership) (TargetReconcileResult, *Engine, error) {
+	if ownership == nil {
+		return TargetReconcileResult{}, e, errors.New("target ownership handoff unavailable")
+	}
+	return e.reconcileTarget(parent, id, controller, selector, timeout, ownership)
+}
+
+func (e *Engine) reconcileTarget(parent context.Context, id, controller string, selector *relayselect.Selector, timeout time.Duration, ownership TargetObservationOwnership) (out TargetReconcileResult, current *Engine, err error) {
+	current = e
 	parent, recorder := relayobserve.Start(parent)
 	defer func() { out.Diagnostics = recorder.Snapshot() }()
-	out = TargetReconcileResult{SchemaVersion: 1, StartedAt: time.Now(), Application: e.targetResult(id, "blocked", "not_applied")}
+	out = TargetReconcileResult{SchemaVersion: 1, StartedAt: time.Now(), Application: current.targetResult(id, "blocked", "not_applied")}
 	defer func() {
 		out.FinishedAt = time.Now()
 		g := out.Application.Reservation
@@ -288,44 +306,59 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 			selector.RecordApplied("", out.FinishedAt)
 		}
 	}()
-	if e.uncertain || selector == nil {
-		return out, relaycache.ErrUncertain
+	if current.uncertain || selector == nil {
+		return out, current, relaycache.ErrUncertain
 	}
-	i := e.targetIndex(id)
-	if i < 0 || controller != "" && e.journal.Targets[i].Controller != controller {
-		return out, ErrConflict
+	i := current.targetIndex(id)
+	if i < 0 || controller != "" && current.journal.Targets[i].Controller != controller {
+		return out, current, ErrConflict
 	}
-	g := e.journal.Targets[i]
+	g := current.journal.Targets[i]
 	if g.Phase == "switching" {
-		out.Application, err = e.quarantineTarget(parent, id)
-		return out, errors.Join(ErrRecovery, err)
+		out.Application, err = current.quarantineTarget(parent, id)
+		return out, current, errors.Join(ErrRecovery, err)
 	}
 	if g.Phase != "guarded" && g.Phase != "active" {
-		return out, ErrRecovery
+		return out, current, ErrRecovery
 	}
 	if g.RouteRevision == ^uint64(0) {
-		out.Application, err = e.quarantineTarget(parent, id)
-		return out, errors.Join(ErrRecovery, err)
+		out.Application, err = current.quarantineTarget(parent, id)
+		return out, current, errors.Join(ErrRecovery, err)
 	}
-	fence := e.targetObservationFence(g)
+	fence := current.targetObservationFence(g)
 	ctx, cancel := context.WithTimeout(parent, MaxDuration)
 	defer cancel()
 	ctx = context.WithValue(ctx, targetConnectLimitKey{}, selector.MaxConnectTime())
-	report, _ := e.observeTargetFiltered(ctx, id, controller, timeout, e.candidateProbe(), selector.ObservationExclusion)
+	report, resumed, observeErr := current.observeTargetFilteredWithOwnership(ctx, id, controller, timeout, current.candidateProbe(), selector.ObservationExclusion, ownership)
+	if resumed != nil {
+		current = resumed
+	}
+	if ownership != nil && observeErr != nil {
+		reason := "observation_unavailable"
+		if errors.Is(observeErr, errTargetObservationOwnership) {
+			reason = "observation_ownership_changed"
+		}
+		out.Selection = relayselect.Decision{SchemaVersion: 1, NodeID: current.journal.Node, TargetID: id, State: "unknown", Reason: reason, Candidates: []relayselect.Candidate{}}
+		out.Application = TargetGuardResult{SchemaVersion: 1, TargetID: id, State: "unknown", Reason: reason}
+		return out, current, observeErr
+	}
 	// Candidate lease enforcement remains live within observation. No target
 	// decision or route mutation may consume evidence for a changed reservation.
-	i, g, current := fence.current(e)
-	if !current {
-		out.Selection = relayselect.Decision{SchemaVersion: 1, NodeID: e.journal.Node, TargetID: id, State: "unknown", Reason: "target_changed_during_observation", Candidates: []relayselect.Candidate{}}
+	i, g, targetCurrent := fence.current(current)
+	if current != e {
+		i, g, targetCurrent = fence.currentAfterHandoff(current)
+	}
+	if !targetCurrent {
+		out.Selection = relayselect.Decision{SchemaVersion: 1, NodeID: current.journal.Node, TargetID: id, State: "unknown", Reason: "target_changed_during_observation", Candidates: []relayselect.Candidate{}}
 		out.Application = TargetGuardResult{SchemaVersion: 1, TargetID: id, State: "unknown", Reason: "target_changed_during_observation"}
-		if e.uncertain {
-			return out, errors.Join(ErrConflict, relaycache.ErrUncertain)
+		if current.uncertain {
+			return out, current, errors.Join(ErrConflict, relaycache.ErrUncertain)
 		}
-		return out, ErrConflict
+		return out, current, ErrConflict
 	}
 	for j := range report.Paths {
-		k := e.index(report.Paths[j].PathID)
-		if report.Paths[j].State != "excluded" && k >= 0 && (e.journal.Entries[k].LeaseVersion != 3 || e.journal.Entries[k].ProbeScope != 1) {
+		k := current.index(report.Paths[j].PathID)
+		if report.Paths[j].State != "excluded" && k >= 0 && (current.journal.Entries[k].LeaseVersion != 3 || current.journal.Entries[k].ProbeScope != 1) {
 			report.Paths[j].State, report.Paths[j].Reason = "unknown", "application_preparation_required"
 		}
 	}
@@ -333,42 +366,42 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 	out.Selection = selector.Decide(report)
 	relayobserve.Mark(ctx, "decision_complete")
 	if out.Selection.DesiredPathID == "" {
-		out.Application, err = e.quarantineTarget(ctx, id)
-		return out, errors.Join(out.Selection.Error(), err)
+		out.Application, err = current.quarantineTarget(ctx, id)
+		return out, current, errors.Join(out.Selection.Error(), err)
 	}
 	// The bounded observation wave already maintained every lease. Repeating
 	// the full sweep here can starve another target's freshness window. Apply
 	// still rechecks current approval, live lease, inventory and kernel state;
 	// an expired lease cannot be rearmed by a successful observation.
-	if e.uncertain {
-		return out, relaycache.ErrUncertain
+	if current.uncertain {
+		return out, current, relaycache.ErrUncertain
 	}
-	k := e.index(out.Selection.DesiredPathID)
+	k := current.index(out.Selection.DesiredPathID)
 	if k < 0 {
-		return out, ErrRecovery
+		return out, current, ErrRecovery
 	}
-	desired := routeForEntry(e.journal.Entries[k])
+	desired := routeForEntry(current.journal.Entries[k])
 	applyCtx, stop := context.WithTimeout(ctx, TargetApplyDuration)
-	out.Application, err = e.applyTarget(applyCtx, g, desired, out.Selection, timeout)
+	out.Application, err = current.applyTarget(applyCtx, g, desired, out.Selection, timeout)
 	stop()
-	if err != nil && !e.uncertain && e.targetIndex(id) >= 0 && e.journal.Targets[i].Phase == "switching" {
+	if err != nil && !current.uncertain && current.targetIndex(id) >= 0 && current.journal.Targets[i].Phase == "switching" {
 		// A bounded, fresh rollback is permitted only by this cycle's policy.
 		recovery, done := context.WithTimeout(context.WithoutCancel(parent), TargetApplyDuration)
-		out.Application, err = e.rollbackTarget(recovery, g, out.Selection, timeout, err)
+		out.Application, err = current.rollbackTarget(recovery, g, out.Selection, timeout, err)
 		done()
 	} else if err != nil && !out.Application.Activated {
 		recovery, done := context.WithTimeout(context.WithoutCancel(parent), TargetApplyDuration)
-		if e.uncertain {
-			err = errors.Join(err, e.blockTargetCandidates(recovery, e.journal.Targets[i]))
+		if current.uncertain {
+			err = errors.Join(err, current.blockTargetCandidates(recovery, current.journal.Targets[i]))
 		} else {
 			var cleanupErr error
-			out.Application, cleanupErr = e.quarantineTarget(recovery, id)
+			out.Application, cleanupErr = current.quarantineTarget(recovery, id)
 			err = errors.Join(err, cleanupErr)
 		}
 		done()
 	}
 	out.Applied = err == nil && out.Application.Activated
-	return out, err
+	return out, current, err
 }
 func (e *Engine) verifyTargetChoice(ctx context.Context, g TargetGuard, route *TargetRoute, d relayselect.Decision, timeout time.Duration) (Entry, error) {
 	// observePrepared below checks live approval/lease/kernel/inventory both

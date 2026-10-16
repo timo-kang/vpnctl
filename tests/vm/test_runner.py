@@ -264,6 +264,7 @@ class AutoManagerEvidenceTests(unittest.TestCase):
         for name in observer.AUTO_MANAGER_STEPS:
             row = dict(name=name, passed=True, begin_monotonic_ns=1, action_completed_monotonic_ns=2,
                        ready_observed_monotonic_ns=3, end_monotonic_ns=4,
+                       packet_offset=0, packet_snapshot_sequence=len(observer.AUTO_PACKET_KINDS),
                        traffic={k: {'ok': 1} for k in observer.AUTO_PACKET_KINDS}, metric=metrics.get(name, 'other'))
             if name in metrics:
                 row['slo'] = dict(status='pass', elapsed_ms=0.000002, limit_ms=10000)
@@ -276,11 +277,17 @@ class AutoManagerEvidenceTests(unittest.TestCase):
             steps.append(row)
             if name == 'netplan-apply':
                 row['lan_reconfiguration'] = lan_reconfiguration_evidence()
+                row['external_reconfiguration'] = dict(
+                    window_ms=0.000002,
+                    failed_packets={k: 0 for k in ('tcp-new', 'tcp-existing', 'udp', 'independent-app')},
+                    post_recovery_failures={k: 0 for k in ('tcp-new', 'tcp-existing', 'udp', 'independent-app')},
+                    post_recovery_successes={k: 1 for k in ('tcp-new', 'tcp-existing', 'udp', 'independent-app')},
+                    recovery_after_action_ms=0.000001)
         report = dict(schema_version=2, completed=True, paths=4, mode='automatic', trace_error='', steps=steps,
                       fresh_generation_confirmed=True, recovery_hysteresis_observed=True, foreign_policy_preserved=True,
                       foreign_peer_preserved=True, fallback_positive_control=True,
                       committed_dwell_monotonic_ns=15_000_000_000, health_hold_down_monotonic_ns=10_000_000_000,
-                      packets=[dict(sequence=i, kind=k, begin_monotonic_ns=1, end_monotonic_ns=2)
+                      packets=[dict(sequence=i, kind=k, begin_monotonic_ns=3, end_monotonic_ns=3, ok=True)
                                for i, k in enumerate(observer.AUTO_PACKET_KINDS, 1)],
                       cycles=[dict(observed_monotonic_ns=3, diagnostics=dict(monotonic_available=True,
                               started_monotonic_ns=1, finished_monotonic_ns=2,
@@ -302,6 +309,59 @@ class AutoManagerEvidenceTests(unittest.TestCase):
         sample['end_monotonic_ns'] = 4
         with self.assertRaisesRegex(RuntimeError, 'outside direct reconfiguration'):
             observer.validate_manager_auto_result(status, 4)
+
+    def test_netplan_admin_reconfiguration_measures_app_outage_and_requires_recovery(self):
+        status = self.valid()
+        report = status['report']
+        step = next(s for s in report['steps'] if s['name'] == 'netplan-apply')
+        sample = next(p for p in report['packets'] if p['kind'] == 'independent-app')
+        sample.update(begin_monotonic_ns=2, end_monotonic_ns=3, ok=False)
+        report['packets'].append(dict(sequence=len(report['packets']) + 1, kind='independent-app',
+                                      begin_monotonic_ns=3, end_monotonic_ns=3, ok=True))
+        step['packet_snapshot_sequence'] = len(report['packets'])
+        step['traffic']['independent-app'] = {'ok': 1, 'failed': 1}
+        step['external_reconfiguration'] = {
+            'window_ms': 0.000002,
+            'failed_packets': {'tcp-new': 0, 'tcp-existing': 0, 'udp': 0, 'independent-app': 1},
+            'post_recovery_failures': {'tcp-new': 0, 'tcp-existing': 0, 'udp': 0, 'independent-app': 0},
+            'post_recovery_successes': {'tcp-new': 1, 'tcp-existing': 1, 'udp': 1, 'independent-app': 1},
+            'recovery_after_action_ms': 0.000001,
+        }
+        observer.validate_manager_auto_result(status, 4)
+
+        sample['begin_monotonic_ns'] = 3
+        with self.assertRaisesRegex(RuntimeError, 'fresh application failure after admin reconfiguration recovery'):
+            observer.validate_manager_auto_result(status, 4)
+
+        sample['begin_monotonic_ns'] = 2
+        report['packets'].pop()
+        step['packet_snapshot_sequence'] = len(report['packets'])
+        step['traffic']['independent-app'] = {'ok': 0, 'failed': 1}
+        step['external_reconfiguration']['post_recovery_successes']['independent-app'] = 0
+        with self.assertRaisesRegex(RuntimeError, 'application did not recover after admin reconfiguration'):
+            observer.validate_manager_auto_result(status, 4)
+
+    def test_netplan_admin_reconfiguration_records_broken_existing_tcp_separately(self):
+        status = self.valid()
+        report = status['report']
+        step = next(s for s in report['steps'] if s['name'] == 'netplan-apply')
+        sample = next(p for p in report['packets'] if p['kind'] == 'tcp-existing')
+        sample['ok'] = False
+        step['traffic']['tcp-existing'] = {'ok': 0, 'failed': 1}
+        step['external_reconfiguration']['post_recovery_failures']['tcp-existing'] = 1
+        step['external_reconfiguration']['post_recovery_successes']['tcp-existing'] = 0
+        observer.validate_manager_auto_result(status, 4)
+
+        del step['external_reconfiguration']['post_recovery_failures']
+        with self.assertRaisesRegex(RuntimeError, 'missing external manager reconfiguration evidence'):
+            observer.validate_manager_auto_result(status, 4)
+
+    def test_packet_snapshot_watermark_excludes_concurrent_append(self):
+        status = self.valid()
+        report = status['report']
+        report['packets'].append(dict(sequence=len(report['packets']) + 1, kind='tcp-new',
+                                      begin_monotonic_ns=2, end_monotonic_ns=3, ok=False))
+        observer.validate_manager_auto_result(status, 4)
 
     def test_lan_recovery_needs_routes_payloads_and_bounded_clock(self):
         for mutate in (lambda r: r.pop('lan_reconfiguration'),

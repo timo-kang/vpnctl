@@ -19,6 +19,24 @@ type ownedObservationChecker struct {
 	check observationChecker
 }
 
+// Share only the public namespace inventory within one observation. The caller
+// must defer the returned restoration so later inspection, application proof,
+// maintenance and mutation checks read live state, including after failed waves.
+// A fresh Engine gets a fresh cache for its postchecks.
+func enableTargetObservationInventory(e *Engine) func() {
+	if e == nil {
+		return nil
+	}
+	k, ok := e.backend.(nodeKernel)
+	if !ok {
+		return nil
+	}
+	original := e.backend
+	k.run = observationInventory(k.run, leaseBootTime)
+	e.backend = k
+	return func() { e.backend = original }
+}
+
 func (e *Engine) targetProbeChecker(ctx context.Context) observationChecker {
 	if shared, ok := ctx.Value(observationCheckerKey{}).(ownedObservationChecker); ok && shared.owner == e {
 		return shared.check
