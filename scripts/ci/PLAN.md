@@ -1,62 +1,63 @@
-# Fixed-source application failure evidence validation
+# App connection-loss hypothesis experiment
 
-Experiment-only branch; never merge this workflow into main. Existing PR CI
-and all prior failures remain unchanged. This run validates diagnostic capture
-and original app contracts; it is not a performance adoption comparison.
+Experiment-only branch. Never merge this workflow or diagnostic harness into
+main. This experiment cannot qualify the original 15-phase application trial.
+Fixed product/harness source: `7af8b777a13a0acef5c685c6cbf817201a945b9e`. Product and both real
+client implementations are unchanged from 9c0700f; the test-only echo server
+adds optional bounded close diagnostics. All candidate/approval safety checks,
+client one-second connect/I/O deadlines and server two-second read limit stay.
 
-Product and harness source: `9c0700fd393657a51d7b696eb6ba834b0c713a4d`. It adds #249's worker
-assertion tail and bounded graceful app failure cleanup to `2fd9b52`. The diff
-changes only the harness, regression tests, CI regression selection and docs.
-Product code, client connect/I/O deadlines, retry behavior, CPU budgets, all
-15 original phases, connection-preservation and approval gates remain unchanged.
+Earlier 38858704963 completed both original app profiles successfully at9c0700f;
+all15 phases and original validators passed. This does not resolve the prior
+2fd9b52 eight-path failure and did not exercise failed-client cleanup in a guest.
+The new experiment changes interventions and evidence rather than retrying the
+old test for a green result. Original PR CI and old artifacts remain untouched.
 
-Earlier run 38847391806 completed all ten planned invocations at `2fd9b52`:
-three passed and seven failed, without cancellation, retry or infrastructure
-error. Four-candidate API-off/on and actual apps passed; all six eight-candidate
-capacity trials failed. Actual eight-candidate apps failed api_outage_payload
-after baseline/api_outage. Subsequent phases were not executed. Connection
-counters alone cannot identify why a socket was replaced; missing worker and
-final request evidence motivated this harness fix. Those results stay intact.
+Hypotheses: API outage coupling; whole-robot CPU contention; server idle close;
+transient route/approval enforcement; environmental/order effects. Loopback real
+TLS testing reproduced server idle timeout without VPN/API. This proves a
+possible mechanism, not the cause of the original unforced incident. Refer to
+fixed-source docs/testing/app-outage-hypotheses.md for evidence/causality limits.
 
-Fixed schedule, once each, without retrying to obtain a pass:
+Predeclared order, fresh disposable VM overlay and fixture for every invocation:
 
-| Order | Profile | Purpose |
-| --- | --- | --- |
-| 1 | Actual Go/Python applications, 4 candidates, split CPUs | Preserve previously passing behavior |
-| 2 | Actual Go/Python applications, 8 candidates, split CPUs | Capture failure assertion and final request events if failure recurs |
+| Order | API socket | Robot quota | Injection |
+| --- | --- | --- | --- |
+| 1 | unchanged | 0.5 CPU | none |
+| 2 | renamed/offline | 0.5 CPU | none |
+| 3 | renamed/offline | 1 CPU | none |
+| 4 | unchanged | 1 CPU | none |
+| 5 | unchanged | 1 CPU | none |
+| 6 | renamed/offline | 1 CPU | none |
+| 7 | renamed/offline | 0.5 CPU | none |
+| 8 | unchanged | 0.5 CPU | none |
+| 9 | unchanged | 0.5 CPU | Go app child SIGSTOP3s then SIGCONT |
 
-Do not rerun the unchanged capacity matrix. A passing app8 trial would qualify
-only this execution's original app contracts and would leave VM failure-capture
-coverage incomplete; it cannot erase the earlier failure or establish its cause.
-An app failure remains a failure after cleanup. Inspect unfinished phase markers
-and original worker exit, bounded/redacted worker tail, per-app client_cleanup,
-final events/counters and last progress. Events emitted during cleanup are
-strictly diagnostic and must never complete or qualify the original phase.
-If an app cannot drain within 12 seconds, retain its forced/failed state and
-missing evidence explicitly. Do not convert incomplete evidence into success.
+Each cell observes45 seconds after action completion, after a healthy baseline.
+Two prespecified repetitions per cell, reversed order; no selective repeats.
+The positive control deliberately challenges connection preservation and is
+expected to return worker exit1. Retain that failure unchanged: workflow failure
+is expected if the positive control works, and must not be called a product
+regression. Check assertion, both final histories, cleanup states and server
+read-timeout evidence. Expected failure cannot excuse an unrelated setup fault.
 
-One disposable GitHub-hosted ubuntu-24.04 runner builds race binaries and the
-Docker image once via the original scripts/test-vm.sh. First trial prepares one
-guest base image; second reuses exact read-only image and executable/module bytes
-verified by SHA-256 before and after each trial. Fresh writable overlays and
-fixtures per trial. Never rebuild or retry after an initial failure. Only remove
-an invocation's owned runtime after Docker confirms its named container stopped;
-retain reports/logs. Unconfirmed cleanup is an infrastructure failure.
+Successful diagnostic trials must explicitly remain qualified=false with
+unsupported_reason=diagnostic_only_no_qualification and completed=true. Exit0
+without that contract is rejected. All nonzero exits remain nonzero, including
+positive control; later planned cells still execute. Full15-phase/CPU capacity
+qualification gates are unchanged and cannot be replaced by these short windows.
 
-Both profiles use two guest/outer CPUs, verified role placement, robot quota
-0.5 CPU, container 2 GiB without swap/network/capabilities and guest 768 MiB.
-No API load flood is enabled; the actual apps still consume their APIs normally.
-First preparation has a 35-minute watchdog, second trial 25 minutes. Workflow
-execution is limited to 75 minutes, job to 90 minutes, with time to seal partial
-evidence. Timeouts mean failure/incomplete, not an app recovery SLO.
+One GitHub-hosted disposable ubuntu24.04 runner builds race binaries and image
+once. Preserve all11 executable/module hashes, verify base image before/after
+and against every runner manifest; no rebuild after initial failure. Fresh writable
+overlays; only remove owned runtime after named container termination confirmed.
+Host boot identity fixed. Split two guest/outer CPUs throughout; robot roles on
+CPU0, controller/relays/measurement onCPU1. Container2GiB/no swap/no network/no
+capabilities, guest768MiB. Quota1 changes the entire robot role budget, not just
+the app; evidence cannot identify an individual process from that intervention.
 
-Every planned trial executes despite a preceding failure. A zero exit requires
-one matching completed and qualified observer verdict. Preserve image/source/CPU
-identity and original app validator. A single pair cannot establish hardware
-capacity, latency distribution, API load qualification or general root cause.
-
-Network/kernel operations occur only inside owned disposable guests. Device ACL
-setup is limited to the GitHub-hosted runner. No local host network, power, clock
-or kernel changes. Raw detailed evidence, logs and retained executables are
-encrypted before artifact upload; the private key stays off CI. Do not print raw
-measurements into public logs or PR conclusions.
+Keep first35-minute build watchdog and later25-minute trial watchdogs, 245-minute
+execution/270-minute job bounds with time to seal incomplete evidence. These are
+experiment limits, never deployment SLOs. All raw logs/reports/binaries encrypted
+before upload to an off-runner private key. No local host networking, kernel,
+clock, power or process suspension. Only the owned guest app child is paused.

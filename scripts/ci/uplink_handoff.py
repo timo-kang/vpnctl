@@ -12,7 +12,7 @@ import traceback
 from isolated_evidence import (checked_source, digest, prepare_kvm, read_command,
                               require_disposable_runner, work_directories, write_json)
 
-SOURCE = '9c0700fd393657a51d7b696eb6ba834b0c713a4d'
+SOURCE = '7af8b777a13a0acef5c685c6cbf817201a945b9e'
 BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
             'vpnctl-lease-v2', 'uplink-go'} | {
     'uplink-python/' + name + '.py' for name in
@@ -20,10 +20,13 @@ BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
 
 
 def schedule():
-    profiles = [('uplink-apps-4', 'split', False), ('uplink-apps-8', 'split', False)]
-    return [dict(sequence=i, case=case, layout=layout, api_load=load,
-                 outer_cpus='2' if layout == 'split' else '1', robot_cpus='0.5')
-            for i, (case, layout, load) in enumerate(profiles, 1)]
+    # Two predeclared repetitions per cell, reversed order in the second block.
+    cells = [('control', '0.5'), ('api', '0.5'), ('api', '1'), ('control', '1'),
+             ('control', '1'), ('api', '1'), ('api', '0.5'), ('control', '0.5'),
+             ('stall', '0.5')]
+    return [dict(sequence=i, case='uplink-diag-' + mode, layout='split', api_load=False,
+                 outer_cpus='2', robot_cpus=cpu, expected_injected_failure=mode == 'stall')
+            for i, (mode, cpu) in enumerate(cells, 1)]
 
 
 def arguments(row):
@@ -121,8 +124,9 @@ def validate_trial(destination, row, prepared, exit_code):
     if exit_code == 0:
         verdicts = json.loads((artifacts / 'verdicts.json').read_text())
         if (len(verdicts) != 1 or verdicts[0].get('case') != row['case']
-                or verdicts[0].get('completed') is not True or verdicts[0].get('qualified') is not True):
-            raise ValueError('successful_trial_not_qualified')
+                or verdicts[0].get('completed') is not True or verdicts[0].get('qualified') is not False
+                or verdicts[0].get('unsupported_reason') != 'diagnostic_only_no_qualification'):
+            raise ValueError('diagnostic_trial_missing_explicit_nonqualification')
 
 
 def container_command(row, destination, prepared, name, runtime):

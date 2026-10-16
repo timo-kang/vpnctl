@@ -10,14 +10,17 @@ from isolated_evidence import digest
 
 
 class FixedUplinkValidationTests(unittest.TestCase):
-    def test_exact_schedule_keeps_only_the_two_diagnostic_app_profiles(self):
+    def test_exact_schedule_reverses_cells_and_retains_injected_failure(self):
         rows = runner.schedule()
-        self.assertEqual(len(rows), 2)
-        self.assertEqual([r['sequence'] for r in rows], [1, 2])
-        self.assertEqual([r['case'] for r in rows], ['uplink-apps-4', 'uplink-apps-8'])
+        self.assertEqual(len(rows), 9)
+        self.assertEqual([r['sequence'] for r in rows], list(range(1,10)))
+        cells=[(r['case'],r['robot_cpus']) for r in rows]
+        self.assertEqual(cells[:4], [('uplink-diag-control','0.5'),('uplink-diag-api','0.5'),('uplink-diag-api','1'),('uplink-diag-control','1')])
+        self.assertEqual(cells[4:8],list(reversed(cells[:4])))
+        self.assertEqual(cells[8],('uplink-diag-stall','0.5'))
+        self.assertEqual([r['expected_injected_failure'] for r in rows],[False]*8+[True])
         for row in rows:
-            self.assertEqual((row['layout'], row['outer_cpus'], row['robot_cpus'], row['api_load']),
-                             ('split', '2', '0.5', False))
+            self.assertEqual((row['layout'],row['outer_cpus'],row['api_load']),('split','2',False))
         for r in rows:
             args = runner.arguments(r)
             self.assertEqual('--uplink-api-load' in args, r['api_load'])
@@ -34,14 +37,22 @@ class FixedUplinkValidationTests(unittest.TestCase):
                     raise RuntimeError('unavailable image')
                 return 1 if row['sequence'] == 1 else 0
             self.assertEqual(runner.execute_schedule(root, invoke), 1)
-            self.assertEqual(seen, [1, 2])
+            self.assertEqual(seen, list(range(1,10)))
             progress = json.loads((root / 'progress.json').read_text())
-            self.assertEqual([r['exit_code'] for r in progress], [1, 125])
-            self.assertEqual(json.loads((root / 'complete.json').read_text()), {'invocations': 2, 'all_exit_zero': False})
+            self.assertEqual([r['exit_code'] for r in progress], [1, 125]+[0]*7)
+            self.assertEqual(json.loads((root / 'complete.json').read_text()), {'invocations': 9, 'all_exit_zero': False})
             with self.assertRaises(FileExistsError):
                 runner.execute_schedule(root, invoke)
 
-    def test_zero_exit_cannot_qualify_missing_false_or_mismatched_evidence(self):
+    def test_expected_stall_failure_is_preserved_not_converted_to_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            self.assertEqual(runner.execute_schedule(root, lambda row, destination: 1 if row['expected_injected_failure'] else 0),1)
+            progress=json.loads((root/'progress.json').read_text())
+            self.assertEqual([row['exit_code'] for row in progress],[0]*8+[1])
+            self.assertEqual(json.loads((root/'complete.json').read_text()),{'invocations':9,'all_exit_zero':False})
+
+    def test_zero_exit_requires_explicit_diagnostic_nonqualification(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifacts = root / 'artifacts'
@@ -53,8 +64,8 @@ class FixedUplinkValidationTests(unittest.TestCase):
             runner.validate_trial(root, row, prepared, 1)  # Retain early failure.
             evidence = {'image': prepared['image'], 'cpu_layout': 'split', 'guest_vcpus': 2, 'cpu_max': ['200000', '100000']}
             (artifacts / 'runner.json').write_text(json.dumps(evidence))
-            verdict = {'case': row['case'], 'completed': True, 'qualified': True}
-            for change in ({'qualified': False}, {'completed': False}, {'case': 'another-case'}):
+            verdict = {'case': row['case'], 'completed': True, 'qualified': False, 'unsupported_reason':'diagnostic_only_no_qualification'}
+            for change in ({'qualified': True}, {'completed': False}, {'case': 'another-case'}, {'unsupported_reason': 'other'}):
                 (artifacts / 'verdicts.json').write_text(json.dumps([dict(verdict, **change)]))
                 with self.assertRaises(ValueError):
                     runner.validate_trial(root, row, prepared, 0)
