@@ -1,0 +1,123 @@
+# 배포 빌드 uplink 복구 비교
+
+현재 main 73a5d5f의 제품 코드를 유지하고, race 없는 vpnctl과 OpenVPN을 동일한 격리 VM 토폴로지에서 비교한다. 이 실험은 기존 10초 연속성 검증을 대체하지 않는다.
+
+## 고정할 조건
+
+- controller는 로봇/릴레이와 별도 namespace. 실제 uplink 서버 두 주소는 릴레이 뒤에만 있다. 로봇에는 서버로 가는 직접 경로가 없다.
+- 두 릴레이와 2/4개 underlay로 4/8개 후보 endpoint. 두 앱의 새 TCP 거래 및 첫 앱의 기존 TCP 소켓을 완료 후 200ms 간격, 연결400ms·프레임 읽기/쓰기 각각400ms 제한으로 관측한다. 기존 연결 실패를 새 연결로 숨기지 않는다.
+- 2 vCPU VM, 외부2 CPU/2GiB/0swap/pids256. 로봇 제어 프로세스와 자식은 CPU0·0.5CPU, 서버/측정기는 CPU1·1CPU. 메모리와 cgroup CPU 증거를 전후 수집한다.
+- vpnctl은 현재 제품 기본값(관측 freshness10초, 연결 한도1초, 재확인2회)을 유지하며 watch interval500ms인 명시적 운용 프로필을 사용한다. 노드·릴레이 supervisor의 인증된 갱신 주기는 fixture에서 1초로 설정한다(제품 CLI 기본값은 5초). 앱 probe timeout은 기본 1초다. 기존 #185 capacity fixture의 2초 설정·race 빌드·VM 전체 1CPU 조건과 다르므로 원인 재현으로 해석하지 않는다.
+- OpenVPN은 UDP/TLS 인증, AES-256-GCM, 하나의 활성 터널과 순서가 고정된 여러 remote. ping1초/ping-restart5초, handshake3초/connect-retry1초를 명시하는 빠른 전환 프로필. 배포 기본값 또는 최적 설정이라고 주장하지 않는다. DCO는 양쪽 실험 이미지의 지원 차이 때문에 끄고 기록한다.
+- OpenVPN은 터널 상대의 통신 상태를 검사하며 목적지 앱/승인·커널 lease 검사와 동일한 기능을 제공하지 않는다. 기능 범위 차이를 성능 순위로 숨기지 않는다.
+
+## 장애와 측정
+
+초기 활성 후보r0/wan0 및 두 앱의 정상 응답을 확인한 뒤10초 정상 창을 수집한다. 장애 명령 전후의 CLOCK_MONOTONIC을 기록하고, 명령 완료 후 시작한 요청으로만 첫 복구를 판정한다. 모든 사례의 장애 관측 창은45초이며, 복구하지 못하면 관측 종료 시점까지 미복구로 기록한다.0초 또는45초에 복구한 것으로 대체하지 않는다.
+
+1. 로봇 wan0 link-down.
+2. 선택된 relay endpoint의 UDP를 relay INPUT에서 조용히 drop. 로봇→릴레이 방향의 blackhole이며 역방향 패킷은 계속 도착할 수 있다.
+3. 첫 relay의 모든 입력/출력/전달을 drop하여 relay 격리.
+4. 첫 relay 뒤의 첫 앱 uplink 전달만 drop. 터널은 살아 있다. 앱2에 대한 영향도 별도로 기록한다.
+5. 마지막 r1/wanN endpoint 하나를 제외한 모든 후보의 정확한 UDP 목적지/포트를 각 릴레이 INPUT에서 drop. 4경로 중3개, 8경로 중7개가 무응답이다. 관리 통신은 유지한다.
+
+vpnctl에는 별도 참조로 `app1-last-path`를 공통 사례 뒤에 추가한다. robot OUTPUT에서 실제 Candidate.Pin.WGInterface 중 마지막 것을 제외한 인터페이스의 앱1 TCP만 drop한다. 앱2와 터널 UDP는 그대로다. 이는 #185의 앱별 후보 부하 형태를 정상창 이후 동적으로 만드는 참조이며 원래 처음부터 후보들이 실패한 조건과 동일한 재현이라고 주장하지 않는다. OpenVPN은 이 행에서 해당 없음이며 실패·미복구로 집계하지 않는다. 복구 시간만으로 10초 freshness의 인과효과를 주장하지 않고 앱별 reconcile 원본 시각·선택·적용 로그를 함께 보존한다.
+
+새 연결 성공시점과 기존 소켓의 회복/오류/미복구를 구분한다. 실패한 계측 시도 수는 패킷 손실률이나 서로 다른 요청 수가 아니다. 타이머/계측 간격 때문에0.2초 이하 순위나p95/p99를 소수 표본에서 주장하지 않는다. 승인 안전성은 별도 기존 검증을 유지한다.
+
+## 실행 순서와 증거
+
+먼저 별도 계측 검증(pilot)을 수행한다. pilot은 성능 표본에 포함하지 않는다. 측정기 검증 후 source/binary/image/config/분석기 해시를 고정하고4/8경로 각3쌍을 AB/BA/AB 순서로 실행한다. 한 VM에서는 동일 제품/규모의 공통 다섯 장애와 vpnctl 전용 참조 사례를 각각 새 fixture로 실행한다. 실행 중단·성공할 때까지 재시도·실패 삭제는 하지 않는다. 계측 결함이면 해당 계획을 무효로 남기고 수정 버전을 별도 계획으로 고정한다.
+
+안전한 비공개 원본과 정제 요약을 함께 남긴다. 호스트 네트워크/Wi-Fi/커널/clock/power를 변경하지 않는다. OpenVPN 설치는 비교용 게스트 이미지 안에서만 한다. 비교 결과는 이 구성의 탐색적 median/range이며 하드웨어 배포 인증이나fleet p95가 아니다.
+
+## 계측 유효성
+
+앱별 새 연결과 기존 소켓 각각 정상 창 안의 응답이 있어야 하며 정상 창 실패는 기준 미달로 별도 판정한다. 실제 표본 간격(요청 소요시간 포함), 관측 끝까지의 응답 공백, CPU 사용/스로틀링 누적값 전후를 보존한다. 계측기가 조기에 멈추면 성공 표본이 있었다고 정상 처리하지 않는다. 기존 소켓은 타임아웃 후에도 원래 nonce·송신 시각을 유지하여 늦은 응답이 장애 후 새 거래처럼 집계되지 않게 한다. CPU 제한은 동일하지만 제품 기능과 터널 구현의 작업량까지 같다고 가정하지 않는다.
+
+역할별 CPU 제한은 사용자 공간 프로세스와 자식의 cgroup 제한이다. OpenVPN의 사용자 공간 데이터 처리와 WireGuard의 커널/softirq 처리는 비용 귀속이 같지 않다. 외부 VM 전체의 CPU도 기록하되 이 시험으로 동일한 전체 로봇 CPU 효율 또는 처리량을 주장하지 않는다. OpenVPN의 장애 직전 management state와 vpnctl의 최신 선택 결과 모두 r0/wan0를 확인한다.
+
+컨트롤러는 별도 관리용 veth/host route로 로봇과 통신하며 IP forwarding을 끈다. wan0 장애가 동시에 승인 통신 장애가 되는 혼입을 피하고 실제 서버 uplink의 직접 우회 경로는 만들지 않는다. 이 구성의 결과는 컨트롤러까지 함께 끊기는 복합 장애 결과로 일반화하지 않는다.
+
+## Pilot 이력과 실행 예산
+
+- Pilot-1: OpenVPN 설치가 남긴 apt archive/partial 권한으로 capability-free 이미지 생성 실패. VM은 시작하지 않았고 원본 실패를 보존했다. guest 이미지에서 해당 임시 디렉터리만 제거했다.
+- Pilot-2: 4경로 양 제품 각 두 장애는 45초 측정 완료. endpoint/uplink-drop 두 사례는 정상창 후 한 줄 nft 파일 문법 오류로 주입 실패. 전체를 성능 표본에서 제외하고 원본을 보존했다. 중간에 VM을 중지하거나 측정창을 연장하지 않았다.
+- Pilot-3: 주입 규칙을 여러 줄 문법으로 수정하고 8경로에서 공통5개 및 vpnctl 참조1개를 검증한다. 각 VM worker15분/observer16분 상한, 장애45초는 동일하다. 최종 예비 시험은 양 제품의 공통10개 및 vpnctl 참조1개 모두 측정·차단 범위 검증을 통과했다. 성능 표본에서는 제외한다.
+- 본 표본: 4/8경로 각3쌍 AB/BA/AB. 공통60개 장애 관측 + vpnctl 전용6개 참조. 최종 소스·실행기·분석기·이미지/바이너리 해시를 이슈에 고정한 후 실행한다. 예상 시간 안에서 미복구는 유효한 결과이며 관측창을 늘리지 않는다.
+
+차단 규칙과 카운터를 장애 설치 직후/45초 종료 후 함께 기록하고, 마지막 경로 조건에서는 최종 OpenVPN remote 또는 vpnctl의 실제 선택·적용을 남긴다. r1이라는 응답 표지만으로 underlay 사용을 추정하지 않는다.
+
+공식 옵션 근거: [OpenVPN 2.6 매뉴얼](https://openvpn.net/community-docs/community-articles/openvpn-2-6-manual.html), [다중 remote 전환 설명](https://openvpn.net/community-docs/implementing-a-load-balancing-failover-configuration.html).
+
+`fault_rules_before`는 설치 직후 스냅샷이므로 이미 초기 차단 패킷이 포함될 수 있다. 카운터 단조성과 전체 차단 증거를 확인하며 전후 차이가0이라는 이유만으로 무효화하지 않는다. `final_selection`은 관측창 후 조회 시각 범위를 같이 저장한 보조 증거다.45초 안에 선택/복구했다는 판정에는 원본 응답·reconcile 시각을 사용한다.
+
+8경로·최대6개 fixture의 전체 원본 보고서와 로그 수집 한도는 VM당32MiB다. 수집 상한을 넘으면 계측 실패로 남기며 정상창·관측창이나 제품 자원 제한을 늘리지 않는다.
+
+본 측정에서는 VM case 전체의 검증이 통과해야 그 case의 수치를 비교에 사용한다. 중간 fixture만 선별하지 않는다. 무효 case는 계획된 각 장애 행을 `unusable`로 남기며 제외 사유와 전체 계획 대비 유효 표본 수를 표시한다. 차단 규칙의 family/table/base chain·정확한 match 조합·counter 위치·drop·단조 카운터와 스냅샷 시각을 독립 분석기로 검사한다. 검증 오류가 분석 전체를 중단하거나 원본 오류 문자열이 정제 출력으로 유출되지 않게 한다.
+
+각 조건의 세 번 중 미복구가 포함되면 회복한 표본만의 median으로 전체를 대표하지 않는다. 45초 내 복구 개수/유효 관측 개수, 미복구 개수, 각 표본을 함께 제시한다. 첫 응답 뒤 재실패와 마지막 응답의 나이도 기록하여 일시적 응답을 지속 회복으로 단정하지 않는다.
+
+## 비교 실행과 분석 재현
+
+비교는 opt-in case다. 기본 CI matrix에 장시간 OpenVPN 비교를 자동으로 추가하지 않는다. KVM을 사용할 수 있는 Linux runner에서 아래와 같이 전용 이미지를 만들고, `scripts/test-vm.sh`에 명시적 case를 전달한다. 이미지 생성 시에만 패키지 다운로드가 필요하며 실제 시험 컨테이너는 network-none이다.
+
+```bash
+DOCKER_BUILDKIT=0 docker build --cpu-period=100000 --cpu-quota=100000 --memory=2g \
+  --build-arg BASE_VM=<고정된-base-VM-image-id> \
+  -f tests/vm/Dockerfile.comparison -t vpnctl-uplink-comparison tests/vm
+
+```
+
+다음 Python 예시는 저장소 루트에서 실행한다. 먼저 `comparison_image`에 고정된 이미지 ID를 넣고 `run`을 새 경로로 지정한다. 측정 전 validator와 인자를 고정하고, 결과는 분석기가 기대하는 `<run>/artifacts`에 저장한다. 실제 종료 코드는 자동 보존하며 원본 출력은 비공개 `run.log`로 보낸다.
+
+```python
+from pathlib import Path
+import hashlib, json, os, shutil, subprocess
+
+comparison_image = "<고정된-comparison-image-id>"
+run = Path("/tmp/vpnctl-comparison-새로운실행")
+os.umask(0o077)
+assert not subprocess.check_output(["git", "status", "--porcelain"])
+run.mkdir(mode=0o700)  # 이미 존재하면 중단: 원본을 덮어쓰지 않는다.
+shutil.copyfile("tests/vm/uplink_comparison.py", run / "validator.py")
+cases = [f"uplink-{product}-{size}"
+         for order in (("vpnctl", "openvpn"), ("openvpn", "vpnctl"), ("vpnctl", "openvpn"))
+         for size in (4, 8) for product in order]
+args = ["./scripts/test-vm.sh", "--case", *cases, "--cpu-layout", "split", "--robot-cpus", "0.5"]
+controls = dict(GOMAXPROCS="2", VPNCTL_VM_IMAGE=comparison_image, VPNCTL_VM_CPUS="2",
+                VPNCTL_VM_RACE="0", VPNCTL_ARTIFACT_DIR=str(run / "artifacts"), VPNCTL_KEEP_VM_WORK="1")
+plan = dict(cases=cases, faults=["link-down", "endpoint-drop", "relay-drop", "uplink-drop", "last-endpoint-only"],
+            vpnctl_reference=["app1-last-path"],
+            source=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+            args=args, controls=controls,
+            validator_sha256=hashlib.sha256((run / "validator.py").read_bytes()).hexdigest())
+(run / "plan.json").write_text(json.dumps(plan, indent=2))
+(run / "status.json").write_text(json.dumps(dict(state="running")))
+try:
+    with (run / "run.log").open("w") as log:
+        result = subprocess.run(args, env=dict(os.environ, **controls), stdout=log,
+                                stderr=subprocess.STDOUT, umask=0o022)
+    status = dict(state="completed", exit=result.returncode)
+except BaseException:
+    (run / "status.json").write_text(json.dumps(dict(state="interrupted", exit=None)))
+    raise
+(run / "status.json").write_text(json.dumps(status))
+```
+
+`run-*.txt`가 소스 commit·race 여부·이미지·실제 투입 바이너리 해시와 인자를 기록한다. `verdicts.json`의 순서는 실행 순서이고, 각 고유 artifact 디렉터리는 별도 VM이다. 원본 `verdict.json`, guest 로그와 보존된 private VM image는 공개 업로드 대상이 아니다. `completed`는 실행 종료 표시이며 성능 통과나 유효 표본을 뜻하지 않는다.
+
+독립 정제 분석기는 `uplink_analysis.py`, 차단 증거 검사는 `uplink_fault_evidence.py`에 있다. 실행별 validator 사본이 현재 저장소의 검증기와 같은 해시인지 먼저 확인하며, 임의 artifact 안의 Python 코드를 실행하지 않는다. 이전 계약을 분석하려면 해당 검증기 버전의 신뢰할 수 있는 체크아웃을 사용한다.
+
+```bash
+python3 tests/vm/uplink_analysis.py <실행별-디렉터리>
+python3 tests/vm/uplink_summary.py <실행별-디렉터리>
+```
+
+분석기는 고정 enum과 수치만 포함한 `safe-analysis.json`을 만든다. 원본 증거가 잘못됐거나 VM case 안의 하나라도 계측 검증을 통과하지 못하면 case 전체의 수치를 집계하지 않고 예정 장애의 실패 행을 보존한다. 동일 artifact를 중복 참조하면 독립 반복으로 세지 않는다. 원본 report를 수동 편집해 통과시키거나 미복구 결과를 다른 실행으로 대체해서는 안 된다.
+
+조건별 세 개 독립 반복의 개별 수치와 유효/미복구 개수를 함께 보고한다. 이 문서에 적힌 한 번의 실제 실행 결과는 고정된 source/image/profile 조합의 탐색적 결과이며, 명령을 다른 머신에서 재실행했다고 같은 지연 값이 보장되는 것은 아니다.
+
+작은 TCP echo 거래를 사용하므로 고대역폭 영상/UDP 전송 성능은 측정하지 않는다. 실제 Wi-Fi 전파·LTE handover·공유망의 혼잡은 합성 link/drop 장애에 포함되지 않는다. 실제 배포 SLO에는 해당 환경과 앱의 재연결 동작을 별도로 포함해야 한다.
+
+원본 계측 계약의 `unrecovered_at_end`는 관측창 안에서 장애 후 시작한 거래의 응답을 한 번도 확인하지 못했다는 플래그다. 종료 순간의 연결 상태를 직접 검사한 값이 아니다. 첫 복구 후 재실패·최대 응답 공백·마지막 응답 나이를 함께 확인해야 한다.
