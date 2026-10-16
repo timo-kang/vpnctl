@@ -202,10 +202,24 @@ def direct_artifact_guard(path, tail=False):
 
 def direct_artifact(path, limit, tail=False):
     direct_artifact_guard(path, tail)
-    with path.open('rb') as stream:
-        offset = max(0, path.stat().st_size - limit) if tail else 0
-        stream.seek(offset)
-        raw = stream.read(limit if tail else limit + 1)
+    # Guarding a name does not pin the file: a producer may replace it before
+    # open. Never follow the replacement or block on a FIFO/device. Size and
+    # content must come from the same verified, regular file descriptor.
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    finally:
+        os.close(parent)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError('direct artifact must be a regular file')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            offset = max(0, info.st_size - limit) if tail else 0
+            stream.seek(offset)
+            raw = stream.read(limit if tail else limit + 1)
+    finally:
+        os.close(fd)
     if len(raw) > limit:
         raise RuntimeError('direct artifact exceeds size limit: ' + path.name)
     if offset:
@@ -376,10 +390,12 @@ class Handler(BaseHTTPRequestHandler):
                         paths, cpu = req.get('paths'), req.get('robot_cpus')
                         layout = req.get('cpu_layout', 'shared')
                         rebuild = req.get('rebuild', False)
-                        if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25') or layout not in ('shared', 'split') or type(rebuild) is not bool:
+                        uplink_api = req.get('uplink_api', False)
+                        if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25') or layout not in ('shared', 'split') or type(rebuild) is not bool or type(uplink_api) is not bool:
                             raise ValueError('explicit bounded robot CPU and path profile required')
                         env.update(VPNCTL_CAPACITY_PATHS=str(paths), VPNCTL_CAPACITY_ROBOT_CPU=cpu, VPNCTL_CAPACITY_CPU_LAYOUT=layout,
-                                   VPNCTL_CAPACITY_REBUILD='1' if rebuild else '0')
+                                   VPNCTL_CAPACITY_REBUILD='1' if rebuild else '0',
+                                   VPNCTL_CAPACITY_UPLINK_API='load' if uplink_api else 'off')
                     with (ROOT / 'worker.log').open('wb') as log:
                         test = {'application-mixed-start': 'TestNetns_M3TargetApplicationMixedCandidates',
                                 'application-preparation-start': 'TestNetns_M3PreparationCapacity',
@@ -394,6 +410,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError('mixed application fixture not started')
                 result = {'exit': WORKER.poll()}
                 if result['exit'] is not None:
+                    # Keep the actual test assertion even when setup/cleanup
+                    # fails before a structured measurement exists. Optional
+                    # diagnostics must never hide the original worker exit.
+                    try:
+                        result['worker_log'] = direct_artifact(ROOT / 'worker.log', 32768, tail=True)
+                    except (OSError, RuntimeError):
+                        result['worker_log_error'] = 'unavailable'
                     reports, total = [], 0
                     filename = 'application-mixed-candidates.json' if action != 'application-approval-result' else 'application-approval.json'
                     for report in sorted((ROOT / 'results').glob('*/' + filename)):

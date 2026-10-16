@@ -16,6 +16,7 @@ import (
 	"vpnctl/internal/relayobserve"
 	"vpnctl/internal/relayselect"
 	"vpnctl/internal/underlayevent"
+	"vpnctl/internal/uplinkapi"
 )
 
 func runNodeRelaySelect(args []string) error {
@@ -32,6 +33,8 @@ func runNodeRelaySelection(args []string, apply bool) error {
 	target := fs.String("target-id", "", "approved application target ID")
 	controller := fs.String("controller-id", "", "expected controller identity")
 	watch := fs.Bool("watch", false, "continuously observe and decide (target reconcile also applies routes)")
+	apiDir := fs.String("uplink-api-dir", "", "optional provisioned runtime directory for local read-only uplink API (target reconcile --watch only)")
+	apiUIDs := fs.String("uplink-api-allow-uids", "", "explicit comma-separated local reader UIDs for uplink API")
 	samples := fs.Int("samples", 2, "observation cycles (2..1000), ignored with --watch")
 	interval := fs.Duration("interval", 2*time.Second, "delay between completed cycles (100ms..1m)")
 	timeout := fs.Duration("probe-timeout", time.Second, "per-path TCP evidence timeout (10ms..2s)")
@@ -47,6 +50,10 @@ func runNodeRelaySelection(args []string, apply bool) error {
 	}
 	if len(fs.Args()) != 0 || *target == "" || *samples < 2 || *samples > 1000 || *interval < 100*time.Millisecond || *interval > time.Minute || *timeout < 10*time.Millisecond || *timeout > 2*time.Second {
 		return fmt.Errorf("target-id and bounded samples/interval/probe-timeout required")
+	}
+	apiOptions, err := uplinkAPIOptions(*apiDir, *apiUIDs, apply, *watch)
+	if err != nil {
+		return err
 	}
 	if err := policy.Validate(); err != nil {
 		return err
@@ -71,6 +78,18 @@ func runNodeRelaySelection(args []string, apply bool) error {
 	}
 	ctx, stop := signalContext()
 	defer stop()
+	var publisher *relayapply.UplinkPublisher
+	if apiOptions.Directory != "" {
+		publisher, err = relayapply.NewUplinkPublisher(*target)
+		if err != nil {
+			return err
+		}
+		server, err := uplinkapi.Start(ctx, apiOptions, publisher)
+		if err != nil {
+			return err
+		}
+		defer server.Close()
+	}
 	events, err := underlayevent.New(cfg.Node.RelayUnderlays)
 	if err != nil {
 		return err
@@ -81,7 +100,7 @@ func runNodeRelaySelection(args []string, apply bool) error {
 	for i := 0; *watch || i < *samples; i++ {
 		var cycleErr error
 		if apply {
-			out, err := reconcileApplicationTarget(ctx, cfg.Node, dir, *target, *controller, *timeout, selector)
+			out, err := reconcileApplicationTarget(ctx, cfg.Node, dir, *target, *controller, *timeout, selector, publisher)
 			cycleErr = err
 			if err := encoder.Encode(out); err != nil {
 				return err
@@ -107,7 +126,7 @@ func runNodeRelaySelection(args []string, apply bool) error {
 	return nil
 }
 
-func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration, selector *relayselect.Selector) (out relayapply.TargetReconcileResult, err error) {
+func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration, selector *relayselect.Selector, publisher *relayapply.UplinkPublisher) (out relayapply.TargetReconcileResult, err error) {
 	started := time.Now()
 	parent, recorder := relayobserve.Start(parent)
 	defer func() { out.Diagnostics = recorder.Snapshot() }()
@@ -117,9 +136,15 @@ func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig,
 	cache, engine, err := openNodeRelayEngine(admission, node, dir)
 	done()
 	if err != nil {
+		if publisher != nil {
+			publisher.Unavailable()
+		}
 		return relayapply.TargetReconcileResult{SchemaVersion: 1, StartedAt: started, FinishedAt: time.Now(), Selection: relayselect.Decision{SchemaVersion: 1, NodeID: node.Name, TargetID: target, State: "unknown", Reason: nodeAdmissionReason(err), Candidates: []relayselect.Candidate{}}, Application: relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: target, State: "blocked", Reason: nodeAdmissionReason(err)}}, err
 	}
 	defer closeNodeRelayEngine(ctx, cache, engine)
+	if publisher != nil {
+		return engine.ReconcileTargetObserved(ctx, target, controller, selector, timeout, publisher)
+	}
 	return engine.ReconcileTarget(ctx, target, controller, selector, timeout)
 }
 

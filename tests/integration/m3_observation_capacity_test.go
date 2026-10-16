@@ -274,6 +274,12 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	secondLog := filepath.Join(f.results, "capacity-app2.jsonl")
 	secondMode := "auto"
 	secondArgs := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app2", "--watch", "--interval", "500ms"}
+	apiLoad := os.Getenv("VPNCTL_CAPACITY_UPLINK_API") == "load"
+	var apiDirs []string
+	if apiLoad {
+		apiDirs = []string{apiRuntime(t, f, "app"), apiRuntime(t, f, "app2")}
+		secondArgs = append(secondArgs, "--uplink-api-dir", apiDirs[1], "--uplink-api-allow-uids", "0")
+	}
 	if rebuild {
 		secondMode = "manual"
 		secondArgs = append(secondArgs, "--mode", "manual", "--path-id", f.plan.Paths[healthy].PathID)
@@ -301,7 +307,15 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	started := time.Now()
 	report["fault_installed_at"] = started
 	logfile := filepath.Join(f.results, "capacity-app.jsonl")
-	watcher := startNetworkProcessWithObserver(t, groupFD, f.robot, logfile, receipts1, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "500ms", "--probe-timeout", "2s")
+	watchArgs := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "500ms", "--probe-timeout", "2s"}
+	if apiLoad {
+		watchArgs = append(watchArgs, "--uplink-api-dir", apiDirs[0], "--uplink-api-allow-uids", "0")
+	}
+	watcher := startNetworkProcessWithObserver(t, groupFD, f.robot, logfile, receipts1, nil, watchArgs...)
+	finishAPI := func() {}
+	if apiLoad {
+		finishAPI = startUplinkAPILoad(t, f, apiDirs, group, serverGroup, report)
+	}
 	var placement func() map[string]any
 	if group != nil {
 		for _, p := range []*networkProcess{f.nodeSupervisor, watcher, second} {
@@ -543,6 +557,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	if placement != nil {
 		report["role_cpu_placement_after"] = placement()
 	}
+	finishAPI()
 	watcher.terminate(t)
 	second.terminate(t)
 	report["sampled_qualification_status"] = "pass"

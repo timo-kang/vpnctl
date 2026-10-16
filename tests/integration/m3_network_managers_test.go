@@ -40,6 +40,13 @@ func requireManagerGuest(t *testing.T) {
 // authority to change the root namespace or its cgroup controller.
 func requireIsolatedGuest(t *testing.T) {
 	t.Helper()
+	requireIsolatedGuestNamespace(t, false)
+}
+
+// Child-only helpers retain every VM identity check without granting the
+// root-namespace permission used by managers and cgroup setup.
+func requireIsolatedGuestNamespace(t *testing.T, child bool) {
+	t.Helper()
 	b, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
 		t.Fatal(err)
@@ -54,8 +61,8 @@ func requireIsolatedGuest(t *testing.T) {
 	_, marker := args["vpnctl_vm_test"]
 	own, e3 := os.Readlink("/proc/self/ns/net")
 	root, e4 := os.Readlink("/proc/1/ns/net")
-	if !marker || len(args["vpnctl_vm_token"]) != 32 || args["vpnctl_host_boot"] == "" || args["vpnctl_host_boot"] == strings.TrimSpace(string(boot)) || args["vpnctl_vm_uuid"] != strings.ToLower(strings.TrimSpace(string(uuid))) || e1 != nil || e2 != nil || e3 != nil || e4 != nil || own != root {
-		t.Fatal("refusing changes outside identity-guarded guest root namespace")
+	if !marker || len(args["vpnctl_vm_token"]) != 32 || args["vpnctl_host_boot"] == "" || args["vpnctl_host_boot"] == strings.TrimSpace(string(boot)) || args["vpnctl_vm_uuid"] != strings.ToLower(strings.TrimSpace(string(uuid))) || e1 != nil || e2 != nil || e3 != nil || e4 != nil || (own != root) != child {
+		t.Fatal("refusing changes outside requested identity-guarded guest namespace")
 	}
 	requireNetwork(t)
 }
