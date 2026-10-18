@@ -2,8 +2,7 @@
 
 This experiment follows #251. It is not a production optimization or a merge
 qualification. The source extends the immutable runtime-counter experiment
-`b58417a5da98c103cacce88af060c80b6c1142ff`; rejected command-buffer candidates are
-not included. All application, lease, freshness, ownership and failure gates
+`b58417a5da98c103cacce88af060c80b6c1142ff`. All application, lease, freshness, ownership and failure gates
 remain in force.
 
 ## Collection boundary
@@ -15,6 +14,11 @@ control and instrumented images; `--selector-profile` is the independent runtime
 intervention. Only the steady eight-path, split CPU, robot 0.5 CPU, API-off case
 accepts that switch. Guest requests are strict booleans and reset inherited mode
 and producer paths. Only the app2 selector receives a private output path.
+
+Build from an independent clean checkout with a real `.git` directory. Local
+review reproduced Go 1.25 stamping an enclosing repository's commit for a nested
+linked worktree. The experiment runner rejects a tagged CLI unless its actual
+embedded `vcs.revision` equals the fixed source and `vcs.modified` is false.
 
 The original draft proposed eight seconds from process startup. Review found
 that this could mostly observe startup before the two selectors contend. Before
