@@ -16,6 +16,7 @@ from collections import deque
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from selector_profiles import collect_profiles, selector_profile_env
 
 ROOT = Path('/var/lib/vpnctl-vm')
 ARGS = dict(s.split('=', 1) if '=' in s else (s, '') for s in Path('/proc/cmdline').read_text().split())
@@ -198,7 +199,7 @@ def start_direct(req):
         if WORKER is not None:
             raise RuntimeError('only one fixture per direct VM')
         (ROOT / 'results').mkdir(mode=0o700, exist_ok=True)
-        env = dict(os.environ, VPNCTL_VM_WORKER='1', VPNCTL_VM_DIRECT='1', VPNCTL_INTEGRATION='1',
+        env = dict(os.environ, VPNCTL_VM_WORKER='1', VPNCTL_SELECTOR_PROFILE_DIR='', VPNCTL_CAPACITY_SELECTOR_PROFILE='0', VPNCTL_VM_DIRECT='1', VPNCTL_INTEGRATION='1',
                    VPNCTL_DIRECT_SIZES=str(nodes), VPNCTL_DIRECT_FAULT=fault, VPNCTL_BIN='/opt/vpnctl-vm/vpnctl',
                    VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'), TMPDIR='/tmp', GORACE='atexit_sleep_ms=0')
         with (ROOT / 'worker.log').open('wb') as log:
@@ -404,7 +405,7 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     if WORKER is not None:
                         raise RuntimeError('only one fixture per VM')
-                    env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
+                    env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1', VPNCTL_SELECTOR_PROFILE_DIR='', VPNCTL_CAPACITY_SELECTOR_PROFILE='0',
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
                                VPNCTL_APP_PATHS=str(paths), TMPDIR='/tmp', GOMAXPROCS='2', GORACE='atexit_sleep_ms=0',
                                VPNCTL_APP_HYPOTHESIS=hypothesis, VPNCTL_APP_DIAGNOSTIC_CPU=cpu)
@@ -450,7 +451,7 @@ class Handler(BaseHTTPRequestHandler):
                     # Go appends the long subtest name to TMPDIR. Keep the
                     # guest-only path short enough for Linux's Unix socket
                     # address limit (the controller admin socket lives below it).
-                    env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
+                    env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1', VPNCTL_SELECTOR_PROFILE_DIR='', VPNCTL_CAPACITY_SELECTOR_PROFILE='0',
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
                                TMPDIR='/tmp', GORACE='atexit_sleep_ms=0')
                     if action == 'application-capacity-start':
@@ -465,6 +466,10 @@ class Handler(BaseHTTPRequestHandler):
                                    VPNCTL_CAPACITY_UPLINK_API='load' if uplink_api else 'off')
                         env.update(cost_detail_env(req))
                         env.update(runtime_cost_env(req))
+                        profile_env = selector_profile_env(req)
+                        if req.get('selector_profile', False) and (paths != 8 or rebuild or uplink_api or layout != 'split' or cpu != '0.5'):
+                            raise ValueError('selector profiling requires the fixed steady eight-path split profile')
+                        env.update(profile_env)
                     with (ROOT / 'worker.log').open('wb') as log:
                         test = {'application-mixed-start': 'TestNetns_M3TargetApplicationMixedCandidates',
                                 'application-preparation-start': 'TestNetns_M3PreparationCapacity',
@@ -500,6 +505,12 @@ class Handler(BaseHTTPRequestHandler):
                                 if total > 8 * 1024 * 1024:
                                     raise RuntimeError('mixed application diagnostics exceed limit')
                                 row['logs'][name] = path.read_text()
+                        if action == 'application-capacity-result' and row['report'].get('selector_profile', {}).get('requested') is True:
+                            # Separate bounded diagnostics: at most three fixtures,
+                            # three 256 KiB profiles and two 16 KiB manifests each.
+                            # Missing/truncated profiles cannot erase worker exit.
+                            row['selector_profiles'] = (collect_profiles(ROOT / 'results', report.parent.name)
+                                if len(reports) < 3 else {'error': 'fixture_budget_exhausted'})
                         reports.append(row)
                     result['reports'] = reports
             elif action in ('managers-start', 'manager-auto-start'):
@@ -540,7 +551,7 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     if WORKER is not None and WORKER.poll() is None:
                         raise RuntimeError('fixture already running')
-                    env = dict(os.environ, VPNCTL_VM_WORKER='1', VPNCTL_INTEGRATION='1',
+                    env = dict(os.environ, VPNCTL_VM_WORKER='1', VPNCTL_SELECTOR_PROFILE_DIR='', VPNCTL_CAPACITY_SELECTOR_PROFILE='0', VPNCTL_INTEGRATION='1',
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
                                TMPDIR=str(ROOT / 'work'))
                     with (ROOT / 'worker.log').open('wb') as log:

@@ -288,7 +288,8 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	receipts1, receipts2 := newPublicationStream(), newPublicationStream()
 	report["sampled_contract_version"] = 2
 	report["publication_continuity"] = map[string]any{"contract_version": 2, "status": "not_started"}
-	second := startNetworkProcessWithObserver(t, groupFD, f.robot, secondLog, receipts2, nil, secondArgs...)
+	profileEnv, triggerProfile := capacitySelectorProfile(f.results, report)
+	second := startNetworkProcessWithObserver(t, groupFD, f.robot, secondLog, receipts2, profileEnv, secondArgs...)
 	eventually(t, 45*time.Second, "independent app activated", func() error {
 		rows := receipts2.snapshot().Records
 		if len(rows) == 0 || !rows[len(rows)-1].Record.Applied {
@@ -478,6 +479,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		report["publication_continuity"] = map[string]publicationVerdict{"app": publication1, "app2": publication2}
 	}
 	defer closePublication()
+	triggerProfile(second.cmd.Process.Pid)
 	broken := ""
 	repaired := !rebuild
 	if rebuild {

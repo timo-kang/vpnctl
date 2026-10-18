@@ -14,6 +14,7 @@ RUN if [ "$VPNCTL_VM_MANAGERS" = 1 ]; then \
       systemctl mask NetworkManager.service systemd-networkd.service; \
     elif [ "$VPNCTL_VM_MANAGERS" != 0 ]; then exit 2; fi
 COPY guest_agent.py /opt/vpnctl-vm/guest_agent.py
+COPY selector_profiles.py /opt/vpnctl-vm/selector_profiles.py
 COPY manager_dhcp.py /opt/vpnctl-vm/manager_dhcp.py
 COPY nft_delay.py /opt/vpnctl-vm/nft_delay.py
 COPY fsync_fault.py /opt/vpnctl-vm/fsync_fault.py

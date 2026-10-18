@@ -14,6 +14,13 @@ case "$vm_race" in
     1) build_flags=(-race) ;;
     *) echo 'VPNCTL_VM_RACE must be 0 or 1' >&2; exit 2 ;;
 esac
+vm_profile=${VPNCTL_VM_PROFILE:-0}
+cli_build_flags=("${build_flags[@]}")
+case "$vm_profile" in
+    0) ;;
+    1) cli_build_flags+=(-tags=vpnctl_profile) ;;
+    *) echo 'VPNCTL_VM_PROFILE must be 0 or 1' >&2; exit 2 ;;
+esac
 external_binary=${VPNCTL_TEST_BINARY:-}
 if [[ -n "$external_binary" ]]; then
     external_binary=$(realpath -- "$external_binary")
@@ -65,8 +72,15 @@ if [[ -n "$external_binary" ]]; then
     cp -- "$external_binary" "$work/input/vpnctl"
     binary_origin=external
 else
-    GOMAXPROCS=2 go build -p=2 "${build_flags[@]}" -o "$work/input/vpnctl" ./cmd/vpnctl
+    GOMAXPROCS=2 go build -p=2 "${cli_build_flags[@]}" -o "$work/input/vpnctl" ./cmd/vpnctl
 fi
+python3 - "$work/input/vpnctl" "$vm_profile" <<'PY'
+import subprocess, sys
+lines = subprocess.check_output(['go', 'version', '-m', sys.argv[1]], text=True).splitlines()
+tags = [line.strip().removeprefix('build\t-tags=') for line in lines if line.strip().startswith('build\t-tags=')]
+if len(tags) > 1 or (bool(tags) and 'vpnctl_profile' in tags[0].split(',')) != (sys.argv[2] == '1'):
+    raise SystemExit('actual CLI profiler build tag differs from requested build')
+PY
 GOMAXPROCS=2 go test -p=2 "${build_flags[@]}" -tags=integration -c -o "$work/input/integration.test" ./tests/integration
 GOMAXPROCS=2 go build -p=2 "${build_flags[@]}" -o "$work/input/uplink-go" ./examples/uplink/go
 mkdir "$work/input/uplink-python"
@@ -107,7 +121,7 @@ manifest="$results/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
         "suite_dirty=$(test -z "$(git status --porcelain)" && echo false || echo true)" \
         'runner=qemu-in-container' "cpus=$vm_cpus" 'memory=2g' 'guest_memory=768M' \
         'container_network=none' 'container_capabilities=none' "image_id=$image" \
-        "host_boot_id=$boot_before" "binary_origin=$binary_origin" "legacy_commit=$legacy_commit" "lease_v1_commit=$v1_commit" "lease_v2_commit=$v2_commit" "suite_race=$vm_race"
+        "host_boot_id=$boot_before" "binary_origin=$binary_origin" "legacy_commit=$legacy_commit" "lease_v1_commit=$v1_commit" "lease_v2_commit=$v2_commit" "suite_race=$vm_race" "suite_profile=$vm_profile"
     sha256sum "$work/input/vpnctl" "$work/input/integration.test" "$work/input/vpnctl-legacy" "$work/input/vpnctl-lease-v1" "$work/input/vpnctl-lease-v2" "$work/input/uplink-go" "$work/input/uplink-python/"*.py
     printf 'test_argument=%s\n' "$@"
     cat "$work/image/image.json"
