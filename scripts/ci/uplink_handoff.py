@@ -12,7 +12,7 @@ import traceback
 from isolated_evidence import (checked_source, digest, prepare_kvm, read_command,
                               require_disposable_runner, work_directories, write_json)
 
-SOURCE = 'b58417a5da98c103cacce88af060c80b6c1142ff'
+SOURCE = '384734bfcb25d49946eafa5902cf5c49626baea5'
 BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
             'vpnctl-lease-v2', 'uplink-go'} | {
     'uplink-python/' + name + '.py' for name in
@@ -20,15 +20,16 @@ BINARIES = {'vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1',
 
 
 def schedule():
-    # Same binary/image within each build; detailed child accounting is fixed ON.
+    # Same tagged CLI/image per build; child and runtime counters stay ON.
     cells = [('1', False), ('0', False), ('0', True), ('1', True)]
     cells += list(reversed(cells))
     return [dict(sequence=i, case='application-capacity-8', layout='split', api_load=False,
-                 outer_cpus='2', robot_cpus='0.5', build_race=race, cost_details=True, runtime_costs=runtime)
-            for i, (race, runtime) in enumerate(cells, 1)]
+                 outer_cpus='2', robot_cpus='0.5', build_race=race, cost_details=True,
+                 runtime_costs=True, selector_profile=profile)
+            for i, (race, profile) in enumerate(cells, 1)]
 
 
-def binary_build_info(path, race):
+def binary_build_info(path, race, profile=False):
     lines = read_command(['go', 'version', '-m', str(path)]).splitlines()
     if not lines or not re.fullmatch(r'.+: go[0-9]+\.[^ ]+', lines[0]):
         raise ValueError('Go_build_information_missing')
@@ -44,6 +45,10 @@ def binary_build_info(path, race):
             or settings.get('-race') not in (None, 'true', 'false')
             or settings.get('GOOS') != 'linux' or settings.get('GOARCH') != 'amd64'):
         raise ValueError('Go_build_mode_mismatch')
+    if ('vpnctl_profile' in settings.get('-tags', '').split(',')) != profile:
+        raise ValueError('Go_profiler_build_tag_mismatch')
+    if profile and (settings.get('vcs.revision') != SOURCE or settings.get('vcs.modified') != 'false'):
+        raise ValueError('Go_profiler_source_identity_mismatch')
     return dict(version=lines[0].rsplit(': ', 1)[1], settings=settings)
 
 
@@ -73,8 +78,9 @@ def validate_build_pair(race, ordinary):
 def build_environment(row, artifacts, base_image=None):
     env = dict(os.environ, GOMAXPROCS='2', VPNCTL_VM_CPUS=row['outer_cpus'],
                VPNCTL_VM_RACE=row['build_race'], VPNCTL_ARTIFACT_DIR=str(artifacts),
-               VPNCTL_KEEP_VM_WORK='1')
-    for key in ('GOFLAGS', 'VPNCTL_TEST_BINARY', 'VPNCTL_VM_IMAGE', 'VPNCTL_VM_MANAGERS'):
+               VPNCTL_KEEP_VM_WORK='1', VPNCTL_VM_PROFILE='1')
+    for key in ('GOFLAGS', 'VPNCTL_TEST_BINARY', 'VPNCTL_VM_IMAGE', 'VPNCTL_VM_MANAGERS',
+                'VPNCTL_SELECTOR_PROFILE_DIR', 'VPNCTL_CAPACITY_SELECTOR_PROFILE'):
         env.pop(key, None)
     if base_image is not None:
         env['VPNCTL_VM_IMAGE'] = base_image
@@ -84,7 +90,10 @@ def build_environment(row, artifacts, base_image=None):
 def arguments(row):
     args = ['--case', row['case'], '--robot-cpus', row['robot_cpus'],
             '--cpu-layout', row['layout']]
-    return args + (['--uplink-api-load'] if row['api_load'] else []) + (['--cost-details'] if row['cost_details'] else []) + (['--runtime-costs'] if row['runtime_costs'] else [])
+    return (args + (['--uplink-api-load'] if row['api_load'] else [])
+            + (['--cost-details'] if row['cost_details'] else [])
+            + (['--runtime-costs'] if row['runtime_costs'] else [])
+            + (['--selector-profile'] if row['selector_profile'] else []))
 
 
 def execute_schedule(root, invoke):
@@ -126,7 +135,8 @@ def prepared_image(root, destination, before, race):
     if len(manifests) != 1:
         raise ValueError('image_manifest_missing_or_ambiguous')
     fields = dict(line.split('=', 1) for line in manifests[0].read_text().splitlines() if '=' in line)
-    if fields.get('suite_commit') != SOURCE or fields.get('suite_dirty') != 'false' or fields.get('suite_race') != race:
+    if (fields.get('suite_commit') != SOURCE or fields.get('suite_dirty') != 'false'
+            or fields.get('suite_race') != race or fields.get('suite_profile') != '1'):
         raise ValueError('initial_source_or_build_mismatch')
     image = fields.get('image_id', '')
     if not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
@@ -135,7 +145,7 @@ def prepared_image(root, destination, before, race):
     if set(metadata['sha256']) != {'vmlinuz', 'initrd', 'guest.qcow2'} or set(metadata['binaries']) != BINARIES:
         raise ValueError('guest_manifest_members_invalid')
     prepared = dict(work=str(work), identity=identity, image_id=image, image=metadata,
-                    build_race=race, build_info={name: binary_build_info(work / 'input' / name, race)
+                    build_race=race, build_info={name: binary_build_info(work / 'input' / name, race, profile=(name == 'vpnctl'))
                     for name in ('vpnctl', 'integration.test', 'uplink-go')})
     verify_image(prepared)
     for name, expected in metadata['binaries'].items():
@@ -173,6 +183,7 @@ def validate_trial(destination, row, prepared, exit_code):
                 or runner['guest_vcpus'] != int(row['outer_cpus'])
                 or runner.get('cost_details') is not row['cost_details']
                 or runner.get('runtime_costs') is not row['runtime_costs']
+                or runner.get('selector_profile') is not row['selector_profile']
                 or int(runner['cpu_max'][0]) != int(row['outer_cpus']) * int(runner['cpu_max'][1])):
             raise ValueError('trial_image_or_cpu_drift')
     elif exit_code == 0:
@@ -213,6 +224,16 @@ def cleanup_runtime(runtime, container, log):
     shutil.rmtree(runtime)
 
 
+def prepare_source(repo, source):
+    # Go 1.25 recognizes a .git directory but not a linked worktree's .git
+    # file. A nested worktree can stamp its parent's revision, while an external
+    # worktree can omit VCS identity. Build from an independent local clone.
+    read_command(['git', 'clone', '--no-checkout', '--no-hardlinks', str(repo), str(source)], repo)
+    read_command(['git', 'checkout', '--detach', SOURCE], source)
+    if not (source / '.git').is_dir() or not checked_source(source, SOURCE):
+        raise RuntimeError('independent_clean_source_checkout_required')
+
+
 def main():
     require_disposable_runner()
     repo = Path(__file__).resolve().parents[2]
@@ -221,13 +242,13 @@ def main():
         raise RuntimeError('dirty_or_restarted_validation')
     (root / 'binaries').mkdir(mode=0o700)
     source = root / 'source-fixed'
-    read_command(['git', 'worktree', 'add', '--detach', str(source), SOURCE], repo)
+    prepare_source(repo, source)
     boot = Path('/proc/sys/kernel/random/boot_id').read_text()
     write_json(root / 'plan.json', dict(schema=1, source=SOURCE, schedule=schedule(),
         experiment_commit=read_command(['git', 'rev-parse', 'HEAD'], repo),
         plan_sha256=digest(repo / 'scripts/ci/PLAN.md'), runner_sha256=digest(Path(__file__)),
         github_run_id=os.environ['GITHUB_RUN_ID'], host_boot_id=boot.strip(),
-        go_version=read_command(['go', 'version'])))
+        go_version=read_command(['go', 'version']), source_checkout='independent_git_directory'))
     shutil.copyfile(repo / 'scripts/ci/PLAN.md', root / 'PLAN.md')
     images, attempted = {}, set()
 

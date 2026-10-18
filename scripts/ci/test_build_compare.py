@@ -10,7 +10,7 @@ class BuildComparisonTests(unittest.TestCase):
     def test_predeclared_build_pairs_and_reverse_order(self):
         rows = runner.schedule()
         self.assertEqual(len(rows), 8)
-        pairs = [(r['build_race'], r['runtime_costs']) for r in rows]
+        pairs = [(r['build_race'], r['selector_profile']) for r in rows]
         self.assertEqual(pairs[:4], [('1',False), ('0',False), ('0',True), ('1',True)])
         self.assertEqual(pairs[4:], list(reversed(pairs[:4])))
         self.assertTrue(all(r['case']=='application-capacity-8' for r in rows))
@@ -68,7 +68,7 @@ class BuildComparisonTests(unittest.TestCase):
                 root=Path(directory);(root/'artifacts').mkdir()
                 row=dict(runner.schedule()[0],case=case,build_race='0')
                 prepared={'image':{'hash':'fixed'}}
-                evidence=dict(image=prepared['image'],cpu_layout='split',guest_vcpus=2,cpu_max=['200000','100000'],cost_details=row['cost_details'],runtime_costs=row['runtime_costs'])
+                evidence=dict(image=prepared['image'],cpu_layout='split',guest_vcpus=2,cpu_max=['200000','100000'],cost_details=row['cost_details'],runtime_costs=row['runtime_costs'],selector_profile=row['selector_profile'])
                 (root/'artifacts/runner.json').write_text(json.dumps(evidence))
                 verdict=dict(case=case,completed=True,qualified=False)
                 path=root/'artifacts/verdicts.json';path.write_text(json.dumps([verdict]))
@@ -86,7 +86,7 @@ class BuildComparisonTests(unittest.TestCase):
                 root=Path(directory);artifacts=root/'artifacts';artifacts.mkdir()
                 row=dict(runner.schedule()[0],cost_details=details)
                 prepared={'image':{'fixed':'hash'}}
-                evidence=dict(image=prepared['image'],cpu_layout='split',guest_vcpus=2,cpu_max=['200000','100000'],runtime_costs=row['runtime_costs'])
+                evidence=dict(image=prepared['image'],cpu_layout='split',guest_vcpus=2,cpu_max=['200000','100000'],runtime_costs=row['runtime_costs'],selector_profile=row['selector_profile'])
                 (artifacts/'verdicts.json').write_text(json.dumps([dict(case=row['case'],completed=True,qualified=True)]))
                 for value in (None,not details,1 if details else 0):
                     (artifacts/'runner.json').write_text(json.dumps(dict(evidence,cost_details=value)))
@@ -104,7 +104,7 @@ class BuildComparisonTests(unittest.TestCase):
                 row = dict(runner.schedule()[0], runtime_costs=enabled)
                 prepared = {'image': {'fixed': 'hash'}}
                 evidence = dict(image=prepared['image'], cpu_layout='split', guest_vcpus=2,
-                                cpu_max=['200000', '100000'], cost_details=True)
+                                cpu_max=['200000', '100000'], cost_details=True, selector_profile=row['selector_profile'])
                 (artifacts/'verdicts.json').write_text(json.dumps([dict(case=row['case'], completed=True, qualified=True)]))
                 for change in ({}, {'runtime_costs': None}, {'runtime_costs': not enabled}, {'runtime_costs': int(enabled)}):
                     (artifacts/'runner.json').write_text(json.dumps(dict(evidence, **change)))

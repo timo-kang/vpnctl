@@ -1,5 +1,5 @@
 # Experiment-only branch; the main reliability gates are unchanged.
-name: Process and runtime cost attribution experiment
+name: Selector CPU and allocation stack experiment
 on:
   workflow_dispatch:
 permissions:
@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validation:
-    name: Fixed source and kernel, runtime sampling controls
+    name: Fixed source and kernel, selector profiling controls
     runs-on: ubuntu-24.04
     timeout-minutes: 310
     env:
