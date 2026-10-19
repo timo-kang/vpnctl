@@ -129,6 +129,11 @@ def prepare(root, cpuset, builder, runner):
     builder_id = image_id(builder)
     runner_id = image_id(runner)
     write(root/'inputs.json', {'source':commit, 'builder_image':builder_id, 'runner_image':runner_id, 'cpuset':cpuset, 'legacy':LEGACY})
+    name = 'vpnctl-lab-read-'+uuid.uuid4().hex[:12]
+    args = container(name, '1', '64m', cpuset) + ['--read-only',
+        '--user', f'{os.getuid()}:{os.getgid()}', '--entrypoint', 'python3', runner_id,
+        '-c', "import ast; from pathlib import Path; [ast.parse(Path('/opt/vpnctl-vm', n).read_text()) for n in ('observer.py', 'make_image.py')]"]
+    require_success(execute(args, root/'runtime-readability.log', name, timeout=30))
     code = 'set -euo pipefail\n'
     code += 'go build -p=2 -o /lab/input/vpnctl ./cmd/vpnctl\n'
     code += 'go test -p=2 -tags=integration -c -o /lab/input/integration.test ./tests/integration\n'

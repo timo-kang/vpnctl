@@ -62,6 +62,10 @@ runner image는 같은 소스의 `tests/vm/Dockerfile`로 만든 이미지여야
 다른 날의 재빌드가 동일하다고 주장하지 않는다. 이미 준비한 image ID와 private
 root를 보존해 같은 환경에서 후속 실행한다.
 
+컴파일 전에 capability 없는 비루트 컨테이너가 runner의 Python 파일을 읽을 수
+있는지 검사한다. Dockerfile은 private checkout의 umask가 런타임에 전파되지 않도록
+이 파일들을 0644로 지정한다.
+
 컴파일은 네트워크가 있는 별도 컨테이너에서 2 CPU·4GiB로 제한한다. 소스는
 읽기 전용, 모듈/빌드 캐시와 출력은 private lab root만 쓴다. 현재 CLI와 integration
 binary, 기존 VM 계약의 세 역사적 CLI를 빌드한다. 필요한 과거 commit object도
