@@ -330,6 +330,36 @@ def direct_result(req):
             result['reports'].append(row)
     return result
 
+def runtime_accounting_ready():
+    # Read-only checks. These switches must have been enabled at guest boot,
+    # before tasks exist, identically in OFF and ON controls.
+    required = {'delayacct', 'schedstats=enable'}
+    if not required <= set(Path('/proc/cmdline').read_text().split()):
+        raise RuntimeError('guest accounting boot flags missing')
+    for name in ('task_delayacct', 'sched_schedstats'):
+        if Path('/proc/sys/kernel', name).read_text().strip() != '1':
+            raise RuntimeError('guest accounting unavailable')
+
+
+def runtime_counter_result():
+    if WORKER is None or WORKER.poll() is None:
+        raise RuntimeError('runtime counters require a finished worker')
+    paths = sorted((ROOT / 'results').glob('*/runtime-counters.jsonl'))
+    if len(paths) > 3:
+        raise RuntimeError('too many runtime counter fixtures')
+    rows = []
+    for path in paths:
+        if path.resolve() != path.absolute() or not path.is_file() or path.stat().st_nlink != 1:
+            raise RuntimeError('runtime counter file must be regular and unlinked')
+        with path.open('rb') as stream:
+            raw = stream.read(4 * 1024 * 1024 + 1)
+        if len(raw) > 4 * 1024 * 1024:
+            raise RuntimeError('runtime counter file too large')
+        rows.append({'fixture': path.parent.name, 'jsonl': raw.decode('utf-8')})
+    # Missing files are retained as missing evidence, not invented zero samples.
+    return {'files': rows, 'expected_files': 3}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -378,6 +408,12 @@ class Handler(BaseHTTPRequestHandler):
                         rebuild = req.get('rebuild', False)
                         if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25') or layout not in ('shared', 'split') or type(rebuild) is not bool:
                             raise ValueError('explicit bounded robot CPU and path profile required')
+                        if 'runtime_counters' in req:
+                            enabled = req['runtime_counters']
+                            if type(enabled) is not bool or paths != 8 or layout != 'split' or cpu != '0.5' or rebuild:
+                                raise ValueError('runtime counters require the fixed split capacity profile')
+                            runtime_accounting_ready()
+                            env['VPNCTL_VM_RUNTIME_COUNTERS'] = '1' if enabled else '0'
                         env.update(VPNCTL_CAPACITY_PATHS=str(paths), VPNCTL_CAPACITY_ROBOT_CPU=cpu, VPNCTL_CAPACITY_CPU_LAYOUT=layout,
                                    VPNCTL_CAPACITY_REBUILD='1' if rebuild else '0')
                     with (ROOT / 'worker.log').open('wb') as log:
@@ -389,6 +425,8 @@ class Handler(BaseHTTPRequestHandler):
                             '-test.run=^' + test + '$', '-test.v', '-test.timeout=15m'],
                             env=env, stdout=log, stderr=log, start_new_session=True)
                 result = {'started': True}
+            elif action == 'runtime-counters-result':
+                result = runtime_counter_result()
             elif action in ('application-mixed-result', 'application-preparation-result', 'application-approval-result', 'application-capacity-result'):
                 if WORKER is None:
                     raise RuntimeError('mixed application fixture not started')

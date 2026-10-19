@@ -15,12 +15,28 @@ lab = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lab)
 SOURCE = '888b83b991c1857f9114c59a3deb3cb76cf8506a'
 BUILDER = 'golang@sha256:81dc45d05a7444ead8c92a389621fafabc8e40f8fd1a19d7e5df14e61e98bc1a'
-CELLS = ((1, 'shared'), (2, 'split'), (3, 'split'), (4, 'shared'))
-TOOLS = ('scripts/ci/identical_image.py', 'scripts/lab/runner.py', 'scripts/ci/IDENTICAL_IMAGE.md')
+CELLS = ((1, '0'), (2, '1'), (3, '1'), (4, '0'))
+TOOLS = ('scripts/ci/identical_image.py', 'scripts/lab/runner.py', 'scripts/ci/IDENTICAL_IMAGE.md',
+         'tests/vm/observer.py', 'tests/vm/guest_agent.py', 'tests/vm/Dockerfile',
+         'tests/integration/m3_runtime_counters_test.go', 'tests/integration/m3_runtime_counters_unit_test.go',
+         'tests/integration/m3_observation_capacity_test.go')
 BINARIES = ('vpnctl', 'integration.test', *lab.LEGACY)
 IMAGE_FILES = ('guest.qcow2', 'initrd', 'vmlinuz', 'image.json')
 BUNDLE_FILES = (['runtime.tar', 'build.json'] + ['input/'+n for n in BINARIES]
                 + ['image/'+n for n in IMAGE_FILES] + [n+'.build-info' for n in BINARIES])
+
+
+def suite_revision():
+    return subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip()
+
+
+def check_suite_changes(names):
+    allowed = {'tests/integration/m3_observation_capacity_test.go',
+               'tests/integration/m3_runtime_counters_test.go',
+               'tests/integration/m3_runtime_counters_unit_test.go',
+               '.github/workflows/reliability.yml'}
+    if any(n not in allowed and not n.startswith(('scripts/ci/', 'tests/vm/')) for n in names):
+        raise ValueError('unexpected product or test change in accounting cohort')
 
 
 def require_disposable():
@@ -51,6 +67,8 @@ def inventory(bundle):
 
 def verify(root):
     manifest = json.loads(safe_file(root, 'bundle-manifest.json').read_text())
+    if manifest.get('suite_revision') != suite_revision():
+        raise ValueError('suite revision differs')
     if manifest['source'] != SOURCE or manifest['cells'] != [list(c) for c in CELLS]:
         raise ValueError('source or schedule differs')
     if manifest['tools'] != {n:lab.digest(REPO/n) for n in TOOLS}:
@@ -58,7 +76,7 @@ def verify(root):
     if manifest['files'] != inventory(root/'bundle'):
         raise ValueError('transported bytes differ')
     build = json.loads((root/'bundle/build.json').read_text())
-    if build['source'] != SOURCE or build['race'] is not True:
+    if build.get('suite_revision') != manifest['suite_revision'] or build['source'] != SOURCE or build['race'] is not True:
         raise ValueError('wrong build cohort')
     image = json.loads((root/'bundle/image/image.json').read_text())
     if set(image['sha256']) != set(IMAGE_FILES)-{'image.json'} or set(image['binaries']) != set(BINARIES):
@@ -103,6 +121,17 @@ def prepare(root, cpuset):
     lab.SOURCE = source
     if lab.clean_source() != SOURCE:
         raise ValueError('build source mismatch')
+    suite = root/'suite'
+    suite_commit = suite_revision()
+    subprocess.run(['git', 'clone', '--no-hardlinks', str(REPO), str(suite)], check=True)
+    subprocess.run(['git', '-C', str(suite), 'checkout', '--detach', suite_commit], check=True)
+    # CLI is old product source; instrumented test suite is a separate clean revision.
+    lab.SOURCE = suite
+    if lab.clean_source() != suite_commit:
+        raise ValueError('suite checkout mismatch')
+    changes = lab.output(['git', '-C', str(suite), 'diff', '--name-only', SOURCE, suite_commit]).splitlines()
+    check_suite_changes(changes)
+    lab.SOURCE = source
     bundle = root/'bundle'; bundle.mkdir(mode=0o700)
     for name in ('input', 'image'):
         (bundle/name).mkdir(mode=0o755 if name == 'input' else 0o777)
@@ -115,14 +144,15 @@ def prepare(root, cpuset):
     with (root/'runtime-build.log').open('xb') as stream:
         subprocess.run(lab.DOCKER+['build', '--cpu-period=100000', '--cpu-quota=100000',
             '--cpuset-cpus='+cpuset, '--memory=2g', '--memory-swap=2g', '--iidfile', str(root/'runtime-id'),
-            '-f', str(source/'tests/vm/Dockerfile'), str(source/'tests/vm')],
+            '-f', str(suite/'tests/vm/Dockerfile'), str(suite/'tests/vm')],
             env=env, stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=2400)
     runtime = lab.image_id((root/'runtime-id').read_text().strip())
     lab.require_success(lab.execute(lab.DOCKER+['pull', BUILDER], root/'builder-pull.log', timeout=1200))
     builder = lab.image_id(BUILDER)
     code = 'set -euo pipefail\n'
     code += 'go build -p=2 -race -o /lab/bundle/input/vpnctl ./cmd/vpnctl\n'
-    code += 'go test -p=2 -race -tags=integration -c -o /lab/bundle/input/integration.test ./tests/integration\n'
+    code += "go -C /suite test -p=2 -race -tags=integration ./tests/integration -run '^TestRuntime(Counter|Role|Capture)' -count=1\n"
+    code += 'go -C /suite test -p=2 -race -tags=integration -c -o /lab/bundle/input/integration.test ./tests/integration\n'
     for name, revision in lab.LEGACY.items():
         code += f'mkdir /lab/legacy/{name}\ngit archive {revision} | tar -x -C /lab/legacy/{name}\n'
         code += f'go -C /lab/legacy/{name} build -p=2 -o /lab/bundle/input/{name} ./cmd/vpnctl\n'
@@ -132,6 +162,7 @@ def prepare(root, cpuset):
     args = lab.container(name, '2', '4g', cpuset, 'bridge') + [
         '--read-only', '--tmpfs', '/tmp:rw,nosuid,nodev,size=128m', '--user', f'{os.getuid()}:{os.getgid()}',
         '--workdir', '/src', '--mount', f'type=bind,src={source},dst=/src,readonly',
+        '--mount', f'type=bind,src={suite},dst=/suite,readonly',
         '--mount', f'type=bind,src={root},dst=/lab', '-e', 'GOMAXPROCS=2', '-e', 'GOTOOLCHAIN=local',
         '-e', 'GOENV=off', '-e', 'GIT_CONFIG_GLOBAL=/dev/null', '-e', 'GIT_CONFIG_SYSTEM=/dev/null',
         '-e', 'GOCACHE=/lab/cache/build', '-e', 'GOMODCACHE=/lab/cache/mod', '-e', 'GOTMPDIR=/lab/tmp',
@@ -149,17 +180,21 @@ def prepare(root, cpuset):
     subprocess.run(lab.DOCKER+['image', 'save', '--output', str(bundle/'runtime.tar'), runtime], check=True, timeout=600)
     if lab.clean_source() != SOURCE:
         raise ValueError('source changed during build')
-    lab.write(bundle/'build.json', {'source':SOURCE, 'race':True, 'runner_image':runtime, 'builder_image':builder})
-    lab.write(root/'bundle-manifest.json', {'source':SOURCE, 'cells':CELLS,
+    lab.SOURCE = suite
+    if lab.clean_source() != suite_commit:
+        raise ValueError('suite changed during build')
+    lab.SOURCE = source
+    lab.write(bundle/'build.json', {'source':SOURCE, 'suite_revision':suite_commit, 'race':True, 'runner_image':runtime, 'builder_image':builder})
+    lab.write(root/'bundle-manifest.json', {'source':SOURCE, 'suite_revision':suite_commit, 'cells':CELLS,
         'tools':{n:lab.digest(REPO/n) for n in TOOLS}, 'files':inventory(bundle)})
     verify(root)
 
 
-def runtime_args(root, run, build, cpuset, sequence, layout):
+def runtime_args(root, run, build, cpuset, sequence, mode):
     name = 'vpnctl-identical-'+lab.uuid.uuid4().hex[:12]
     args = lab.runtime_command(root/'bundle', run, build['runner_image'], cpuset, name, ['application-capacity-8'])
-    args[args.index('--cpus=1')] = '--cpus='+('2' if layout == 'split' else '1')
-    return name, args + ['--robot-cpus', '0.5', '--cpu-layout', layout]
+    args[args.index('--cpus=1')] = '--cpus=2'
+    return name, args + ['--robot-cpus', '0.5', '--cpu-layout', 'split', '--runtime-counters', mode]
 
 
 def host_context():
@@ -171,7 +206,7 @@ def run(root, cpuset, site, invoke=None):
     runs = root/('runs-'+site); runs.mkdir(mode=0o700)
     baseline = lab.host_snapshot(); lab.write(runs/'host-initial.json', baseline)
     records = []
-    for sequence, layout in CELLS:
+    for sequence, mode in CELLS:
         verify(root)
         destination = runs/f'{sequence:02d}'; destination.mkdir(mode=0o700)
         for child in ('work', 'results'):
@@ -179,8 +214,8 @@ def run(root, cpuset, site, invoke=None):
         before = lab.host_snapshot(); lab.verify_host(baseline, before)
         lab.write(destination/'host-before.json', before)
         lab.write(destination/'pressure-before.json', host_context())
-        name, args = runtime_args(root, destination, build, cpuset, sequence, layout)
-        record = {'sequence':sequence, 'layout':layout, 'command':args, 'started_monotonic_ns':time.monotonic_ns()}
+        name, args = runtime_args(root, destination, build, cpuset, sequence, mode)
+        record = {'sequence':sequence, 'layout':'split', 'runtime_counters':mode, 'command':args, 'started_monotonic_ns':time.monotonic_ns()}
         lab.write(destination/'invocation.json', record)
         try:
             record['exit_code'] = (invoke(sequence, destination) if invoke else
@@ -194,7 +229,7 @@ def run(root, cpuset, site, invoke=None):
         lab.write(destination/'exit.json', record)
         lab.verify_host(baseline, after)
         records.append(record)
-        print(json.dumps({k:record[k] for k in ('sequence', 'layout', 'exit_code')}), flush=True)
+        print(json.dumps({k:record[k] for k in ('sequence', 'layout', 'runtime_counters', 'exit_code')}), flush=True)
     verify(root)
     lab.write(runs/'complete.json', records)
     return 0 if all(r['exit_code'] == 0 for r in records) else 1

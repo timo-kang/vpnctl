@@ -60,7 +60,8 @@ def open_lease_guards(snapshot):
     return opened
 
 class VM:
-    def __init__(self, work, results, rtc='host', vcpus=1):
+    def __init__(self, work, results, rtc='host', vcpus=1, accounting=False):
+        self.accounting = accounting
         if type(vcpus) is not int or vcpus not in (1, 2):
             raise ValueError('unsupported guest CPU count')
         self.vcpus = vcpus
@@ -91,7 +92,8 @@ class VM:
                 '-qmp', 'unix:' + qmp + ',server=on,wait=off',
                 '-serial', 'file:' + str(self.results / 'console.log'),
                 '-rtc', 'base=utc,clock=' + self.rtc, '-kernel', '/input/vmlinuz', '-initrd', '/input/initrd',
-                '-append', 'root=/dev/vda rw console=ttyS0 net.ifnames=0 systemd.log_level=warning '
+                '-append', 'root=/dev/vda rw console=ttyS0 net.ifnames=0 systemd.log_level=warning ' +
+                           ('delayacct schedstats=enable ' if self.accounting else '') +
                            'vpnctl_vm_test vpnctl_vm_token=' + self.token + ' vpnctl_vm_uuid=' + self.uuid + ' vpnctl_host_boot=' + self.boot,
                 '-drive', 'file=' + str(disk) + ',if=virtio,format=qcow2,cache=none',
                 '-drive', 'file=' + str(state_disk) + ',if=virtio,format=qcow2,cache=none',
@@ -646,7 +648,23 @@ def validate_manager_auto_result(status, paths, installation=False):
             or summary.get('required_samples_per_class') != 20):
         raise RuntimeError('incomplete or misleading SLO summary')
 
-def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared'):
+def retain_runtime_counters(vm, result):
+    # Telemetry failure must not skip or change original payload/publication validation.
+    try:
+        counters = vm.call('runtime-counters-result')
+        with (vm.results / 'runtime-counters.json').open('x') as stream:
+            json.dump(counters, stream)
+        result['runtime_counter_export'] = {'file_count': len(counters['files'])}
+    except Exception as error:
+        result['runtime_counter_export'] = {'error': type(error).__name__}
+
+
+def validate_runtime_profile(mode, cases, layout, cpu):
+    if mode is not None and (cases != ['application-capacity-8'] or layout != 'split' or cpu != '0.5'):
+        raise ValueError('runtime counters require the fixed split capacity profile')
+
+
+def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared', runtime_counters=None):
     vm.launch()
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
@@ -671,13 +689,18 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
         preparation = case == 'application-preparation' or case.startswith('application-capacity-rebuild-')
         action = 'application-capacity' if capacity else case
         paths = int(case.rsplit('-', 1)[1]) if capacity else 8
-        vm.call(action + '-start', {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout, 'rebuild': preparation} if capacity else {})
+        request = {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout, 'rebuild': preparation} if capacity else {}
+        if runtime_counters is not None:
+            request['runtime_counters'] = runtime_counters
+        vm.call(action + '-start', request)
         until = time.monotonic() + 16 * 60
         while time.monotonic() < until:
             status = vm.call(action + '-result')
             if status['exit'] is not None:
                 result[case] = status
                 vm.record(case + '-result', status)
+                if runtime_counters is not None:
+                    retain_runtime_counters(vm, result)
                 if capacity or case in ('application-mixed', 'application-preparation'):
                     validate_application_mixed_result(status, preparation=preparation, paths=paths, robot_cpu=robot_cpus if capacity else None, cpu_layout=cpu_layout)
                 else:
@@ -972,7 +995,9 @@ def main():
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
     parser.add_argument('--robot-cpus', default='0.5', choices=['1', '0.5', '0.25'])
     parser.add_argument('--cpu-layout', default='shared', choices=['shared', 'split'])
+    parser.add_argument('--runtime-counters', choices=['0', '1'])
     args = parser.parse_args()
+    validate_runtime_profile(args.runtime_counters, args.case, args.cpu_layout, args.robot_cpus)
     require_container_network()
     caps = next(s.split()[1] for s in Path('/proc/self/status').read_text().splitlines() if s.startswith('CapEff:'))
     if int(caps, 16) != 0:
@@ -993,6 +1018,7 @@ def main():
             if hashlib.file_digest(f, 'sha256').hexdigest() != expected:
                 raise SystemExit('guest image digest mismatch: ' + name)
     Path('/results/runner.json').write_text(json.dumps({'qemu': subprocess.check_output(['qemu-system-x86_64', '--version'], text=True),
+        'runtime_counters': args.runtime_counters, 'accounting_boot_flags': args.runtime_counters is not None,
         'cpu_max': [quota, period], 'cpu_layout': args.cpu_layout, 'guest_vcpus': vcpus, 'memory_max': memory, 'swap_max': swap, 'cap_eff': caps, 'image': image}, indent=2) + '\n')
     cases = [(case, args.mode, args.delta, args.rtc) for case in args.case]
     if 'matrix' in args.case:
@@ -1009,11 +1035,11 @@ def main():
     host_before = host_clock()
     for case, mode, delta, rtc in cases:
         label = f'{case}-{mode}-{delta}-{rtc}'
-        vm = VM('/work/vm-' + uuid.uuid4().hex[:8], '/results/' + label + '-' + uuid.uuid4().hex[:8], rtc, vcpus)
+        vm = VM('/work/vm-' + uuid.uuid4().hex[:8], '/results/' + label + '-' + uuid.uuid4().hex[:8], rtc, vcpus, accounting=args.runtime_counters is not None)
         verdict = {'schema_version': 1, 'case': case, 'mode': mode, 'delta': delta, 'rtc': rtc, 'completed': False, 'qualified': False}
         try:
             with record_container_resources(verdict):
-                exercise(vm, case, mode, delta, verdict, args.robot_cpus, args.cpu_layout)
+                exercise(vm, case, mode, delta, verdict, args.robot_cpus, args.cpu_layout, None if args.runtime_counters is None else args.runtime_counters == '1')
             verdict['completed'] = True
             if 'unsupported_reason' not in verdict and 'defect_reason' not in verdict:
                 verdict['qualified'] = True

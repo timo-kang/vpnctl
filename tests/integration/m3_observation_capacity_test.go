@@ -271,6 +271,21 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 			report["server_resource_profile_after"] = serverGroup.evidence(t)
 		}
 	})
+	accountingGroups := map[string]string{}
+	if group != nil {
+		accountingGroups["robot"] = group.path
+	}
+	if serverGroup != nil {
+		accountingGroups["server"] = serverGroup.path
+	}
+	accounting := startRuntimeCapture(t, f.results, accountingGroups, report)
+	defer accounting.finish(report)
+	accounting.add("measurement", os.Getpid())
+	accounting.add("supervisor", f.nodeSupervisor.cmd.Process.Pid)
+	accounting.add("controller", f.controller.process.cmd.Process.Pid)
+	for i, relay := range f.recipients {
+		accounting.add(fmt.Sprintf("relay%d", i), relay.watch.cmd.Process.Pid)
+	}
 	secondLog := filepath.Join(f.results, "capacity-app2.jsonl")
 	secondMode := "auto"
 	secondArgs := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app2", "--watch", "--interval", "500ms"}
@@ -283,6 +298,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	report["sampled_contract_version"] = 2
 	report["publication_continuity"] = map[string]any{"contract_version": 2, "status": "not_started"}
 	second := startNetworkProcessWithObserver(t, groupFD, f.robot, secondLog, receipts2, nil, secondArgs...)
+	accounting.add("app2", second.cmd.Process.Pid)
 	eventually(t, 45*time.Second, "independent app activated", func() error {
 		rows := receipts2.snapshot().Records
 		if len(rows) == 0 || !rows[len(rows)-1].Record.Applied {
@@ -302,6 +318,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	report["fault_installed_at"] = started
 	logfile := filepath.Join(f.results, "capacity-app.jsonl")
 	watcher := startNetworkProcessWithObserver(t, groupFD, f.robot, logfile, receipts1, nil, integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app", "--watch", "--interval", "500ms", "--probe-timeout", "2s")
+	accounting.add("app", watcher.cmd.Process.Pid)
 	var placement func() map[string]any
 	if group != nil {
 		for _, p := range []*networkProcess{f.nodeSupervisor, watcher, second} {

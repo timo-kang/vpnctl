@@ -1,11 +1,11 @@
 # Experiment branch only. Main/PR qualification remains unchanged; do not merge.
-name: Identical image cross-host experiment
+name: Runtime accounting cross-host experiment
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: identical-image-${{ github.ref }}
+  group: runtime-accounting-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   comparison:
