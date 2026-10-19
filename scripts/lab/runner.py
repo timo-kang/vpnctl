@@ -122,7 +122,9 @@ def prepare(root, cpuset, builder, runner):
         raise RuntimeError('at least 24 GiB free disk required')
     for name in ('input', 'image', 'cache', 'tmp', 'runs'):
         (root/name).mkdir(mode=0o700)
-    # UID 0 with no capabilities cannot bypass DAC; only this private child is writable.
+    # Capability-free UID 0 needs traversal/read access to binary input too.
+    # The enclosing 0700 lab root still denies access to other host users.
+    (root/'input').chmod(0o755)
     (root/'image').chmod(0o777)
     builder_id = image_id(builder)
     runner_id = image_id(runner)

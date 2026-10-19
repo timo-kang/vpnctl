@@ -69,8 +69,8 @@ clone에 있어야 한다. Go의 자동 toolchain 교체는 허용하지 않는�
 
 이미지 조립은 기존 `make_image.py`를 1 CPU·2GiB, network none, capability 없음으로
 실행한다. root disk는 일반 파일이며 host mount/loop device를 사용하지 않는다.
-private parent 아래 image 출력 디렉터리만 capability 없는 UID 0 작성자가 쓸 수
-있게 허용한다. 다른 사용자에게 parent 디렉터리를 공개하지 않는다.
+private parent 아래 바이너리 input은 capability 없는 UID 0 작성자가 읽을 수
+있도록 0755, image 출력 디렉터리는 쓸 수 있도록 0777로 둔다. 다른 사용자에게 parent 디렉터리를 공개하지 않는다.
 
 ## 실행과 판정
 
