@@ -660,7 +660,7 @@ def retain_runtime_counters(vm, result):
 
 
 def validate_runtime_profile(mode, cases, layout, cpu):
-    if mode is not None and (cases != ['application-capacity-8'] or layout != 'split' or cpu != '0.5'):
+    if mode is not None and (cases != ['application-capacity-8'] or layout != 'split' or cpu not in ('0.5', '1')):
         raise ValueError('runtime counters require the fixed split capacity profile')
 
 

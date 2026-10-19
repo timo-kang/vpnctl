@@ -410,7 +410,7 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError('explicit bounded robot CPU and path profile required')
                         if 'runtime_counters' in req:
                             enabled = req['runtime_counters']
-                            if type(enabled) is not bool or paths != 8 or layout != 'split' or cpu != '0.5' or rebuild:
+                            if type(enabled) is not bool or paths != 8 or layout != 'split' or cpu not in ('0.5', '1') or rebuild:
                                 raise ValueError('runtime counters require the fixed split capacity profile')
                             runtime_accounting_ready()
                             env['VPNCTL_VM_RUNTIME_COUNTERS'] = '1' if enabled else '0'

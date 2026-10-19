@@ -1,11 +1,11 @@
 # Experiment branch only. Main/PR qualification remains unchanged; do not merge.
-name: Runtime accounting cross-host experiment
+name: Same-runner CPU quota experiment
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: runtime-accounting-${{ github.ref }}
+  group: cpu-quota-control-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   comparison:
