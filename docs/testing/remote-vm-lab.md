@@ -22,6 +22,12 @@ network none, capability 없음, no-new-privileges, 읽기 전용 root를 사용
 쓰기 경로는 실행별 private work/results와 128MiB `/tmp`뿐이다. 전달 장치는
 KVM 하나이며, 호스트 network/PID namespace·블록 장치·포트 공개는 사용하지 않는다.
 게스트의 전원 명령은 기존 marker/UUID/boot ID/token 검증을 거친다.
+실제 네트워크 인터페이스 목록은
+[Python `socket.if_nameindex`](https://docs.python.org/3.12/library/socket.html#socket.if_nameindex)로
+조회하며 `lo` 하나만 허용한다. `/sys/class/net`에는
+[`bonding_masters` 관리 파일](https://docs.kernel.org/networking/bonding.html#configuring-bonding-manually-via-sysfs)도
+있을 수 있어 디렉터리 항목 수를 인터페이스 수로 취급하지 않는다. marker 누락,
+조회 실패, 외부 인터페이스는 모두 거부한다.
 
 CPU affinity는 CPU 독점 예약이 아니다. 같은 CPU나 SMT sibling에서 다른 작업이
 실행될 수 있다. 기존 서비스가 있는 서버의 결과를 전용 하드웨어 성능 보장이나
