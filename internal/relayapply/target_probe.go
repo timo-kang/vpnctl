@@ -171,6 +171,7 @@ func (e *Engine) observeTargetFiltered(parent context.Context, targetID, control
 	wave, stopWave := context.WithTimeout(ctx, targetObservationWaveDuration)
 	defer stopWave()
 	if k, ok := e.backend.(nodeKernel); ok {
+		wave = withInventoryDecoding(wave)
 		k.run = observationInventory(k.run, leaseBootTime)
 		// observePreparedGated checks the live lease at both boundaries itself.
 		// Avoid the duplicate middle LeaseStatus inside nodeKernel.Check; no

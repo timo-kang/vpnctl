@@ -54,6 +54,7 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 	}
 	check := e.backend.Check
 	if k, ok := e.backend.(nodeKernel); ok {
+		ctx = withInventoryDecoding(ctx)
 		k.run = maintenanceInventory(k.run)
 		// Lease below reads the live nft timer/flowtables and BPF owner,
 		// conditionally renews, and reads both gates back. Checking the same

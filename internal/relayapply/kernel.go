@@ -4,7 +4,6 @@ package relayapply
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -55,16 +54,7 @@ func (k kernel) list(ctx context.Context, args ...string) ([]object, error) {
 	if err != nil {
 		return nil, err
 	}
-	var rows []object
-	if len(b) > 512<<10 || json.Unmarshal(b, &rows) != nil || rows == nil || len(rows) > 4096 {
-		return nil, errors.New("invalid kernel inventory")
-	}
-	for _, r := range rows {
-		if r == nil {
-			return nil, errors.New("null kernel inventory")
-		}
-	}
-	return rows, nil
+	return inventoryRows(ctx, args, b)
 }
 func (k kernel) snapshot(ctx context.Context) (snapshot, error) {
 	s := snapshot{marks: map[string]uint32{}}
