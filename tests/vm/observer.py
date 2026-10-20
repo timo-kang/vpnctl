@@ -664,7 +664,13 @@ def validate_runtime_profile(mode, cases, layout, cpu):
         raise ValueError('runtime counters require the fixed split capacity profile')
 
 
-def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared', runtime_counters=None):
+def validate_product_profile(build, cases, layout, cpu, counters):
+    if build is not None and (type(build) is not str or build not in ('baseline', 'candidate')
+            or cases != ['application-capacity-8'] or layout != 'split' or cpu != '0.5' or counters != '1'):
+        raise ValueError('product comparison requires the fixed low-CPU accounting profile')
+
+
+def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared', runtime_counters=None, product_build=None):
     vm.launch()
     result.update(health=vm.call('health'), qemu_machine=vm.command('query-current-machine'))
     if case == 'boot':
@@ -692,7 +698,16 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
         request = {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout, 'rebuild': preparation} if capacity else {}
         if runtime_counters is not None:
             request['runtime_counters'] = runtime_counters
-        vm.call(action + '-start', request)
+        if product_build is not None:
+            validate_product_profile(product_build, [case], cpu_layout, robot_cpus, '1' if runtime_counters is True else None)
+            request['product_build'] = product_build
+        started = vm.call(action + '-start', request)
+        if product_build is not None:
+            result['product_start'] = started
+            binary = 'vpnctl' if product_build == 'baseline' else 'vpnctl-candidate'
+            if started != {'started': True, 'product': {'build': product_build, 'binary': binary,
+                    'path': '/opt/vpnctl-vm/' + binary, 'sha256': result['health']['binaries'][binary]}}:
+                raise RuntimeError('guest product selection or identity differs')
         until = time.monotonic() + 16 * 60
         while time.monotonic() < until:
             status = vm.call(action + '-result')
@@ -996,8 +1011,10 @@ def main():
     parser.add_argument('--robot-cpus', default='0.5', choices=['1', '0.5', '0.25'])
     parser.add_argument('--cpu-layout', default='shared', choices=['shared', 'split'])
     parser.add_argument('--runtime-counters', choices=['0', '1'])
+    parser.add_argument('--product-build', choices=['baseline', 'candidate'])
     args = parser.parse_args()
     validate_runtime_profile(args.runtime_counters, args.case, args.cpu_layout, args.robot_cpus)
+    validate_product_profile(args.product_build, args.case, args.cpu_layout, args.robot_cpus, args.runtime_counters)
     require_container_network()
     caps = next(s.split()[1] for s in Path('/proc/self/status').read_text().splitlines() if s.startswith('CapEff:'))
     if int(caps, 16) != 0:
@@ -1018,7 +1035,7 @@ def main():
             if hashlib.file_digest(f, 'sha256').hexdigest() != expected:
                 raise SystemExit('guest image digest mismatch: ' + name)
     Path('/results/runner.json').write_text(json.dumps({'qemu': subprocess.check_output(['qemu-system-x86_64', '--version'], text=True),
-        'runtime_counters': args.runtime_counters, 'accounting_boot_flags': args.runtime_counters is not None,
+        'product_build': args.product_build, 'runtime_counters': args.runtime_counters, 'accounting_boot_flags': args.runtime_counters is not None,
         'cpu_max': [quota, period], 'cpu_layout': args.cpu_layout, 'guest_vcpus': vcpus, 'memory_max': memory, 'swap_max': swap, 'cap_eff': caps, 'image': image}, indent=2) + '\n')
     cases = [(case, args.mode, args.delta, args.rtc) for case in args.case]
     if 'matrix' in args.case:
@@ -1039,7 +1056,7 @@ def main():
         verdict = {'schema_version': 1, 'case': case, 'mode': mode, 'delta': delta, 'rtc': rtc, 'completed': False, 'qualified': False}
         try:
             with record_container_resources(verdict):
-                exercise(vm, case, mode, delta, verdict, args.robot_cpus, args.cpu_layout, None if args.runtime_counters is None else args.runtime_counters == '1')
+                exercise(vm, case, mode, delta, verdict, args.robot_cpus, args.cpu_layout, None if args.runtime_counters is None else args.runtime_counters == '1', args.product_build)
             verdict['completed'] = True
             if 'unsupported_reason' not in verdict and 'defect_reason' not in verdict:
                 verdict['qualified'] = True

@@ -1,52 +1,61 @@
-# Same-runner robot CPU quota control (experiment only; do not merge)
+# Same-image inventory decoding comparison (experiment only; do not merge)
 
-This new CI cohort tests whether robot CPU quota affects the reproduced capacity
-failure on one runner. It does not retry or replace earlier cross-host results.
-Product CLI source is fixed at 888b83b991c1857f9114c59a3deb3cb76cf8506a; the race
-integration executable is fixed at 02b32013ceaf0ad36e22216335767b7dc5604965, including
-its existing accounting code. The guest/controller harness uses this branch's
-separately recorded clean revision. No Go source, test gates or dependencies may
-change from that fixed suite revision. The harness only extends accounting to
-the existing 1 CPU profile and fixes the experimental schedule.
+Hypothesis: repeated JSON decoding during maintenance and observation ownership
+checks adds enough CPU cost to delay the next successful observation on a quota
+limited robot. Reusing decoding of byte-identical public inventories within one
+sweep/wave may reduce that delay without extending evidence freshness or removing
+any command, lease, approval, ownership or post-TCP check. A local parser benchmark
+motivates this test; it does not establish an end-to-end improvement.
 
-Use one GitHub job, without a matrix. Build one Go 1.25.0 race CLI and one race
-integration executable from independent clean clones, plus three pinned ordinary
-compatibility executables. Build the runtime and pristine guest image once, then
-verify their recorded hashes before every invocation. Record all executable,
-kernel, initrd, image, runtime, compiler and controller identities. This is a new
-image cohort; it is not byte-identical to the earlier harness or the same host
-as a previous CI job. Only comparisons within this four-invocation cohort hold
-those factors constant.
+Baseline CLI source is latest main 6d07e08e109eae073d1ad11c5cf2edd8304b5148.
+Its cmd/internal/go.mod/go.sum content matches the preceding 888b83b product.
+Candidate source is a73c5aabf987023e63ccbfd1831094cb14085fd4, containing exactly
+five reviewed relayapply files relative to baseline. Verify that complete diff
+allowlist before compilation. Both CLIs use the same pinned Go 1.25.0 race builder.
+The integration executable remains 02b32013ceaf0ad36e22216335767b7dc5604965;
+its Go tests, thresholds, retries and instrumentation do not change. Controller
+and guest harness have their own clean revision. No additional product or
+integration changes are allowed in the comparison harness.
 
-Run exactly four fresh VM invocations: robot CPU quota 0.5, 1, 1, 0.5 (ABBA).
-Each uses the original 8-candidate/two-app capacity test and removal positions
-0, 3, 7. Fix split role placement: robot guest CPU 0, server guest CPU 1. Server
-quota remains 1 CPU, outer quota 2 CPUs, guest vCPUs 2. Fix the same two available
-host CPUs for all four runs. Accounting is ON in every run, with the same
-`delayacct schedstats=enable` guest boot flags, verified read-only. The same
-measurement worker and limits apply to all runs. No host kernel/sysctl changes.
+Build each CLI once in a separate clean Git clone, one integration executable,
+and three compatibility executables. Build one runtime and one pristine guest
+image containing all six binaries. Record actual compiler/race/VCS metadata
+and every executable/image/kernel/initrd/runtime/tool hash. Verify identical
+bundle bytes before each invocation. The only treatment is selection of the
+baseline or candidate CLI via the test's existing VPNCTL_BIN mechanism. This
+selects the whole product, including controller, relays and robot processes;
+it is not a robot-only patch. Guest launch response records the fixed executable
+path and hash used for the worker environment; the outer observer verifies it
+against guest health and the shared image manifest. Arbitrary paths or other
+profiles are rejected before launching the worker.
 
-Only robot quota varies. Fresh VM overlays and unique result directories prevent
-cross-run state reuse; two repetitions per quota partially balance run order but
-do not remove host time trends, noise or establish population statistics. The
-fixed 2 CPU outer budget also includes QEMU overhead: 1 robot CPU plus 1 server
-CPU is not a promise of two exclusive fully available cores. Retain outer
-throttling/pressure alongside guest role counters to identify this ceiling.
+One CI job runs exactly four fresh VMs: baseline, candidate, candidate, baseline
+(ABBA). Robot quota is 0.5 CPU in ALL FOUR runs. Fix 8 paths, two apps, removal
+positions 0/3/7, split role placement (robot guest CPU 0; servers guest CPU 1),
+server quota 1 CPU, outer quota 2 CPUs, and two guest vCPUs. Accounting is ON
+with the same boot flags and bounded sampler in all four. Hold the same host CPU
+pair, memory, image and runtime fixed. Fresh overlays and unique directories
+prevent state reuse. No API load, added retries, workflow reruns, reordered cells,
+or early stopping after product failure. Host-isolation or input-hash violation
+stops later work and retains all partial evidence. Invocation watchdog 1200 seconds
+is a test bound, not an application SLO. Existing required PR checks are unchanged.
 
-No API load, added retries, reordered cells, early stopping after product failure,
-or freshness/lease/ownership/payload threshold changes. Retain every original
-exit and frozen verdict. Infrastructure failure stays separate; host-isolation or
-input hash violations stop subsequent work, retaining incomplete evidence. The
-1200-second invocation watchdog bounds runtime; it is not a recovery SLO.
+Preserve every original exit, subcase and frozen qualification verdict. Analyze
+original payload, sampled freshness and publication verdicts by build, repetition,
+role and removal position. Compare admission queue duration, app cycle intervals,
+confirmation gaps and role CPU/pressure within matched original measured phases;
+do not compare whole-fixture totals after different early failures. The original
+10-second observation threshold, consecutive-success requirement, quarantine,
+lease and payload gates are unchanged. Missing evidence is not success.
 
-Analyze original failures and publication qualification by quota and repetition,
-including role and removal position. Compare timing/counter deltas within matched
-phases and original measured windows; do not compare whole-fixture totals when
-one fixture aborts early. Retain all available and unavailable coverage, identity
-turnover and timing uncertainty. A pass at 1 CPU would support quota sensitivity
-under this fixed instrumented race workload, not exonerate CI, prove a single
-cause, establish deployment sizing or qualify the uninstrumented release build.
-No change to required PR checks or merging policy is part of this experiment.
+A useful candidate must improve matched control/observation timing without new
+safety failures; integration qualification still requires all original candidate
+checks to pass. If controls do not reproduce, the failing low-CPU case is not
+confirmed in this cohort. If candidate failures persist, a microbenchmark gain
+alone is insufficient to adopt it as a fix. Retain inconclusive/negative results
+privately; no retry-for-green. Two repetitions partially balance ordering, not
+host trends or population variance. This instrumented workload cannot establish
+release-build performance, hardware sizing or Go/Rust superiority.
 
 Read per-live-thread /proc stat (user/system ticks, start identity, synchronous
 block-I/O delay ticks), schedstat (CPU ns, runqueue delay ns, time slices), and
@@ -93,10 +102,3 @@ recipient and upload only ciphertext. Fetch/audit without changing original exit
 and replay original Go publication/failure verdicts separately from telemetry.
 No remote execution is scheduled. Raw evidence stays private; public reporting,
 if needed, contains only aggregate protocol/qualification.
-
-Kernel definitions and limitations:
-- https://docs.kernel.org/accounting/delay-accounting.html
-- https://docs.kernel.org/scheduler/sched-stats.html
-- https://docs.kernel.org/filesystems/proc.html
-- https://docs.kernel.org/admin-guide/kernel-parameters.html
-- https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html

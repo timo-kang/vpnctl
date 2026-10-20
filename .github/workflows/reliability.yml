@@ -1,11 +1,11 @@
 # Experiment branch only. Main/PR qualification remains unchanged; do not merge.
-name: Same-runner CPU quota experiment
+name: Same-runner inventory decoding experiment
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: cpu-quota-control-${{ github.ref }}
+  group: kernel-decoding-control-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   comparison:

@@ -68,18 +68,18 @@ class Contracts(unittest.TestCase):
         image = {'sha256':{n:experiment.lab.digest(bundle/'image'/n) for n in experiment.IMAGE_FILES if n != 'image.json'},
                  'binaries':{n:experiment.lab.digest(bundle/'input'/n) for n in experiment.BINARIES}}
         (bundle/'image/image.json').write_text(json.dumps(image))
-        (bundle/'build.json').write_text(json.dumps({'source':experiment.SOURCE, 'suite_revision':experiment.suite_revision(), 'controller_revision':experiment.controller_revision(), 'race':True, 'runner_image':'fixed'}))
-        manifest = {'source':experiment.SOURCE, 'suite_revision':experiment.suite_revision(), 'controller_revision':experiment.controller_revision(), 'cells':[list(c) for c in experiment.CELLS],
+        (bundle/'build.json').write_text(json.dumps({'source':experiment.SOURCE, 'candidate':experiment.CANDIDATE, 'suite_revision':experiment.suite_revision(), 'controller_revision':experiment.controller_revision(), 'race':True, 'runner_image':'fixed'}))
+        manifest = {'source':experiment.SOURCE, 'candidate':experiment.CANDIDATE, 'suite_revision':experiment.suite_revision(), 'controller_revision':experiment.controller_revision(), 'cells':[list(c) for c in experiment.CELLS],
                     'tools':{n:experiment.lab.digest(experiment.REPO/n) for n in experiment.TOOLS},
                     'files':experiment.inventory(bundle)}
         path = self.root/'bundle-manifest.json'; path.write_text(json.dumps(manifest))
         with patch.object(experiment.lab, 'image_id', return_value='fixed'):
             experiment.verify(self.root)
-            for name in ('input/vpnctl', 'image/initrd', 'runtime.tar'):
+            for name in ('input/vpnctl', 'input/vpnctl-candidate', 'image/initrd', 'runtime.tar'):
                 target = bundle/name; original = target.read_bytes(); target.write_bytes(b'changed')
                 with self.assertRaises(ValueError): experiment.verify(self.root)
                 target.write_bytes(original)
-            for key, value in (('cells', []), ('tools', {}), ('source', '0'*40), ('suite_revision', '0'*40), ('controller_revision', '0'*40)):
+            for key, value in (('cells', []), ('tools', {}), ('source', '0'*40), ('candidate', 'f'*40), ('suite_revision', '0'*40), ('controller_revision', '0'*40)):
                 altered = dict(manifest, **{key:value}); path.write_text(json.dumps(altered))
                 with self.assertRaises(ValueError): experiment.verify(self.root)
                 path.write_text(json.dumps(manifest))
@@ -93,6 +93,18 @@ class Contracts(unittest.TestCase):
         for bad in (text.replace('-race=true', '-race=false'), text.replace('modified=false', 'modified=true'),
                     text.replace(experiment.SOURCE, '0'*40)):
             with self.assertRaises(ValueError): experiment.check_build(bad, 'vpnctl')
+
+    def test_candidate_build_identity_and_change_scope_are_fixed(self):
+        text = 'binary: go1.25.0\n' + ''.join('\tbuild\t'+s+'\n' for s in
+            ['-race=true', 'GOOS=linux', 'GOARCH=amd64', 'vcs.revision='+experiment.CANDIDATE, 'vcs.modified=false'])
+        experiment.check_build(text, 'vpnctl-candidate')
+        for bad in (text.replace('-race=true', '-race=false'), text.replace('modified=false', 'modified=true'),
+                    text.replace(experiment.CANDIDATE, experiment.SOURCE)):
+            with self.assertRaises(ValueError): experiment.check_build(bad, 'vpnctl-candidate')
+        experiment.check_candidate_changes(experiment.CANDIDATE_FILES)
+        for changes in ([], experiment.CANDIDATE_FILES | {'internal/relayselect/selector.go'},
+                        experiment.CANDIDATE_FILES - {'internal/relayapply/kernel.go'}):
+            with self.assertRaises(ValueError): experiment.check_candidate_changes(changes)
 
     def test_suite_change_scope_rejects_hidden_product_or_gate_edits(self):
         experiment.check_suite_changes(['scripts/ci/identical_image.py', 'tests/vm/observer.py'])
@@ -127,30 +139,31 @@ class Contracts(unittest.TestCase):
     def test_runtime_keeps_all_isolation_and_cpu_contracts(self):
         with patch.object(experiment.os, 'stat') as stat:
             stat.return_value.st_gid = 42
-            for sequence, robot_cpu in experiment.CELLS:
-                name, args = experiment.runtime_args(self.root, self.root/'runs-ci/01', {'runner_image':'sha256:fixed'}, '2,3', sequence, robot_cpu)
+            for sequence, product_build in experiment.CELLS:
+                name, args = experiment.runtime_args(self.root, self.root/'runs-ci/01', {'runner_image':'sha256:fixed'}, '2,3', sequence, product_build)
                 for arg in ('--read-only', '--device', '/dev/kvm', '--cap-drop', 'ALL', '--network', 'none',
                             '--memory=2g', '--memory-swap=2g', '--pids-limit=256', 'no-new-privileges', '--group-add', '42',
-                            '--cpuset-cpus=2,3', '--robot-cpus', robot_cpu, 'application-capacity-8', '--cpu-layout', 'split', '--runtime-counters', '1'):
+                            '--cpuset-cpus=2,3', '--robot-cpus', '0.5', '--product-build', product_build, 'application-capacity-8', '--cpu-layout', 'split', '--runtime-counters', '1'):
                     self.assertIn(arg, args)
                 self.assertIn('--cpus=2', args)
                 self.assertNotIn('--privileged', args)
                 self.assertTrue(any('dst=/input,readonly' in arg for arg in args))
 
-    def test_treatment_changes_only_robot_quota(self):
+    def test_treatment_changes_only_product_binary(self):
         commands = []
         with patch.object(experiment.os, 'stat') as stat, patch.object(experiment.lab.uuid, 'uuid4') as identity:
             stat.return_value.st_gid = 42
             identity.return_value.hex = 'a' * 32
-            for sequence, quota in experiment.CELLS:
-                _, args = experiment.runtime_args(self.root, self.root/'run', {'runner_image':'fixed'}, '2,3', sequence, quota)
-                self.assertEqual(args.count('--robot-cpus'), 1)
-                index = args.index('--robot-cpus') + 1
-                self.assertEqual(args[index], quota)
+            for sequence, product_build in experiment.CELLS:
+                _, args = experiment.runtime_args(self.root, self.root/'run', {'runner_image':'fixed'}, '2,3', sequence, product_build)
+                self.assertEqual(args.count('--product-build'), 1)
+                index = args.index('--product-build') + 1
+                self.assertEqual(args[index], product_build)
+                self.assertEqual(args[args.index('--robot-cpus')+1], '0.5')
                 self.assertEqual(args[args.index('--runtime-counters')+1], '1')
                 commands.append(args[:index] + ['TREATMENT'] + args[index+1:])
         self.assertEqual(commands, [commands[0]] * 4)
-        self.assertEqual(experiment.CELLS, ((1,'0.5'), (2,'1'), (3,'1'), (4,'0.5')))
+        self.assertEqual(experiment.CELLS, ((1,'baseline'), (2,'candidate'), (3,'candidate'), (4,'baseline')))
 
     def test_four_cells_preserve_product_and_infrastructure_failures(self):
         seen = []
@@ -170,7 +183,8 @@ class Contracts(unittest.TestCase):
             self.assertEqual(rows[1]['infrastructure_error'], 'TimeoutError')
             self.assertEqual([r['layout'] for r in rows], ['split'] * 4)
             self.assertEqual([r['runtime_counters'] for r in rows], ['1'] * 4)
-            self.assertEqual([r['robot_cpus'] for r in rows], ['0.5','1','1','0.5'])
+            self.assertEqual([r['robot_cpus'] for r in rows], ['0.5'] * 4)
+            self.assertEqual([r['product_build'] for r in rows], ['baseline','candidate','candidate','baseline'])
             with self.assertRaises(FileExistsError): experiment.run(self.root, '2,3', 'ci', invoke)
             self.assertEqual(seen, [1,2,3,4])
 

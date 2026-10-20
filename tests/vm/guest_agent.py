@@ -37,7 +37,7 @@ def guard():
 @lru_cache(maxsize=1)
 def binary_hashes():
     result = {}
-    for name in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1', 'vpnctl-lease-v2'):
+    for name in ('vpnctl', 'vpnctl-candidate', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1', 'vpnctl-lease-v2'):
         with (Path('/opt/vpnctl-vm') / name).open('rb') as f:
             result[name] = hashlib.file_digest(f, 'sha256').hexdigest()
     return result
@@ -360,6 +360,20 @@ def runtime_counter_result():
     return {'files': rows, 'expected_files': 3}
 
 
+def capacity_product(req):
+    build = req.get('product_build')
+    if (type(build) is not str or build not in ('baseline', 'candidate')
+            or type(req.get('paths')) is not int or req['paths'] != 8
+            or req.get('robot_cpus') != '0.5' or req.get('cpu_layout') != 'split'
+            or req.get('rebuild') is not False or req.get('runtime_counters') is not True):
+        raise ValueError('product comparison requires the fixed low-CPU accounting profile')
+    binary = 'vpnctl' if build == 'baseline' else 'vpnctl-candidate'
+    path = '/opt/vpnctl-vm/' + binary
+    with Path(path).open('rb') as stream:
+        digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+    return {'build': build, 'binary': binary, 'path': path, 'sha256': digest}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -377,6 +391,8 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(size) or b'{}')
             action = self.path.removeprefix('/')
             later = None
+            if 'product_build' in req and action != 'application-capacity-start':
+                raise ValueError('product selection is limited to the capacity experiment')
             if action == 'health':
                 result = health()
             elif action == 'probes':
@@ -402,7 +418,11 @@ class Handler(BaseHTTPRequestHandler):
                     env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
                                TMPDIR='/tmp', GORACE='atexit_sleep_ms=0')
+                    product = None
                     if action == 'application-capacity-start':
+                        if 'product_build' in req:
+                            product = capacity_product(req)
+                            env['VPNCTL_BIN'] = product['path']
                         paths, cpu = req.get('paths'), req.get('robot_cpus')
                         layout = req.get('cpu_layout', 'shared')
                         rebuild = req.get('rebuild', False)
@@ -425,6 +445,8 @@ class Handler(BaseHTTPRequestHandler):
                             '-test.run=^' + test + '$', '-test.v', '-test.timeout=15m'],
                             env=env, stdout=log, stderr=log, start_new_session=True)
                 result = {'started': True}
+                if product is not None:
+                    result['product'] = product
             elif action == 'runtime-counters-result':
                 result = runtime_counter_result()
             elif action in ('application-mixed-result', 'application-preparation-result', 'application-approval-result', 'application-capacity-result'):
