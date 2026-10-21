@@ -228,7 +228,17 @@ func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
 	applicationMixedCandidatesProfile(t, healthy, rebuild, 8, "", "shared")
 }
 
+type applicationCapacityFixture func(*testing.T, int, *os.File, string) *m3AuthorityFixture
+
 func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, paths int, robotCPU, layout string) {
+	applicationMixedCandidatesProfileWithFixture(t, healthy, rebuild, paths, robotCPU, layout,
+		func(t *testing.T, paths int, group *os.File, results string) *m3AuthorityFixture {
+			return applicationFixtureInResults(t, true, paths, false, group, results)
+		})
+}
+
+func applicationMixedCandidatesProfileWithFixture(t *testing.T, healthy int, rebuild bool, paths int, robotCPU, layout string, build applicationCapacityFixture) {
+	results, report := newApplicationCapacityReport(t, healthy, rebuild, paths, robotCPU, layout)
 	var group, serverGroup *capacityGroup
 	robotCPUs := ""
 	if layout == "split" {
@@ -242,7 +252,10 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		group = newCapacityGroup(t, robotCPU, robotCPUs)
 		groupFD = group.file
 	}
-	f := applicationFixtureWithGroup(t, true, paths, false, groupFD)
+	report["phase"] = "preparation"
+	f := build(t, paths, groupFD, results)
+	report["preparation_completed"] = true
+	report["phase"] = "rebuild_setup"
 	managed := map[string]relayapply.PreparationStatus{}
 	if rebuild {
 		for _, p := range f.plan.Paths {
@@ -250,7 +263,9 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		}
 	}
 	cgroup := func(name string) string { b, _ := os.ReadFile(filepath.Join("/sys/fs/cgroup", name)); return string(b) }
-	report := map[string]any{"healthy_index": healthy, "healthy_path": f.plan.Paths[healthy].PathID, "cpu_stat_before": cgroup("cpu.stat"), "memory_events_before": cgroup("memory.events")}
+	report["healthy_path"] = f.plan.Paths[healthy].PathID
+	report["cpu_stat_before"] = cgroup("cpu.stat")
+	report["memory_events_before"] = cgroup("memory.events")
 	if group != nil {
 		report["resource_profile"] = group.evidence(t)
 	}
@@ -258,10 +273,6 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		report["server_resource_profile"] = serverGroup.evidence(t)
 	}
 	t.Cleanup(func() {
-		defer func() {
-			report["completed"] = !t.Failed()
-			writeM3Report(t, filepath.Join(f.results, "application-mixed-candidates.json"), report)
-		}()
 		report["cpu_stat_after"] = cgroup("cpu.stat")
 		report["memory_events_after"] = cgroup("memory.events")
 		if group != nil {
@@ -271,6 +282,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 			report["server_resource_profile_after"] = serverGroup.evidence(t)
 		}
 	})
+	report["phase"] = "app2_activation"
 	secondLog := filepath.Join(f.results, "capacity-app2.jsonl")
 	secondMode := "auto"
 	secondArgs := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", "app2", "--watch", "--interval", "500ms"}
@@ -286,8 +298,6 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	}
 	report["actuator_modes"] = map[string]string{"app": "auto", "app2": secondMode}
 	receipts1, receipts2 := newPublicationStream(), newPublicationStream()
-	report["sampled_contract_version"] = 2
-	report["publication_continuity"] = map[string]any{"contract_version": 2, "status": "not_started"}
 	second := startNetworkProcessWithObserver(t, groupFD, f.robot, secondLog, receipts2, nil, secondArgs...)
 	eventually(t, 45*time.Second, "independent app activated", func() error {
 		rows := receipts2.snapshot().Records
@@ -296,6 +306,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		}
 		return nil
 	})
+	report["phase"] = "fault_setup"
 	fault := "table inet capacity_slow {\n chain output { type filter hook output priority 0; policy accept;\n"
 	for i, p := range f.plan.Paths {
 		if i != healthy {
@@ -417,6 +428,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		}
 		report["worker_resource_peaks"] = peaks
 	}
+	report["phase"] = "application_convergence"
 	var applied relayapply.TargetReconcileResult
 	samples := 0
 	eventually(t, 45*time.Second, "healthy path among seven slow paths", func() error {
@@ -465,6 +477,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	baseline1, baseline2 := len(begin1.Records), len(begin2.Records)
 	// Freeze v2 at qualification end or the first fatal return, before cleanup
 	// collects later diagnostics. Keep the sampled gate's outcome independent.
+	report["phase"] = "steady_qualification"
 	report["sampled_qualification_status"] = "incomplete"
 	var publication1, publication2 publicationVerdict
 	closed := false
@@ -549,6 +562,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 		report["rebuild_completed"] = repaired
 	}
 	report["two_actuators_and_payloads_verified"] = true
+	report["phase"] = "final_verification"
 	counters := netOutput(t, f.robot, "nft", "list", "table", "inet", "capacity_slow")
 	if strings.Count(counters, "counter packets ") != paths-1 || strings.Contains(counters, "counter packets 0 bytes 0") {
 		t.Fatal("not all slow paths exercised", counters)
@@ -563,5 +577,7 @@ func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, 
 	report["sampled_qualification_status"] = "pass"
 	if publication1.Status != "pass" || publication2.Status != "pass" {
 		t.Errorf("publication continuity not established: app=%s app2=%s", publication1.Status, publication2.Status)
+		return
 	}
+	report["phase"] = "completed"
 }
