@@ -71,7 +71,10 @@ wall-clock timestamps never serve as transition counters. Producer replacement
 resets local revisions and requires consumer resynchronization. Expiry changes
 the read-time freshness without inventing a new publication revision.
 
-Revision saturation withdraws confidence without preventing safety quarantine.
+The shared route revision mechanism and legacy journal regressions come from
+#238. At route-revision saturation, reconciliation refuses new probes and
+decisions, performs safety quarantine and withdraws previously reachable status.
+Publisher-counter saturation independently withdraws status confidence.
 The optional zero journal field preserves legacy serialization and checksum;
 fresh committed verification upgrades a legacy active reservation. Older binaries
 reject a nonzero new field through their strict decoder: a downgrade requires

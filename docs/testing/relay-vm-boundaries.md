@@ -33,6 +33,10 @@ Go, Python 3, Bash 및 충분한 임시 디스크 공간이다. Go 빌드는 2�
 않는다. KVM이 없으면 호스트 설정을 바꾸거나 다른 방식으로 우회하지 않고 실패한다.
 하드웨어 보안 격리나 악성 guest code 실행 서비스로 인증한 runner는 아니다.
 
+호스트에 Go/QEMU를 설치하지 않는 전용 서버 구성은
+[격리 VM lab 준비](remote-vm-lab.md)를 참고한다. KVM 그룹은 컨테이너에만 전달하며
+기존 호스트 서비스와 boot ID를 전후 비교한다.
+
 ## 재현과 다른 배포 저장소의 입력
 
 ```sh
@@ -271,6 +275,13 @@ logs; private configuration and keys remain in the private guest disk.
 On failure the test captures public route/nft state and allows up to 10 seconds
 for the pending application cycles to write their diagnostics before automatic
 fixture cleanup. The original failure remains failed even if traffic recovers.
+
+The guard sampler discards interrupted link dumps and attempts enumeration at
+most three times, checking its two-second budget between calls. The parent
+process enforces the three-second worker deadline. Lease reads and inactive
+guards are never retried. Worker failures retain a fixed error class and exit
+code without publishing stderr; an unsuccessful sample does not prove that a
+kernel lease was inactive and still prevents qualification.
 
 `--case application-approval`은 같은 격리 VM에서 실제 60초 승인 만료와 인증서 철회를
 검증한다. expiry 전 supervised FIFO 갱신 후 앱 적용 세대가 새 grant와 같아야 하며,

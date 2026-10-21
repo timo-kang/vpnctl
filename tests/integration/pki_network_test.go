@@ -265,7 +265,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 		"VPNCTL_WORKER=telemetry", "VPNCTL_PHASE=" + phaseFile, "VPNCTL_PKI=" + configs[0].Node.PKIDir, "VPNCTL_TELEMETRY=" + filepath.Join(results, "telemetry.jsonl"),
 	}, testBin, "-test.run=^TestNetworkWorker$")
 	checkFleetHistory := exerciseFleetHistory(t, bin, namespaces, paths, results)
-	checkMonitorHistory := exerciseMonitorHistory(t, bin, namespaces, paths, results)
+	captureMonitorHistory, checkMonitorHistory := exerciseMonitorHistory(t, bin, namespaces, paths, results, ctrlDir)
 	time.Sleep(time.Second)
 	before := make([]kernelSnapshot, size)
 	for n := range before {
@@ -444,6 +444,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	phase("controller_graceful_restart")
 	savedStatus := action("pki.status")
 	ctrl.terminate(t)
+	captureMonitorHistory()
 	ctrl = startNetworkProcess(t, namespaces[0], ctrlLog, ctrlEnv, bin, "controller", "init", "--config", ctrlPath)
 	eventually(t, 5*time.Second, "controller graceful restart", func() error { _, err := admin(api.AdminRequest{Operation: "pki.status"}); return err })
 	gracefulStatus := action("pki.status")
@@ -453,6 +454,7 @@ func testPKINetwork(t *testing.T, bin string, size int) {
 	for n := range configs {
 		eventually(t, 5*time.Second, "node after graceful restart", func() error { return fleet(n) })
 	}
+	checkMonitorHistory("after-graceful-restart")
 	time.Sleep(time.Second)
 	phase("controller_restart")
 	ctrl.stop()

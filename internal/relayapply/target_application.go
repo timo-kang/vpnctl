@@ -307,10 +307,26 @@ func (e *Engine) ReconcileTarget(parent context.Context, id, controller string, 
 	if g.Phase != "guarded" && g.Phase != "active" {
 		return out, ErrRecovery
 	}
+	if g.RouteRevision == ^uint64(0) {
+		out.Application, err = e.quarantineTarget(parent, id)
+		return out, errors.Join(ErrRecovery, err)
+	}
+	fence := e.targetObservationFence(g)
 	ctx, cancel := context.WithTimeout(parent, MaxDuration)
 	defer cancel()
 	ctx = context.WithValue(ctx, targetConnectLimitKey{}, selector.MaxConnectTime())
 	report, _ := e.observeTargetFiltered(ctx, id, controller, timeout, e.candidateProbe(), selector.ObservationExclusion)
+	// Candidate lease enforcement remains live within observation. No target
+	// decision or route mutation may consume evidence for a changed reservation.
+	i, g, current := fence.current(e)
+	if !current {
+		out.Selection = relayselect.Decision{SchemaVersion: 1, NodeID: e.journal.Node, TargetID: id, State: "unknown", Reason: "target_changed_during_observation", Candidates: []relayselect.Candidate{}}
+		out.Application = TargetGuardResult{SchemaVersion: 1, TargetID: id, State: "unknown", Reason: "target_changed_during_observation"}
+		if e.uncertain {
+			return out, errors.Join(ErrConflict, relaycache.ErrUncertain)
+		}
+		return out, ErrConflict
+	}
 	for j := range report.Paths {
 		k := e.index(report.Paths[j].PathID)
 		if report.Paths[j].State != "excluded" && k >= 0 && (e.journal.Entries[k].LeaseVersion != 3 || e.journal.Entries[k].ProbeScope != 1) {
@@ -531,11 +547,4 @@ func decisionUnderlay(ctx context.Context, entry Entry, d relayselect.Decision, 
 		}
 	}
 	return errors.New("underlay generation differs from confirmed decision")
-}
-
-func nextRouteRevision(revision uint64) uint64 {
-	if revision != ^uint64(0) {
-		revision++
-	}
-	return revision
 }
