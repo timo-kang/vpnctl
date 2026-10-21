@@ -21,6 +21,8 @@ func controllerUplinkFixture() uplink.Snapshot {
 func TestUplinkIdentityAndSeparateTargetHistory(t *testing.T) {
 	s := newIdentityTestServer(t)
 	v := controllerUplinkFixture()
+	v.Targets[0].ServiceStartedAt = historyPtr(v.At.Add(-2 * time.Second))
+	v.Targets[0].ServiceCompletedAt = historyPtr(v.At.Add(-time.Second))
 	for _, tc := range []struct {
 		node, identity string
 		code           int
@@ -47,6 +49,12 @@ func TestUplinkIdentityAndSeparateTargetHistory(t *testing.T) {
 	}
 	if out.Summaries[0].Samples != 1 || out.Summaries[0].TargetID != "server" {
 		t.Fatal(out)
+	}
+	if len(out.Snapshots) != 1 || out.Snapshots[0].Targets[0].ServiceStartedAt == nil ||
+		!out.Snapshots[0].Targets[0].ServiceStartedAt.Equal(v.Targets[0].ServiceStartedAt.Truncate(time.Microsecond)) ||
+		out.Snapshots[0].Targets[0].ServiceCompletedAt == nil ||
+		!out.Snapshots[0].Targets[0].ServiceCompletedAt.Equal(v.Targets[0].ServiceCompletedAt.Truncate(time.Microsecond)) {
+		t.Fatal("authenticated history lost service timing", out)
 	}
 	rec = httptest.NewRecorder()
 	s.handleAuthorizedUplinks(rec, httptest.NewRequest("GET", "/fleet/uplinks?node_id=node-a", nil))

@@ -108,7 +108,66 @@ reordering, detached outputs and read-time aging. All model compositions are
 checked for missing-dimension propagation, including cold-start AR fallback.
 Mutation checks must detect removal of freshness or unknown-input guards.
 
-Remaining #26 work: target-uplink service adapter, cellular signal collector with
+Remaining #26 work: target-uplink window/model integration, cellular signal collector with
 explicit unsupported/no-modem states, timestamped route/handoff/NAT coverage and
 privacy-safe trace recording/replay. This increment does not complete #26, #27,
 #28 or the M4 gate.
+
+## Target service source adapter (#257)
+
+`BuildUplinkService(ServiceStream, Snapshot, tick, maxAge)` returns one target's
+service evidence. It is separate from `BuildProbes`: node/target/protocol identity
+does not identify a peer probe or one relay route. Node authentication belongs to
+the caller. Endpoint/probing-policy changes under a reused target ID require a
+new caller-managed configuration epoch before building histories; snapshots do
+not currently carry that epoch. No window aggregation or forecast is introduced.
+
+`Target.service_started_at` and `service_completed_at` bound the entire service
+Probe call, including resolution/retries. They exclude an earlier relay probe,
+later WireGuard transport inspection, and waits for other link/target workers.
+The result is available only after completion. `Feature.ObservedAt` is the start
+and `AgeNS` is tick minus start: a slow completed attempt or delayed delivery
+cannot rejuvenate older evidence. Equality with maxAge is stale. maxAge must be
+positive and at most two minutes; the existing source expiry (three collection
+intervals), or an explicit stale query flag, can expire the result sooner.
+
+The two optional timestamps must either both be absent (legacy) or satisfy
+`tick - 7 days < started <= completed <= cycle.At <= tick`. Raw timestamps are
+validated before storage normalization to UTC microseconds. Partial, reversed or
+future timestamps are errors. Legacy snapshots remain readable and ingestible,
+but the adapter returns `missing/service_time_unavailable` and no measurement;
+cycle completion is never substituted for unavailable attempt timing. A missing
+target is `missing/target_not_collected`; a protocol mismatch is an input error.
+
+| Protocol | Duration kind | Meaning of the existing service `rtt_ms` |
+| --- | --- | --- |
+| tcp | tcp_connect | Successful socket connect and local socket setup elapsed time |
+| tls | tcp_connect_tls_handshake | Connect, local trust setup and TLS handshake elapsed time |
+| udp-echo | udp_socket_echo | UDP socket setup plus nonce-checked echo elapsed time |
+
+These finite [0,60000] millisecond durations exclude prior DNS/failed-IP retries
+and are not the full attempt interval. They remain named `DurationMS` in the
+adapter, with explicit kind, instead of being silently placed in peer
+`RTTHistory`. No packet-loss ratio is inferred from a single service result.
+`Ready` means usable evidence, including completed failures (`Success=false`,
+no duration). Successful duration zero is valid. Unknown/stale/missing results
+have neither success nor duration; unknown retains its bounded collector reason.
+Bandwidth, cell, handoff and NAT values are not synthesized.
+
+The adapter is stateless, does no I/O, and reads at most the bounded snapshot's
+eight links/four targets. Returned times/numbers are detached from the input.
+It retains the cycle ID/time, interval and cumulative process-local `Dropped`
+counter for provenance. Drops do not establish exact event coverage; reset/epoch
+handling remains pending. Repeated ticks never create a fresh observation.
+
+Raw snapshot times survive JSON ingestion, compressed persistence, restart,
+latest and history queries. SQL summary windows still use **cycle** timestamps,
+so their averages are not a substitute for event-time predictor input. Consumers
+must fetch raw snapshots and handle query truncation rather than infer missing
+attempts. This remains private evidence, not a privacy-safe trace export.
+
+Upgrade the controller before agents: new controllers accept legacy records,
+but old controllers strictly reject unknown JSON fields from a new agent. No
+database migration is required; optional fields live in the existing payload.
+These wall-clock fields do not provide clock synchronization, live leases or
+route authority and do not change the app routing API or its freshness gates.
