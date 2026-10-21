@@ -82,7 +82,7 @@ func (s Snapshot) Validate(now time.Time) error {
 		if v.State == "cached" {
 			cached++
 		}
-		if s.State == "missing" && v.State != "missing" || s.State == "unsupported" && v.State != "unsupported" {
+		if s.State == "missing" && v.State != "missing" || (s.State == "unsupported") != (v.State == "unsupported") {
 			return fmt.Errorf("inconsistent modem signal state")
 		}
 	}

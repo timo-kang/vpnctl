@@ -102,3 +102,27 @@ func TestModemSignalsConfigAndPayloadBoundary(t *testing.T) {
 		t.Fatal("RF attached to unrelated kind")
 	}
 }
+
+func TestMaximumModemSignalPayloadFitsSnapshotBudget(t *testing.T) {
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	signal := modemsignal.Parse("modem.signal.lte.rssi : -99.99\nmodem.signal.lte.rsrp : -120.00\nmodem.signal.lte.rsrq : -15.00\nmodem.signal.lte.snr : -1.50\nmodem.signal.5g.rssi : -99.99\nmodem.signal.5g.rsrp : -120.00\nmodem.signal.5g.rsrq : -15.00\nmodem.signal.5g.snr : -1.50", at)
+	s := Snapshot{ID: "maximum", At: at, IntervalSec: 60, Underlay: Up()}
+	for i := 0; i < MaxLinks; i++ {
+		l := Link{ID: strings.Repeat(string(rune('a'+i)), 64), Interface: "wwan" + string(rune('0'+i)), Kind: "lte", Check: Up(), Modem: Up(), ModemSignals: &signal, GatewayState: Up(), DNS: Up(), Controller: Up(), ControllerRoute: Route{Check: Up()}}
+		for j := 0; j < 16; j++ {
+			l.Addresses = append(l.Addresses, "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128")
+			l.Gateways = append(l.Gateways, "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+		}
+		s.Links = append(s.Links, l)
+	}
+	for i := 0; i < MaxTargets; i++ {
+		s.Targets = append(s.Targets, Target{ID: strings.Repeat(string(rune('a'+i)), 64), Protocol: "tcp", Route: Route{Check: Up()}, TransportRoute: Route{Check: Up()}, Relay: Up(), Service: Check{State: "up", RTTMs: ptr(1.0)}, FailureStage: "none", ServiceStartedAt: &at, ServiceCompletedAt: &at})
+	}
+	if err := s.Validate(at); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(s)
+	if err != nil || len(raw) > MaxSnapshotBytes {
+		t.Fatal("maximum configured RF population exceeds snapshot budget", len(raw), err)
+	}
+}

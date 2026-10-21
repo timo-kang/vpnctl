@@ -95,6 +95,14 @@ func TestRFAdmission(t *testing.T) {
 	}
 }
 
+func TestRFRejectsContradictoryUnsupportedInterface(t *testing.T) {
+	s := Parse(fixture, now)
+	s.LTE.RSRQ = Value{State: "unsupported", Reason: "signal_interface_unsupported"}
+	if s.Validate(now) == nil {
+		t.Fatal("interface declared unsupported while cached RF values are present")
+	}
+}
+
 func FuzzRFParser(f *testing.F) {
 	f.Add(fixture)
 	f.Add("modem.signal.lte.snr : --")
