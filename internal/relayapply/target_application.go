@@ -28,6 +28,7 @@ type TargetRoute struct {
 	Alias     string `json:"alias"`
 }
 type ApplicationProof struct {
+	leaseDeadlineNS    uint64        // Live-only bound; JSON round trips cannot retain it.
 	Evidence           string        `json:"evidence"`
 	Interface          string        `json:"interface"`
 	Source             string        `json:"source"`
@@ -139,16 +140,16 @@ func (e *Engine) targetEntry(g TargetGuard, route *TargetRoute) (Entry, relaycat
 	}
 	return entry, target, nil
 }
-func (e *Engine) approvedTargetEntry(ctx context.Context, g TargetGuard, route *TargetRoute) (Entry, relaycatalog.Target, error) {
+func (e *Engine) approvedTargetEntry(ctx context.Context, g TargetGuard, route *TargetRoute) (Entry, relaycatalog.Target, *DeploymentLease, error) {
 	entry, target, err := e.targetEntry(g, route)
 	if err != nil {
-		return entry, target, err
+		return entry, target, nil, err
 	}
 	if err := e.stillApproved(entry); err != nil {
-		return entry, target, err
+		return entry, target, nil, err
 	}
 	if err := inventoryMatches(ctx, entry, e.underlays, e.collector); err != nil {
-		return entry, target, err
+		return entry, target, nil, err
 	}
 	check := e.backend.Check
 	if k, ok := e.backend.(nodeKernel); ok {
@@ -158,12 +159,10 @@ func (e *Engine) approvedTargetEntry(ctx context.Context, g TargetGuard, route *
 	}
 	ready, err := check(ctx, entry, false)
 	if err != nil || !ready {
-		return entry, target, errors.Join(ErrConflict, err)
+		return entry, target, nil, errors.Join(ErrConflict, err)
 	}
-	if _, err := e.checkLease(ctx, entry); err != nil {
-		return entry, target, err
-	}
-	return entry, target, nil
+	lease, err := e.checkLease(ctx, entry)
+	return entry, target, lease, err
 }
 func (e *Engine) blockTargetCandidates(ctx context.Context, g TargetGuard) error {
 	b, ok := e.backend.(nodeLeaseBackend)
@@ -187,7 +186,7 @@ func (e *Engine) applicationProof(ctx context.Context, g TargetGuard, route *Tar
 	if err != nil {
 		return ApplicationProof{}, err
 	}
-	entry, target, err := e.approvedTargetEntry(ctx, g, route)
+	entry, target, beforeLease, err := e.approvedTargetEntry(ctx, g, route)
 	if err != nil {
 		return ApplicationProof{}, err
 	}
@@ -208,7 +207,8 @@ func (e *Engine) applicationProof(ctx context.Context, g TargetGuard, route *Tar
 	if err != nil {
 		return proof, err
 	}
-	if _, _, err := e.approvedTargetEntry(ctx, g, route); err != nil {
+	_, _, afterLease, err := e.approvedTargetEntry(ctx, g, route)
+	if err != nil {
 		return proof, err
 	}
 	if err := b.CheckRoutes(ctx, g, e.journal.Entries, route); err != nil {
@@ -218,6 +218,10 @@ func (e *Engine) applicationProof(ctx context.Context, g TargetGuard, route *Tar
 	if err != nil || current != generation {
 		return proof, errors.New("underlay changed during application proof")
 	}
+	if beforeLease == nil || beforeLease.Boot == nil || afterLease == nil || afterLease.Boot == nil {
+		return proof, ErrLeaseExpired
+	}
+	proof.leaseDeadlineNS = min(beforeLease.Boot.DeadlineNS, afterLease.Boot.DeadlineNS, entry.ApprovalBootNS)
 	proof.UnderlayGeneration = current
 	return proof, ctx.Err()
 }
