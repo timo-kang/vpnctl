@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"vpnctl/internal/config"
+	"vpnctl/internal/relayapply"
 	"vpnctl/internal/relaycache"
 	"vpnctl/internal/relaycatalog"
 	"vpnctl/internal/relayobserve"
@@ -55,7 +56,7 @@ func TestNodeAdmissionDiagnosticsReachFailedReports(t *testing.T) {
 					}
 					d = out.Diagnostics
 				case "reconcile":
-					out, err := reconcileApplicationTarget(ctx, node, dir, "app", "", time.Second, nil)
+					out, err := reconcileApplicationTarget(ctx, node, dir, "app", "", time.Second, nil, nil)
 					if !errors.Is(err, wantErr) || out.Applied || out.Selection.Reason != "ownership_unavailable" || out.Application.State != "blocked" {
 						t.Fatal("failed admission changed route status", err)
 					}
@@ -212,7 +213,7 @@ func TestNodeAdmissionKernelDiagnostics(t *testing.T) {
 // Empty journals exercise real cache/FIFO/namespace ownership without changing
 // host interfaces. Work errors must still report the entire release boundary.
 func TestNodeCycleDiagnosticsIncludeOwnershipRelease(t *testing.T) {
-	for _, entry := range []string{"observation", "reconcile", "supervisor"} {
+	for _, entry := range []string{"observation", "reconcile", "reconcile_published", "supervisor"} {
 		t.Run(entry, func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.Chmod(root, 0700); err != nil {
@@ -235,8 +236,16 @@ func TestNodeCycleDiagnosticsIncludeOwnershipRelease(t *testing.T) {
 					t.Fatal("invalid request became valid")
 				}
 				d = out.Diagnostics
-			case "reconcile":
-				out, err := reconcileApplicationTarget(ctx, node, dir, "app", "", time.Second, nil)
+			case "reconcile", "reconcile_published":
+				var publisher *relayapply.UplinkPublisher
+				if entry == "reconcile_published" {
+					var err error
+					publisher, err = relayapply.NewUplinkPublisher("app")
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				out, err := reconcileApplicationTarget(ctx, node, dir, "app", "", time.Second, nil, publisher)
 				if err == nil || out.Applied {
 					t.Fatal("invalid request was applied")
 				}
