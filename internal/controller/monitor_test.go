@@ -319,10 +319,20 @@ func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
 				loopbackMonitorRegistry(t, s)
 				ctx, cancel := context.WithCancel(context.Background())
 				var wg sync.WaitGroup
-				defer func() { cancel(); wg.Wait() }()
+				deliveryBefore := probeDeliveryCounters(t)
 				st := s.history.(*history.Store)
 				diagnostic := &monitorScaleHistory{Store: st, errors: map[string]int{}}
 				s.history = diagnostic
+				defer func() {
+					cancel()
+					wg.Wait()
+					if t.Failed() {
+						t.Logf("post-drain probe delivery delta (agent + monitor): %v", probeDeliveryDelta(t, deliveryBefore))
+						diagnostic.mu.Lock()
+						t.Logf("post-drain storage rejections: %v", diagnostic.errors)
+						diagnostic.mu.Unlock()
+					}
+				}()
 				if schema >= 6 {
 					if err := st.EnableTiering(ctx, time.Now()); err != nil {
 						t.Fatal(err)
@@ -342,6 +352,13 @@ func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
 				dirs := make([]string, size)
 				peers := make([]peersource.Peer, size)
 				uploaders := make([]*monitor.HistoryReporter, size)
+				// Registered after the cancel/join defer: capture live queues before
+				// shutdown discards pending work and resets their Pending counts.
+				defer func() {
+					if t.Failed() {
+						logLiveProducerConvergence(t, st, uploaders, deliveryBefore)
+					}
+				}()
 				for i := 0; i < size; i++ {
 					id := fmt.Sprintf("node-%02d", i)
 					clients[i], dirs[i] = lifecycleNode(t, s, h, id)
@@ -377,25 +394,6 @@ func TestMonitorAndDirectRealProducersVariableScale(t *testing.T) {
 					wg.Add(1)
 					go func() { defer wg.Done(); m.Run(ctx) }()
 				}
-				t.Cleanup(func() {
-					if !t.Failed() {
-						return
-					}
-					diagnostic.mu.Lock()
-					t.Logf("storage rejections: %v", diagnostic.errors)
-					diagnostic.mu.Unlock()
-					latest := st.Latest(time.Time{})
-					for i, uploader := range uploaders {
-						id := fmt.Sprintf("node-%02d", i)
-						sources := map[string]int{}
-						for _, m := range latest[id] {
-							if m.SampleCount > 0 {
-								sources[m.Source]++
-							}
-						}
-						t.Logf("convergence diagnostic %s: streams=%v monitor=%+v", id, sources, uploader.Status())
-					}
-				})
 				waitPKI(t, 45*time.Second, func() bool {
 					if size == 1 {
 						return uploaders[0].Status().MappingReady
