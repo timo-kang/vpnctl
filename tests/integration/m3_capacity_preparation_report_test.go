@@ -199,7 +199,7 @@ func TestApplicationCapacityReportPreparationWorker(t *testing.T) {
 		}
 		return
 	}
-	build := func(t *testing.T, paths int, group *os.File, results string) *m3AuthorityFixture {
+	build := func(t *testing.T, paths int, group *os.File, results string, initial *capacityStartup) *m3AuthorityFixture {
 		t.Helper()
 		if paths != 8 || group != nil {
 			t.Fatal("unexpected preparation callback arguments")
@@ -223,6 +223,6 @@ func TestApplicationCapacityReportPreparationWorker(t *testing.T) {
 		}
 		return nil // Fatal and Skip never return; no real fixture can be used.
 	}
-	applicationMixedCandidatesProfileWithFixture(t, 3, true, 8, "", "shared", build)
+	applicationMixedCandidatesProfileWithFixture(t, 3, true, 8, "", "shared", false, build)
 	t.Fatal("preparation failure callback unexpectedly returned")
 }

@@ -378,18 +378,18 @@ def validate_application_approval_result(status):
                 raise RuntimeError('application expiry did not isolate the intended grant')
 
 
-def validate_robot_capacity(row, paths, cpu, cpu_layout='shared'):
+def validate_robot_capacity(row, paths, cpu, cpu_layout='shared', startup=False):
     quota = {'1': '100000 100000', '0.5': '50000 100000', '0.25': '25000 100000'}.get(cpu)
     if not quota or row.get('paths') != paths or row.get('role_placement_verified') is not True:
         raise RuntimeError('missing role capacity configuration or placement')
     if cpu_layout not in ('shared', 'split'):
         raise RuntimeError('unsupported CPU layout')
     validate_capacity_accounting(row, 'resource_profile', quota,
-                                 'robot-supervisor-and-two-actuators', 2 if cpu_layout == 'split' else 1,
-                                 '0' if cpu_layout == 'split' else None)
+                                 'robot-startup-and-runtime' if startup else 'robot-supervisor-and-two-actuators',
+                                 2 if cpu_layout == 'split' else 1, '0' if cpu_layout == 'split' else None, startup)
     if cpu_layout == 'split':
         validate_capacity_accounting(row, 'server_resource_profile', '100000 100000',
-                                     'controller-relays-and-measurement', 2, '1')
+                                     'controller-relays-and-measurement', 2, '1', not startup)
         roles = {'supervisor': '0', 'app': '0', 'app2': '0', 'controller': '1',
                  'relay0': '1', 'relay1': '1', 'measurement': '1'}
         for suffix in ('', '_after'):
@@ -402,14 +402,14 @@ def validate_robot_capacity(row, paths, cpu, cpu_layout='shared'):
                 raise RuntimeError('incomplete or overlapping role CPU placement')
 
 
-def validate_capacity_accounting(row, prefix, quota, scope, vcpus, cpus):
+def validate_capacity_accounting(row, prefix, quota, scope, vcpus, cpus, preparation_limited=False):
     stats = []
     models = set()
     for name in (prefix, prefix + '_after'):
         profile = row.get(name, {})
         if (profile.get('scope') != scope
                 or profile.get('cpu_max') != quota
-                or profile.get('initial_preparation_limited') is not (scope == 'controller-relays-and-measurement')
+                or profile.get('initial_preparation_limited') is not preparation_limited
                 or profile.get('controller_relay_measurement_limited') is not (scope == 'controller-relays-and-measurement')
                 or not isinstance(profile.get('cpu_model'), str) or not profile['cpu_model'].strip()
                 or type(profile.get('guest_vcpus')) is not int or profile['guest_vcpus'] != vcpus
@@ -430,7 +430,9 @@ def validate_capacity_accounting(row, prefix, quota, scope, vcpus, cpus):
         raise RuntimeError('role CPU accounting did not advance')
 
 
-def validate_application_mixed_result(status, preparation=False, paths=8, robot_cpu=None, cpu_layout='shared', uplink_api=False):
+def validate_application_mixed_result(status, preparation=False, paths=8, robot_cpu=None, cpu_layout='shared', startup=False, uplink_api=False):
+    if startup and (uplink_api or preparation or robot_cpu is None or cpu_layout != 'split'):
+        raise RuntimeError('startup requires a separate split CPU profile')
     reports = [row.get('report', {}) for row in status.get('reports', [])]
     if (status.get('exit') != 0 or len(reports) != 3
             or paths not in (4, 8)
@@ -462,7 +464,9 @@ def validate_application_mixed_result(status, preparation=False, paths=8, robot_
                        for k, minimum in (('responses', 10), ('limited', 1), ('fresh_reachable', 1))):
                     raise RuntimeError('API load did not exercise both apps and rejection')
         if robot_cpu is not None:
-            validate_robot_capacity(row, paths, robot_cpu, cpu_layout)
+            validate_robot_capacity(row, paths, robot_cpu, cpu_layout, startup)
+        if startup:
+            validate_capacity_startup(row, paths)
         if preparation:
             path_ids = [f'p{relay}{underlay}' for relay in range(2) for underlay in range(paths // 2)]
             if (row.get('automatic_rebuild') is not True or row.get('rebuild_completed') is not True
@@ -470,6 +474,33 @@ def validate_application_mixed_result(status, preparation=False, paths=8, robot_
                 raise RuntimeError('mixed application rebuild evidence incomplete')
             if robot_cpu is not None:
                 validate_capacity_rebuild(row)
+
+
+def validate_capacity_startup(row, paths):
+    startup = row.get('startup', {})
+    seconds = startup.get('seconds')
+    if (type(seconds) not in (int, float) or not math.isfinite(seconds) or not 0 < seconds <= 120
+            or startup.get('ready_candidates') != paths
+            or row.get('actuator_modes') != {'app': 'auto', 'app2': 'auto'}):
+        raise RuntimeError('bounded initial preparation evidence incomplete')
+    expected = ['enroll', 'register', 'refresh', 'plan'] + [
+        f'prepare/p{r}{u}' for r in range(2) for u in range(paths // 2)] + ['reserve/app', 'reserve/app2']
+    pending = list(expected)
+    total = 0
+    for command in startup.get('commands', []):
+        duration = command.get('seconds')
+        if (not pending or command.get('phase') != pending[0]
+                or command.get('placement_verified') is not True or command.get('cpus') != '0'
+                or type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0):
+            raise RuntimeError('startup command sequence or CPU placement incomplete')
+        total += duration
+        if command.get('succeeded') is True and command.get('retryable') is False:
+            pending.pop(0)
+        elif (command.get('succeeded') is not False or command.get('retryable') is not True
+              or pending[0] in ('enroll', 'register')):
+            raise RuntimeError('startup command failed outside bounded pre-admission retry')
+    if pending or total > seconds:
+        raise RuntimeError('startup commands missing or timing inconsistent')
 
 
 def validate_capacity_rebuild(row):
@@ -701,7 +732,7 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
                 validate_capacity_accounting(row, 'resource_profile', quota,
                     'robot-supervisor-two-actuators-and-two-apps', 2, '0')
                 validate_capacity_accounting(row, 'server_resource_profile', '100000 100000',
-                    'controller-relays-and-measurement', 2, '1')
+                    'controller-relays-and-measurement', 2, '1', preparation_limited=True)
                 measurement = validate_app_recovery(row, paths)
                 vm.record(case + '-measurement', measurement)
                 return result
@@ -712,9 +743,12 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
         preparation = case == 'application-preparation' or case.startswith('application-capacity-rebuild-')
         action = 'application-capacity' if capacity else case
         paths = int(case.rsplit('-', 1)[1]) if capacity else 8
+        startup = case.startswith('application-capacity-startup-')
         request = {'paths': paths, 'robot_cpus': robot_cpus, 'cpu_layout': cpu_layout, 'rebuild': preparation} if capacity else {}
+        if startup:
+            request['startup'] = True
         if uplink_api:
-            if not capacity:
+            if not capacity or startup:
                 raise RuntimeError('API load requires a capacity profile')
             request['uplink_api'] = True
         vm.call(action + '-start', request)
@@ -725,7 +759,7 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
                 result[case] = status
                 vm.record(case + '-result', status)
                 if capacity or case in ('application-mixed', 'application-preparation'):
-                    validate_application_mixed_result(status, preparation=preparation, paths=paths, robot_cpu=robot_cpus if capacity else None, cpu_layout=cpu_layout, uplink_api=uplink_api)
+                    validate_application_mixed_result(status, preparation=preparation, paths=paths, robot_cpu=robot_cpus if capacity else None, cpu_layout=cpu_layout, uplink_api=uplink_api, startup=startup)
                 else:
                     validate_application_approval_result(status)
                 return result
@@ -997,7 +1031,7 @@ def capacity_vcpus(layout, cases, quota, period):
     if layout == 'shared' and quota <= period:
         return 1
     if (layout == 'split' and cases
-            and set(cases) <= {'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'uplink-apps-4', 'uplink-apps-8'}
+            and set(cases) <= {'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'application-capacity-startup-4', 'application-capacity-startup-8', 'uplink-apps-4', 'uplink-apps-8'}
             and quota == 2 * period):
         return 2
     raise RuntimeError('shared layout requires <=1 outer CPU; split requires capacity cases and exactly 2 outer CPUs')
@@ -1012,7 +1046,7 @@ def require_container_network():
 
 def main():
     parser = argparse.ArgumentParser()
-    cases_argument = parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    cases_argument = parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'application-capacity-startup-4', 'application-capacity-startup-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])

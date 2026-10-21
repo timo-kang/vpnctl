@@ -225,25 +225,27 @@ func TestNetns_M3PreparationCapacity(t *testing.T) {
 }
 
 func applicationMixedCandidates(t *testing.T, healthy int, rebuild bool) {
-	applicationMixedCandidatesProfile(t, healthy, rebuild, 8, "", "shared")
+	applicationMixedCandidatesProfile(t, healthy, rebuild, 8, "", "shared", false)
 }
 
-type applicationCapacityFixture func(*testing.T, int, *os.File, string) *m3AuthorityFixture
+type applicationCapacityFixture func(*testing.T, int, *os.File, string, *capacityStartup) *m3AuthorityFixture
 
-func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, paths int, robotCPU, layout string) {
-	applicationMixedCandidatesProfileWithFixture(t, healthy, rebuild, paths, robotCPU, layout,
-		func(t *testing.T, paths int, group *os.File, results string) *m3AuthorityFixture {
-			return applicationFixtureInResults(t, true, paths, false, group, results)
+func applicationMixedCandidatesProfile(t *testing.T, healthy int, rebuild bool, paths int, robotCPU, layout string, startup bool) {
+	applicationMixedCandidatesProfileWithFixture(t, healthy, rebuild, paths, robotCPU, layout, startup,
+		func(t *testing.T, paths int, group *os.File, results string, initial *capacityStartup) *m3AuthorityFixture {
+			return applicationFixtureWithStartup(t, true, paths, false, group, results, initial)
 		})
 }
 
-func applicationMixedCandidatesProfileWithFixture(t *testing.T, healthy int, rebuild bool, paths int, robotCPU, layout string, build applicationCapacityFixture) {
+func applicationMixedCandidatesProfileWithFixture(t *testing.T, healthy int, rebuild bool, paths int, robotCPU, layout string, startup bool, build applicationCapacityFixture) {
 	results, report := newApplicationCapacityReport(t, healthy, rebuild, paths, robotCPU, layout)
+	report["requested_profile"].(map[string]any)["startup"] = startup
 	var group, serverGroup *capacityGroup
 	robotCPUs := ""
 	if layout == "split" {
 		serverGroup = newCapacityGroup(t, "1", "1")
 		serverGroup.scope = "controller-relays-and-measurement"
+		serverGroup.preparationLimited = !startup
 		serverGroup.moveWorker(t)
 		robotCPUs = "0"
 	}
@@ -252,8 +254,14 @@ func applicationMixedCandidatesProfileWithFixture(t *testing.T, healthy int, reb
 		group = newCapacityGroup(t, robotCPU, robotCPUs)
 		groupFD = group.file
 	}
+	var initial *capacityStartup
+	if startup {
+		initial = &capacityStartup{group: group}
+		group.scope = "robot-startup-and-runtime"
+		group.preparationLimited = true
+	}
 	report["phase"] = "preparation"
-	f := build(t, paths, groupFD, results)
+	f := build(t, paths, groupFD, results, initial)
 	report["preparation_completed"] = true
 	report["phase"] = "rebuild_setup"
 	managed := map[string]relayapply.PreparationStatus{}
@@ -268,6 +276,10 @@ func applicationMixedCandidatesProfileWithFixture(t *testing.T, healthy int, reb
 	report["memory_events_before"] = cgroup("memory.events")
 	if group != nil {
 		report["resource_profile"] = group.evidence(t)
+		if initial != nil {
+			report["resource_profile"] = initial.before
+			report["startup"] = initial.report
+		}
 	}
 	if serverGroup != nil {
 		report["server_resource_profile"] = serverGroup.evidence(t)
