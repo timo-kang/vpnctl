@@ -238,6 +238,7 @@ func (e *Engine) observePrepared(ctx context.Context, entry Entry, target relayc
 // Only the socket proof may overlap. Each stage runs under the existing
 // ownership/gate. The private attempt is not permission to release that ownership.
 func (e *Engine) observePreparedGated(ctx context.Context, entry Entry, target relaycatalog.Target, timeout time.Duration, out TargetObservation, probe func(context.Context, Entry, relaycatalog.Target) (targetProof, error), gate *observationGate) TargetObservation {
+	out.ProbeFailure = nil
 	if entry.LeaseVersion != 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, targetObservationWaveDuration)
@@ -285,21 +286,21 @@ func (k kernel) targetCounters(ctx context.Context, entry Entry) (targetCounters
 			want = 3
 		}
 		if len(f) != want || f[0] != entry.Candidate.RelayPublicKey {
-			return out, errors.New("invalid candidate counters")
+			return out, errInvalidTargetCounters
 		}
 		if field == "latest-handshakes" {
 			out.handshake, err = strconv.ParseInt(f[1], 10, 64)
 			if err != nil || out.handshake < 0 {
-				return out, errors.New("invalid handshake")
+				return out, fmt.Errorf("%w: invalid handshake", errInvalidTargetCounters)
 			}
 		} else {
 			out.rx, err = strconv.ParseUint(f[1], 10, 64)
 			if err != nil {
-				return out, errors.New("invalid receive counter")
+				return out, fmt.Errorf("%w: invalid receive counter", errInvalidTargetCounters)
 			}
 			out.tx, err = strconv.ParseUint(f[2], 10, 64)
 			if err != nil {
-				return out, errors.New("invalid transmit counter")
+				return out, fmt.Errorf("%w: invalid transmit counter", errInvalidTargetCounters)
 			}
 		}
 	}
@@ -312,11 +313,11 @@ func (k kernel) probeTarget(ctx context.Context, entry Entry, target relaycatalo
 
 func (k kernel) probeTargetWithDial(ctx context.Context, entry Entry, target relaycatalog.Target, dial func(context.Context, Entry, relaycatalog.Target) (net.Conn, error)) (targetProof, error) {
 	if err := k.targetRoute(ctx, entry, target); err != nil {
-		return targetProof{}, err
+		return targetProof{}, probeFailure(ctx, "route_before", "", err)
 	}
 	before, err := k.targetCounters(ctx, entry)
 	if err != nil {
-		return targetProof{}, err
+		return targetProof{}, probeFailure(ctx, "counters_before", "", err)
 	}
 	began := time.Now()
 	dialCtx := ctx
@@ -328,20 +329,32 @@ func (k kernel) probeTargetWithDial(ctx context.Context, entry Entry, target rel
 	}
 	conn, err := dial(dialCtx, entry, target)
 	duration := time.Since(began)
-	cancel()
 	if err != nil {
-		return targetProof{}, classifyTargetConnect(err)
+		// Capture the dial context before our cleanup cancel changes its state.
+		failure := probeFailure(dialCtx, "connect", "", classifyTargetConnect(err))
+		cancel()
+		return targetProof{}, failure
 	}
+	cancel()
 	defer conn.Close()
 	if err := k.targetRoute(ctx, entry, target); err != nil {
-		return targetProof{}, err
+		return targetProof{}, probeFailure(ctx, "route_after", "", err)
 	}
 	after, err := k.targetCounters(ctx, entry)
 	if err != nil {
-		return targetProof{}, err
+		return targetProof{}, probeFailure(ctx, "counters_after", "", err)
 	}
-	if after.handshake <= 0 || after.rx <= before.rx || after.tx <= before.tx {
-		return targetProof{}, errors.New("TCP success without candidate WG transfer evidence")
+	cause := ""
+	switch {
+	case after.handshake <= 0:
+		cause = "missing_handshake"
+	case after.rx <= before.rx:
+		cause = "rx_not_advanced"
+	case after.tx <= before.tx:
+		cause = "tx_not_advanced"
+	}
+	if cause != "" {
+		return targetProof{}, probeFailure(ctx, "transfer", cause, errors.New("TCP success without candidate WG transfer evidence"))
 	}
 	return targetProof{duration, after.handshake, after.rx - before.rx, after.tx - before.tx}, nil
 }
