@@ -119,7 +119,7 @@ func (h *HandoffRule) Predict(ctx context.Context, obs Observation) (Forecast, e
 	base.QHi[SignalHandoffProb] = clamp(prob+0.15, 0, 1)
 	base.Health[SignalHandoffProb] = health
 	base.PredictorName = h.Name()
-	return base, nil
+	return maskUnavailable(obs, base), nil
 }
 
 // computeHandoffProb produces the point estimate + a self-report health

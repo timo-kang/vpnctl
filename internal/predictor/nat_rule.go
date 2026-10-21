@@ -103,7 +103,7 @@ func (n *NATRule) Predict(ctx context.Context, obs Observation) (Forecast, error
 	}
 
 	var hFcst *Forecast
-	if n.handoff != nil {
+	if n.handoff != nil && obs.known(SignalHandoffProb) {
 		if f, hErr := n.handoff.Predict(ctx, obs); hErr == nil {
 			hFcst = &f
 		}
@@ -122,7 +122,7 @@ func (n *NATRule) Predict(ctx context.Context, obs Observation) (Forecast, error
 		base.QHi[SignalHandoffProb] = hFcst.QHi[SignalHandoffProb]
 		base.Health[SignalHandoffProb] = hFcst.Health[SignalHandoffProb]
 	}
-	return base, nil
+	return maskUnavailable(obs, base), nil
 }
 
 // computeStability returns the point estimate + a health self-report.
