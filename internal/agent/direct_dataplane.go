@@ -53,6 +53,25 @@ func directCandidates(cfg config.NodeConfig, s directSnapshot) ([]directpath.Can
 	return out, directpath.ValidateCandidates(cfg, out)
 }
 
+// Additions do not withdraw authority from the current snapshot. Let its
+// bounded Step finish before admitting the new peers; canceling a staged WG
+// mutation would otherwise force recovery of unrelated, unchanged peers.
+func retainsDirectCandidates(previous, next []directpath.Candidate) bool {
+	if len(next) < len(previous) {
+		return false
+	}
+	retained := make(map[directpath.Candidate]bool, len(next))
+	for _, c := range next {
+		retained[c] = true
+	}
+	for _, c := range previous {
+		if !retained[c] {
+			return false
+		}
+	}
+	return true
+}
+
 // This worker alone mutates direct peers. Controller calls and their timeouts
 // remain in the UDP worker; the local one-second cycle is independent of them.
 type dataplaneEngine interface {
@@ -142,11 +161,13 @@ func runDataplaneWorker(ctx context.Context, cfg config.NodeConfig, updates <-ch
 				continue
 			}
 			if !reflect.DeepEqual(next, candidates) {
-				drain()
-				for _, status := range previous {
-					slog.Info("direct dataplane", "peer", status.ID, "state", "pending", "reason", "candidate_changed")
+				if !retainsDirectCandidates(candidates, next) {
+					drain()
+					for _, status := range previous {
+						slog.Info("direct dataplane", "peer", status.ID, "state", "pending", "reason", "candidate_changed")
+					}
+					previous = nil
 				}
-				previous = nil
 				timer.Reset(max(0, time.Until(lastStart.Add(time.Second))))
 			}
 			candidates, received, receivedBoot = next, s.receivedAt, s.receivedBoot
