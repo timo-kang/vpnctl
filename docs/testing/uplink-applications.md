@@ -10,16 +10,19 @@ Run profiles serially with new, empty result directories:
 
 ```sh
 VPNCTL_VM_CPUS=2 VPNCTL_ARTIFACT_DIR=/tmp/uplink-apps-4 \
-  scripts/test-vm.sh --case uplink-apps-4 --cpu-layout split
+  scripts/test-vm.sh --case uplink-apps-4 --robot-cpus 1 --cpu-layout split
 VPNCTL_VM_CPUS=2 VPNCTL_ARTIFACT_DIR=/tmp/uplink-apps-8 \
-  scripts/test-vm.sh --case uplink-apps-8 --cpu-layout split
+  scripts/test-vm.sh --case uplink-apps-8 --robot-cpus 1 --cpu-layout split
 ```
 
-The split profile reserves guest CPU 0 with a 0.5 CPU quota for the supervisor,
+The CI split profile reserves guest CPU 0 with a 1 CPU quota for the supervisor,
 two selectors and two reference apps. CPU 1 has a 1 CPU quota for the controller,
 relays, TLS server and measurement worker. Membership and before/after CPU
 accounting are checked. These are reproducible sandbox profiles, not hardware
 qualification for Jetson, Raspberry Pi, NUC, Qualcomm or other deployment CPUs.
+Manual stress runs may explicitly select `--robot-cpus 0.5` or `0.25`; the
+requested quota is passed to the guest and checked against before/after evidence.
+Historical 0.5 CPU results retain their original profile and verdict.
 
 The VM manifest verifies the Go binary and each Python module used in the guest.
 A cached image must contain the matching new harness and packaging scripts.

@@ -379,15 +379,16 @@ class Handler(BaseHTTPRequestHandler):
             elif action == 'direct-result':
                 result = direct_result(req)
             elif action == 'uplink-apps-start':
-                paths = req.get('paths')
-                if type(paths) is not int or paths not in (4, 8):
-                    raise ValueError('explicit 4/8 app path profile required')
+                paths, cpu = req.get('paths'), req.get('robot_cpus')
+                if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25'):
+                    raise ValueError('explicit 4/8 app path and supported robot CPU profile required')
                 with LOCK:
                     if WORKER is not None:
                         raise RuntimeError('only one fixture per VM')
                     env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
                                VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
-                               VPNCTL_APP_PATHS=str(paths), TMPDIR='/tmp', GOMAXPROCS='2', GORACE='atexit_sleep_ms=0')
+                               VPNCTL_APP_PATHS=str(paths), VPNCTL_APP_ROBOT_CPUS=cpu,
+                               TMPDIR='/tmp', GOMAXPROCS='2', GORACE='atexit_sleep_ms=0')
                     with (ROOT / 'worker.log').open('wb') as log:
                         WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test',
                             '-test.run=^TestVMUplinkApplications$', '-test.v', '-test.timeout=12m'],

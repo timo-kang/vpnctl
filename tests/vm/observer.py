@@ -684,10 +684,11 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
             time.sleep(2)
         raise RuntimeError('direct fixture timed out')
     if case in ('uplink-apps-4', 'uplink-apps-8'):
-        if cpu_layout != 'split' or robot_cpus != '0.5':
-            raise RuntimeError('app trial requires declared split 0.5 robot CPU profile')
+        quota = {'1': '100000 100000', '0.5': '50000 100000', '0.25': '25000 100000'}.get(robot_cpus)
+        if cpu_layout != 'split' or not quota:
+            raise RuntimeError('app trial requires declared split robot CPU profile')
         paths = int(case.rsplit('-', 1)[1])
-        vm.call('uplink-apps-start', {'paths': paths})
+        vm.call('uplink-apps-start', {'paths': paths, 'robot_cpus': robot_cpus})
         until = time.monotonic() + 13 * 60
         while time.monotonic() < until:
             status = vm.call('uplink-apps-result')
@@ -697,7 +698,7 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
                 if status['exit'] != 0 or len(status.get('reports', [])) != 1:
                     raise RuntimeError('app VM trial failed or report missing')
                 row = status['reports'][0]['report']
-                validate_capacity_accounting(row, 'resource_profile', '50000 100000',
+                validate_capacity_accounting(row, 'resource_profile', quota,
                     'robot-supervisor-two-actuators-and-two-apps', 2, '0')
                 validate_capacity_accounting(row, 'server_resource_profile', '100000 100000',
                     'controller-relays-and-measurement', 2, '1')

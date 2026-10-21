@@ -65,11 +65,11 @@ def fixture():
 class AppRecoveryEvidenceTests(unittest.TestCase):
     def test_dispatch_requires_explicit_split_profile(self):
         self.assertEqual(observer.capacity_vcpus('split', ['uplink-apps-4', 'uplink-apps-8'], '200000', '100000'), 2)
-        for layout, cpu in (('shared', '0.5'), ('split', '1')):
+        for layout, cpu in (('shared', '1'), ('split', '2')):
             vm = mock.Mock()
             with self.assertRaises(RuntimeError):
                 observer.exercise(vm, 'uplink-apps-4', 'stopped', 0, {}, cpu_layout=layout, robot_cpus=cpu)
-            self.assertNotIn(mock.call('uplink-apps-start', {'paths': 4}), vm.call.call_args_list)
+            self.assertFalse(any(call.args[0] == 'uplink-apps-start' for call in vm.call.call_args_list))
 
     def test_measures_each_app_without_app_slo(self):
         result = recovery.validate_report(fixture(), 4)

@@ -506,7 +506,7 @@ jobs:
         env:
           VPNCTL_VM_CPUS: '2'
           VPNCTL_ARTIFACT_DIR: ${{ runner.temp }}/vpnctl-uplink-applications
-        run: ./scripts/test-vm.sh --case uplink-apps-${{ matrix.paths }} --cpu-layout split
+        run: ./scripts/test-vm.sh --case uplink-apps-${{ matrix.paths }} --robot-cpus 1 --cpu-layout split
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

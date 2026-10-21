@@ -97,10 +97,14 @@ func TestVMUplinkApplications(t *testing.T) {
 	if err != nil || paths != 4 && paths != 8 || runtime.NumCPU() != 2 {
 		t.Fatal("explicit 4/8 paths and split two-vCPU guest required")
 	}
+	robotCPU := os.Getenv("VPNCTL_APP_ROBOT_CPUS")
+	if robotCPU != "1" && robotCPU != "0.5" && robotCPU != "0.25" {
+		t.Fatal("explicit supported robot CPU profile required")
+	}
 	server := newCapacityGroup(t, "1", "1")
 	server.scope = "controller-relays-and-measurement"
 	server.moveWorker(t)
-	robot := newCapacityGroup(t, "0.5", "0")
+	robot := newCapacityGroup(t, robotCPU, "0")
 	robot.scope = "robot-supervisor-two-actuators-and-two-apps"
 	f := applicationFixtureWithGroup(t, true, paths, false, robot.file)
 	// The older deployment fixture forwards/SNATs only its plaintext probe
