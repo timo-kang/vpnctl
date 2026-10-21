@@ -51,7 +51,9 @@ func (p *Persistence) Ready() bool { return true }
 // ±25% around the point (a coarse default reflecting the absence of
 // modelling), and constant health 0.5.
 func (p *Persistence) Predict(_ context.Context, obs Observation) (Forecast, error) {
-	if len(obs.RTTHistory) == 0 && len(obs.LossHistory) == 0 && obs.BandwidthLast.At.IsZero() {
+	if (!obs.known(SignalRTT) || len(obs.RTTHistory) == 0) &&
+		(!obs.known(SignalLoss) || len(obs.LossHistory) == 0) &&
+		(!obs.known(SignalBandwidth) || obs.BandwidthLast.At.IsZero()) {
 		return Forecast{}, ErrObservationInvalid
 	}
 
@@ -79,7 +81,7 @@ func (p *Persistence) Predict(_ context.Context, obs Observation) (Forecast, err
 	f.QHi[SignalHandoffProb] = clamp(f.QHi[SignalHandoffProb], 0, 1)
 	f.QLo[SignalNATStability] = clamp(f.QLo[SignalNATStability], 0, 1)
 	f.QHi[SignalNATStability] = clamp(f.QHi[SignalNATStability], 0, 1)
-	return f, nil
+	return maskUnavailable(obs, f), nil
 }
 
 // lastValue returns the value of the most recent sample or 0 if the

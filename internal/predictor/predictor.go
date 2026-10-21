@@ -21,11 +21,11 @@ import (
 // Signal indexes into the 5-D vector q(t). The ordering is stable across
 // the codebase; do not reorder without updating every consumer.
 const (
-	SignalRTT           = 0 // milliseconds
-	SignalLoss          = 1 // percent [0, 100]
-	SignalBandwidth     = 2 // Mbps
-	SignalHandoffProb   = 3 // probability [0, 1]
-	SignalNATStability  = 4 // stability [0, 1]
+	SignalRTT          = 0 // milliseconds
+	SignalLoss         = 1 // percent [0, 100]
+	SignalBandwidth    = 2 // Mbps
+	SignalHandoffProb  = 3 // probability [0, 1]
+	SignalNATStability = 4 // stability [0, 1]
 
 	SignalCount = 5
 )
@@ -53,11 +53,11 @@ func SignalName(i int) string {
 type MissionPhase int
 
 const (
-	PhaseNavigation      MissionPhase = 0
-	PhaseInspection      MissionPhase = 1
-	PhaseTeleSupervised  MissionPhase = 2
-	PhaseEmergency       MissionPhase = 3
-	PhaseRecovery        MissionPhase = 4
+	PhaseNavigation     MissionPhase = 0
+	PhaseInspection     MissionPhase = 1
+	PhaseTeleSupervised MissionPhase = 2
+	PhaseEmergency      MissionPhase = 3
+	PhaseRecovery       MissionPhase = 4
 )
 
 // String returns the phase's canonical short name.
@@ -101,6 +101,12 @@ type CellInfo struct {
 // bridging vpnctl metrics, mmcli signal readouts, robot pose, and the
 // mission planner). The predictor treats Observation as read-only.
 type Observation struct {
+	// Known explicitly marks the signal dimensions supported by input evidence.
+	// A non-nil mask is required for measured inputs; unavailable dimensions
+	// must have zero forecast health. Nil preserves the legacy synthetic-input
+	// contract. An empty event list alone never proves an observed quiet window.
+	Known *[SignalCount]bool
+
 	// Now is the timestamp at which prediction is requested. Predictions
 	// target Now + Horizon (default 2.0 s; see Predictor.Horizon()).
 	Now time.Time
@@ -108,9 +114,9 @@ type Observation struct {
 	// Signal-history windows are sized by the implementation. Callers
 	// should populate at least the last 10 s at 10 Hz for RTT and at
 	// least the last 30 s at 1 Hz for loss, per predictor-design §2.1.
-	RTTHistory     []Sample // 10 Hz recommended, most recent last
-	LossHistory    []Sample // 1 Hz recommended
-	BandwidthLast  Sample   // latest bandwidth probe (roughly every 30 s)
+	RTTHistory    []Sample // 10 Hz recommended, most recent last
+	LossHistory   []Sample // 1 Hz recommended
+	BandwidthLast Sample   // latest bandwidth probe (roughly every 30 s)
 
 	// Cellular attachment at Now.
 	Cell CellInfo

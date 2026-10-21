@@ -28,9 +28,9 @@ import (
 type AR2RTT struct {
 	mu sync.Mutex
 
-	horizon      time.Duration
-	baseline     *Persistence // used for signals other than RTT
-	windowSize   int
+	horizon    time.Duration
+	baseline   *Persistence // used for signals other than RTT
+	windowSize int
 
 	// Fitted coefficients. Initialised to a stable pass-through
 	// (a=1, b=0, c=0) so cold-start predictions equal persistence.
@@ -223,10 +223,10 @@ func (p *AR2RTT) Predict(ctx context.Context, obs Observation) (Forecast, error)
 	}
 
 	// AR(2) requires two most-recent samples.
-	if len(obs.RTTHistory) < 2 {
+	if !obs.known(SignalRTT) || len(obs.RTTHistory) < 2 {
 		// Fall back to persistence output.
 		base.PredictorName = p.Name() + "/persistence-fallback"
-		return base, nil
+		return maskUnavailable(obs, base), nil
 	}
 
 	p.mu.Lock()
@@ -253,7 +253,7 @@ func (p *AR2RTT) Predict(ctx context.Context, obs Observation) (Forecast, error)
 	base.QHi[SignalRTT] = hi
 	base.Health[SignalRTT] = healthFromResidualStd(sigma)
 	base.PredictorName = p.Name()
-	return base, nil
+	return maskUnavailable(obs, base), nil
 }
 
 // healthFromResidualStd maps residual std to a health score in [0, 1]:
