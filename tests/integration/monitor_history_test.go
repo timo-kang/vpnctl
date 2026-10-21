@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -21,11 +22,14 @@ import (
 
 // Use the shipped monitor's live wg discovery, UDP probes, credential transport,
 // local status and fleet CLI. Restore the temporary direct peers before the
-// uplink-only lifecycle fixture takes its kernel snapshots.
-func exerciseMonitorHistory(t *testing.T, bin string, namespaces, paths []string, results string) func(string) {
+// uplink-only lifecycle fixture takes its kernel snapshots. The first callback
+// captures persisted state after controller termination; the second checks it
+// through the live API after each restart. The suite is bounded to 15 minutes,
+// shorter than the one-hour query window for this newly created history.
+func exerciseMonitorHistory(t *testing.T, bin string, namespaces, paths []string, results, dataDir string) (func(), func(string)) {
 	t.Helper()
 	if len(paths) < 2 {
-		return func(string) {}
+		return func() {}, func(string) {}
 	}
 	a, err := config.Load(paths[0])
 	if err != nil {
@@ -118,8 +122,8 @@ func exerciseMonitorHistory(t *testing.T, bin string, namespaces, paths []string
 		}
 		return r, body
 	}
-	count := func(r api.FleetHistoryResponse) (int, int) {
-		attempts, successes := 0, 0
+	count := func(r api.FleetHistoryResponse) monitorHistorySnapshot {
+		out := monitorHistorySnapshot{WGIDs: []string{}}
 		for _, n := range r.Nodes {
 			for _, b := range n.Buckets {
 				if b.Source != "monitor-overlay" {
@@ -128,48 +132,90 @@ func exerciseMonitorHistory(t *testing.T, bin string, namespaces, paths []string
 				if b.PeerID != "node-1" || b.Path != "unknown" || b.RelayID != "" || b.Uplink != "" {
 					t.Fatal("false monitor identity/route", b)
 				}
-				attempts += b.Count
-				successes += b.Successes
+				out.Attempts += b.Count
+				out.Successes += b.Successes
+				out.Unknown += b.UnknownCount
 			}
 		}
-		return attempts, successes
+		return out
 	}
 	eventually(t, 8*time.Second, "actual monitor failure reaches fleet", func() error {
 		r, _ := readHistory()
-		attempts, successes := count(r)
-		if successes < 1 || attempts <= successes {
-			return fmt.Errorf("attempts=%d successes=%d", attempts, successes)
+		got := count(r)
+		if got.Successes < 1 || got.Attempts <= got.Successes {
+			return fmt.Errorf("attempts=%d successes=%d", got.Attempts, got.Successes)
 		}
 		return nil
 	})
 	process.terminate(t)
-	// Sampling uses UTC minute slots. Starting just before a minute boundary
-	// can legitimately produce multiple snapshots while this fixture runs.
-	// Capture the persistence baseline only after the producer has stopped.
+	// Preserve the producer-stop evidence; a canceled upload may still commit
+	// at the controller. Only the later server drain establishes a baseline.
 	wgInitial, wgBody = readWG()
 	mustWrite(t, filepath.Join(results, "wireguard-history-initial.json"), wgBody)
 	verifyWG(wgInitial)
 	r, body := readHistory()
-	attempts, successes := count(r)
-	mustWrite(t, filepath.Join(results, "monitor-history-initial.json"), body)
-	return func(phase string) {
-		t.Helper()
-		wgNow, wgBody := readWG()
-		verifyWG(wgNow)
-		if len(wgNow.Snapshots) != len(wgInitial.Snapshots) {
-			t.Fatal("WG history changed after restart", phase)
+	beforeDrain := count(r)
+	ids := func(r history.WireGuardHistory) []string {
+		out := make([]string, 0, len(r.Snapshots))
+		for _, snapshot := range r.Snapshots {
+			out = append(out, snapshot.ID)
 		}
-		for i, snapshot := range wgNow.Snapshots {
-			if snapshot.ID != wgInitial.Snapshots[i].ID {
-				t.Fatal("WG snapshot changed after restart", phase, i)
+		slices.Sort(out)
+		return out
+	}
+	beforeDrain.WGIDs = ids(wgInitial)
+	mustWrite(t, filepath.Join(results, "monitor-history-initial.json"), body)
+	var baseline monitorHistorySnapshot
+	drained := false
+	capture := func() {
+		t.Helper()
+		if drained {
+			t.Fatal("monitor history baseline already captured")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		baseline, err = readStoppedMonitorHistory(ctx, dataDir, time.Now())
+		if err != nil {
+			t.Fatal("capture drained monitor history", err)
+		}
+		body, e := json.MarshalIndent(struct {
+			Before         monitorHistorySnapshot `json:"producer_stopped"`
+			Drained        monitorHistorySnapshot `json:"controller_drained"`
+			AttemptsDelta  int                    `json:"attempts_delta"`
+			SuccessesDelta int                    `json:"successes_delta"`
+			UnknownDelta   int                    `json:"unknown_delta"`
+			WGDelta        int                    `json:"wireguard_delta"`
+		}{beforeDrain, baseline, baseline.Attempts - beforeDrain.Attempts, baseline.Successes - beforeDrain.Successes, baseline.Unknown - beforeDrain.Unknown, len(baseline.WGIDs) - len(beforeDrain.WGIDs)}, "", "  ")
+		if e != nil {
+			t.Fatal(e)
+		}
+		mustWrite(t, filepath.Join(results, "monitor-history-drained.json"), string(body))
+		if baseline.Attempts < beforeDrain.Attempts || baseline.Successes < beforeDrain.Successes || baseline.Unknown < beforeDrain.Unknown || baseline.Attempts-baseline.Successes < beforeDrain.Attempts-beforeDrain.Successes {
+			t.Fatal("monitor history lost observations before drain", beforeDrain, baseline)
+		}
+		for _, id := range beforeDrain.WGIDs {
+			if !slices.Contains(baseline.WGIDs, id) {
+				t.Fatal("WG history lost snapshot before drain", id)
 			}
 		}
-		mustWrite(t, filepath.Join(results, "wireguard-history-"+phase+".json"), wgBody)
-		r, body := readHistory()
-		got, wins := count(r)
-		if got != attempts || wins != successes {
-			t.Fatal("monitor history changed after controller restart", phase, got, wins, attempts, successes)
+		drained = true
+	}
+	return capture, func(phase string) {
+		t.Helper()
+		if !drained {
+			t.Fatal("monitor history persistence check requires controller drain")
 		}
+		wgNow, wgBody := readWG()
+		mustWrite(t, filepath.Join(results, "wireguard-history-"+phase+".json"), wgBody)
+		verifyWG(wgNow)
+		if !slices.Equal(ids(wgNow), baseline.WGIDs) {
+			t.Fatal("WG history changed after restart", phase)
+		}
+		r, body := readHistory()
 		mustWrite(t, filepath.Join(results, "monitor-history-"+phase+".json"), body)
+		got := count(r)
+		if got.Attempts != baseline.Attempts || got.Successes != baseline.Successes || got.Unknown != baseline.Unknown {
+			t.Fatal("monitor history changed after controller restart", phase, got, baseline)
+		}
 	}
 }

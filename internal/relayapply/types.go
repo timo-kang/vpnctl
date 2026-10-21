@@ -84,6 +84,7 @@ type Engine struct {
 	unlock       func()
 	save         func([]byte) error
 	uncertain    bool
+	closed       bool
 	probe        func(context.Context, Entry, relaycatalog.Target) (targetProof, error)
 	appProbe     func(context.Context, TargetGuard, Entry, relaycatalog.Target) (ApplicationProof, error)
 	maintained   map[string]bool
@@ -199,6 +200,7 @@ func (e *Engine) index(path string) int {
 	return -1
 }
 func (e *Engine) Close() {
+	e.closed = true
 	if e.unlock != nil {
 		e.unlock()
 		e.unlock = nil

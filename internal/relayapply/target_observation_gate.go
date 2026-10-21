@@ -108,6 +108,10 @@ func observationStage(ctx context.Context, phase string, gate *observationGate) 
 	if gate == nil {
 		return ctx, done, ctx.Err()
 	}
-	release, err := gate.acquire(ctx, phase == "precheck")
+	// Keep the existing inclusive phase and command attribution. Its nested
+	// wait has no check work; adding both durations would double-count it.
+	wait, waitDone := relayobserve.Phase(ctx, phase+"_wait")
+	release, err := gate.acquire(wait, phase == "precheck")
+	waitDone()
 	return ctx, func() { release(); done() }, err
 }

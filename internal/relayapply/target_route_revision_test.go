@@ -5,6 +5,7 @@ package relayapply
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -78,7 +79,9 @@ func TestTargetRouteRevisionQuarantineRollbackAndExhaustion(t *testing.T) {
 		t.Fatal("quarantine lost transition", err)
 	}
 	e.journal.Targets[0].RouteRevision = math.MaxUint64
-	activateApp(t, e)
+	if _, err := e.ReconcileTarget(context.Background(), "app", "", s, time.Second); !errors.Is(err, ErrRecovery) {
+		t.Fatal("exhausted revision accepted another decision", err)
+	}
 	if e.journal.Targets[0].RouteRevision != math.MaxUint64 {
 		t.Fatal("revision wrapped")
 	}
