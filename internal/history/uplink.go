@@ -91,9 +91,24 @@ func unpackSnapshot(b []byte) (uplink.Snapshot, error) {
 	return s, e
 }
 func (s *Store) IngestUplink(ctx context.Context, node string, snapshot uplink.Snapshot, now time.Time) error {
-	snapshot.At = snapshot.At.UTC().Truncate(time.Microsecond)
 	if !validLabel(node, true) {
 		return ErrInvalid
+	}
+	// Reject raw future/reversed times before microsecond storage normalization.
+	// Otherwise rounding could turn an invalid interval into valid evidence.
+	if err := snapshot.Validate(now); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	snapshot.At = snapshot.At.UTC().Truncate(time.Microsecond)
+	// Do not mutate the caller's slice or timestamps while canonicalizing.
+	snapshot.Targets = append([]uplink.Target(nil), snapshot.Targets...)
+	for i := range snapshot.Targets {
+		t := &snapshot.Targets[i]
+		if t.ServiceStartedAt != nil {
+			started := t.ServiceStartedAt.UTC().Truncate(time.Microsecond)
+			completed := t.ServiceCompletedAt.UTC().Truncate(time.Microsecond)
+			t.ServiceStartedAt, t.ServiceCompletedAt = &started, &completed
+		}
 	}
 	if err := snapshot.Validate(now); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalid, err)

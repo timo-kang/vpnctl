@@ -167,7 +167,12 @@ type Target struct {
 	Route                Route  `json:"route"`
 	Relay                Check  `json:"relay"`
 	Service              Check  `json:"service"`
-	FailureStage         string `json:"failure_stage"` // earliest evidenced failure; not necessarily root cause
+	// Bounds of the service Probe call, including resolution and retries. These
+	// are not the interval measured by Service.RTTMs, nor route authority. Nil
+	// on both fields identifies legacy snapshots with unavailable event timing.
+	ServiceStartedAt   *time.Time `json:"service_started_at,omitempty"`
+	ServiceCompletedAt *time.Time `json:"service_completed_at,omitempty"`
+	FailureStage       string     `json:"failure_stage"` // earliest evidenced failure; not necessarily root cause
 }
 type Snapshot struct {
 	ID          string    `json:"id"`
@@ -220,6 +225,14 @@ func (s Snapshot) Validate(now time.Time) error {
 			return fmt.Errorf("invalid target")
 		}
 		ids[t.ID] = true
+		if (t.ServiceStartedAt == nil) != (t.ServiceCompletedAt == nil) {
+			return fmt.Errorf("incomplete service timing")
+		}
+		if t.ServiceStartedAt != nil && (t.ServiceStartedAt.IsZero() ||
+			!t.ServiceStartedAt.After(now.Add(-7*24*time.Hour)) ||
+			t.ServiceCompletedAt.Before(*t.ServiceStartedAt) || t.ServiceCompletedAt.After(s.At)) {
+			return fmt.Errorf("invalid service timing")
+		}
 		switch t.FailureStage {
 		case "none", "underlay", "controller", "relay_tunnel", "overlay_route", "server_endpoint", "unknown":
 		default:

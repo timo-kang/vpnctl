@@ -58,7 +58,10 @@ func (o Observer) Collect(ctx context.Context) Snapshot {
 				}
 			}
 			work, cancel := context.WithTimeout(ctx, timeout)
+			started := time.Now().UTC().Truncate(time.Microsecond)
 			t.Route, t.Service = o.Prober.Probe(work, cfg.Endpoint, "")
+			completed := time.Now().UTC().Truncate(time.Microsecond)
+			t.ServiceStartedAt, t.ServiceCompletedAt = &started, &completed
 			cancel()
 			if cfg.Interface != "" && t.Route.State == "up" && t.Route.Interface != cfg.Interface {
 				t.Route.Check = Down("unexpected_interface")
