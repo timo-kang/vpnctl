@@ -123,11 +123,21 @@ from echo_server import serve
 from probe import Probe
 ready=queue.Queue(maxsize=1)
 stop=threading.Event()
-worker=threading.Thread(target=serve,args=(('127.0.0.1',0),sys.argv[2],sys.argv[3],stop),kwargs={'ready':ready.put})
+worker=threading.Thread(target=serve,args=(('127.0.0.1',0),sys.argv[2],sys.argv[3],stop),kwargs={'ready':ready.put,'session_seconds':60,'max_requests':512})
 worker.start()
 try:
     address=ready.get(timeout=2)
     tls=ssl.create_default_context(cafile=sys.argv[2])
+    with tls.wrap_socket(socket.create_connection(address,timeout=1),server_hostname='example.com') as conn:
+        for i in range(300):
+            line=('VPNCTL-ECHO/1 %d %032x\n' % (i+1,i)).encode()
+            conn.sendall(line)
+            result=b''
+            while len(result) < len(line):
+                part=conn.recv(len(line)-len(result))
+                assert part
+                result+=part
+            assert result==line
     with socket.create_connection(address,timeout=1) as raw:
         with tls.wrap_socket(raw,server_hostname='example.com') as conn:
             conn.sendall(b'unsupported operation\n')

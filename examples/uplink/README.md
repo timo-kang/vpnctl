@@ -101,6 +101,10 @@ examples/uplink/python/echo_server.py --host 127.0.0.1 --port 9443 --cert
 server.pem --key server-key.pem`. This bounded server accepts only the read-only
 echo protocol, up to eight simultaneous clients, with 256 requests/30 seconds
 per session and two-second I/O limits. It is not a business-operation server.
+For longer controlled trials, `--session-seconds` (up to 600) and
+`--max-requests` (up to 12000) set explicit session bounds. Record these bounds
+with the trial; a planned server closure must not be mistaken for a network
+fault or app recovery behavior.
 
 Example clients (replace runtime, UID and certificate paths with deployment
 values):
@@ -148,14 +152,15 @@ resource claims require separate processes in a controlled environment.
 
 Publication and exact API receipt boundaries are currently absent and explicitly
 null. API record counts and periodic progress timestamps must not be substituted
-for those boundaries. The next VM increment must add or mark missing route,
-publication and receipt evidence and correlate each application's post-fault
-payload separately.
+for those boundaries. VM reports keep the missing exact route-application,
+publication and receipt evidence explicit and correlate each application's
+post-fault payload separately.
 
 Local tests exercise real Go/Python TLS clients, wrong server identity,
 nonce-only mismatch, previous-response replay, independent retry backoff, and
 payload continuation after API outage/producer replacement. They do not prove
 multi-relay/underlay switching, approval quarantine or target hardware behavior.
-The two-app VM fault matrix remains part of #228. Per the deployment decision,
+The isolated [two-app VM matrix](../../docs/testing/uplink-applications.md)
+covers these faults separately from the local tests. Per the deployment decision,
 measure recovery first; application SLO values are specified at deployment.
 Watchdog durations and selector freshness are not application pass thresholds.

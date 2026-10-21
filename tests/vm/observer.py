@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from app_recovery import validate_report as validate_app_recovery
 
 def open_lease_guards(snapshot):
     """A TCP timeout alone can be caused by WireGuard rekeying after sleep.
@@ -682,6 +683,30 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
                 return result
             time.sleep(2)
         raise RuntimeError('direct fixture timed out')
+    if case in ('uplink-apps-4', 'uplink-apps-8'):
+        quota = {'1': '100000 100000', '0.5': '50000 100000', '0.25': '25000 100000'}.get(robot_cpus)
+        if cpu_layout != 'split' or not quota:
+            raise RuntimeError('app trial requires declared split robot CPU profile')
+        paths = int(case.rsplit('-', 1)[1])
+        vm.call('uplink-apps-start', {'paths': paths, 'robot_cpus': robot_cpus})
+        until = time.monotonic() + 13 * 60
+        while time.monotonic() < until:
+            status = vm.call('uplink-apps-result')
+            if status.get('exit') is not None:
+                result[case] = status
+                vm.record(case + '-result', status)
+                if status['exit'] != 0 or len(status.get('reports', [])) != 1:
+                    raise RuntimeError('app VM trial failed or report missing')
+                row = status['reports'][0]['report']
+                validate_capacity_accounting(row, 'resource_profile', quota,
+                    'robot-supervisor-two-actuators-and-two-apps', 2, '0')
+                validate_capacity_accounting(row, 'server_resource_profile', '100000 100000',
+                    'controller-relays-and-measurement', 2, '1')
+                measurement = validate_app_recovery(row, paths)
+                vm.record(case + '-measurement', measurement)
+                return result
+            time.sleep(2)
+        raise RuntimeError('app VM trial timed out')
     if case in ('application-mixed', 'application-preparation', 'application-approval') or case.startswith('application-capacity-'):
         capacity = case.startswith('application-capacity-')
         preparation = case == 'application-preparation' or case.startswith('application-capacity-rebuild-')
@@ -972,7 +997,7 @@ def capacity_vcpus(layout, cases, quota, period):
     if layout == 'shared' and quota <= period:
         return 1
     if (layout == 'split' and cases
-            and set(cases) <= {'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8'}
+            and set(cases) <= {'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'uplink-apps-4', 'uplink-apps-8'}
             and quota == 2 * period):
         return 2
     raise RuntimeError('shared layout requires <=1 outer CPU; split requires capacity cases and exactly 2 outer CPUs')
@@ -987,13 +1012,15 @@ def require_container_network():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
+    cases_argument = parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
     parser.add_argument('--mode', default='stopped', choices=['stopped', 'running'])
     parser.add_argument('--delta', type=int, default=0, choices=[0, -2, -31, -600, 2, 600])
     parser.add_argument('--rtc', default='host', choices=['host', 'vm'])
     parser.add_argument('--robot-cpus', default='0.5', choices=['1', '0.5', '0.25'])
     parser.add_argument('--cpu-layout', default='shared', choices=['shared', 'split'])
     parser.add_argument('--uplink-api-load', action='store_true')
+    # Keep application trials explicit without widening the existing cases.
+    cases_argument.choices += ['uplink-apps-4', 'uplink-apps-8']
     args = parser.parse_args()
     if args.uplink_api_load and any(not case.startswith('application-capacity-') for case in args.case):
         raise SystemExit('API load requires capacity cases')

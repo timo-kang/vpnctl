@@ -37,7 +37,9 @@ def guard():
 @lru_cache(maxsize=1)
 def binary_hashes():
     result = {}
-    for name in ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1', 'vpnctl-lease-v2'):
+    names = ('vpnctl', 'integration.test', 'vpnctl-legacy', 'vpnctl-lease-v1', 'vpnctl-lease-v2', 'uplink-go')
+    modules = tuple('uplink-python/' + name + '.py' for name in ('main', 'probe', 'transport', 'vpnctl_uplink', 'echo_server'))
+    for name in names + modules:
         with (Path('/opt/vpnctl-vm') / name).open('rb') as f:
             result[name] = hashlib.file_digest(f, 'sha256').hexdigest()
     return result
@@ -376,6 +378,40 @@ class Handler(BaseHTTPRequestHandler):
                 result = start_direct(req)
             elif action == 'direct-result':
                 result = direct_result(req)
+            elif action == 'uplink-apps-start':
+                paths, cpu = req.get('paths'), req.get('robot_cpus')
+                if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25'):
+                    raise ValueError('explicit 4/8 app path and supported robot CPU profile required')
+                with LOCK:
+                    if WORKER is not None:
+                        raise RuntimeError('only one fixture per VM')
+                    env = dict(os.environ, VPNCTL_INTEGRATION='1', VPNCTL_VM_WORKER='1',
+                               VPNCTL_BIN='/opt/vpnctl-vm/vpnctl', VPNCTL_ARTIFACT_DIR=str(ROOT / 'results'),
+                               VPNCTL_APP_PATHS=str(paths), VPNCTL_APP_ROBOT_CPUS=cpu,
+                               TMPDIR='/tmp', GOMAXPROCS='2', GORACE='atexit_sleep_ms=0')
+                    with (ROOT / 'worker.log').open('wb') as log:
+                        WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test',
+                            '-test.run=^TestVMUplinkApplications$', '-test.v', '-test.timeout=12m'],
+                            env=env, stdout=log, stderr=log, start_new_session=True)
+                result = {'started': True}
+            elif action == 'uplink-apps-result':
+                if WORKER is None:
+                    raise RuntimeError('app fixture not started')
+                result = {'exit': WORKER.poll()}
+                if result['exit'] is not None:
+                    # Optional diagnostics must retain the original exit and
+                    # reports even if the worker log is absent or unsafe.
+                    try:
+                        result['worker_log'] = direct_artifact(ROOT / 'worker.log', 32768, tail=True)
+                    except (OSError, RuntimeError):
+                        result['worker_log_error'] = 'unavailable'
+                    result['reports'] = []
+                    total = 0
+                    for path in sorted((ROOT / 'results').glob('*/uplink-applications.json')):
+                        total += path.stat().st_size
+                        if total > 8 * 1024 * 1024:
+                            raise RuntimeError('app diagnostics exceed limit')
+                        result['reports'].append({'report': json.loads(path.read_text())})
             elif action in ('application-mixed-start', 'application-preparation-start', 'application-approval-start', 'application-capacity-start'):
                 with LOCK:
                     if WORKER is not None:
