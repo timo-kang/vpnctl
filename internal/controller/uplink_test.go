@@ -12,6 +12,7 @@ import (
 
 	"vpnctl/internal/api"
 	"vpnctl/internal/history"
+	"vpnctl/internal/modemsignal"
 	"vpnctl/internal/uplink"
 )
 
@@ -23,6 +24,9 @@ func TestUplinkIdentityAndSeparateTargetHistory(t *testing.T) {
 	v := controllerUplinkFixture()
 	v.Targets[0].ServiceStartedAt = historyPtr(v.At.Add(-2 * time.Second))
 	v.Targets[0].ServiceCompletedAt = historyPtr(v.At.Add(-time.Second))
+	v.Links[0].Kind = "lte"
+	signal := modemsignal.Parse("modem.signal.lte.snr : 0\nmodem.signal.lte.rsrq : --", v.At.Add(-time.Second))
+	v.Links[0].ModemSignals = &signal
 	for _, tc := range []struct {
 		node, identity string
 		code           int
@@ -49,6 +53,9 @@ func TestUplinkIdentityAndSeparateTargetHistory(t *testing.T) {
 	}
 	if out.Summaries[0].Samples != 1 || out.Summaries[0].TargetID != "server" {
 		t.Fatal(out)
+	}
+	if len(out.Snapshots) != 1 || out.Snapshots[0].Links[0].ModemSignals == nil || out.Snapshots[0].Links[0].ModemSignals.LTE.SNR.Value == nil || *out.Snapshots[0].Links[0].ModemSignals.LTE.SNR.Value != 0 || out.Snapshots[0].Links[0].ModemSignals.LTE.RSRQ.Value != nil || out.Snapshots[0].Links[0].ModemSignals.MeasurementTime != "unavailable" {
+		t.Fatal("authenticated API lost RF evidence", out)
 	}
 	if len(out.Snapshots) != 1 || out.Snapshots[0].Targets[0].ServiceStartedAt == nil ||
 		!out.Snapshots[0].Targets[0].ServiceStartedAt.Equal(v.Targets[0].ServiceStartedAt.Truncate(time.Microsecond)) ||

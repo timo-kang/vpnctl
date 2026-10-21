@@ -9,11 +9,16 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"vpnctl/internal/execx"
+	"vpnctl/internal/modemsignal"
 )
 
-type LinuxCollector struct{ Runner execx.ContextRunner }
+type LinuxCollector struct {
+	Runner  execx.ContextRunner
+	Signals modemsignal.Collector
+}
 
 func (c LinuxCollector) runner() execx.ContextRunner {
 	if c.Runner != nil {
@@ -22,6 +27,24 @@ func (c LinuxCollector) runner() execx.ContextRunner {
 	return optionalRunner{}
 }
 func (c LinuxCollector) Collect(ctx context.Context, cfg LinkConfig) Link {
+	l := c.collectLink(ctx, cfg)
+	if cfg.ModemSignals {
+		at := time.Now().UTC().Truncate(time.Microsecond)
+		var signal modemsignal.Snapshot
+		switch {
+		case l.Modem.Reason == "no_modem":
+			signal = modemsignal.MissingModem(at)
+		case l.Modem.State == "unknown":
+			signal = modemsignal.Unavailable(at)
+		default:
+			signal = c.Signals.Collect(ctx, cfg.Modem)
+		}
+		l.ModemSignals = &signal
+	}
+	return l
+}
+
+func (c LinuxCollector) collectLink(ctx context.Context, cfg LinkConfig) Link {
 	l := Link{ID: cfg.ID, Interface: cfg.Interface, Kind: cfg.Kind, Check: Unknown("collector_unavailable"), Modem: Unknown("not_configured"), DNS: Unknown("resolver_unavailable"), GatewayState: Unknown("gateway_unavailable")}
 	r := c.runner()
 	if cfg.Kind == "lte" && cfg.Modem != "" {

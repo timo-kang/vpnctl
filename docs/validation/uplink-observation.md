@@ -88,6 +88,10 @@ lookup. A bind permission error is unknown; it never falls back to another link.
   `mmcli --list-modems/--modem --output-keyvalue` distinguishes `no_modem`,
   `modem_no_service`, `modem_no_data`, connected and unknown. Missing mmcli,
   inaccessible D-Bus or permission failure means `modem_collector_unavailable`.
+- Optional `modem_signals: true` on an LTE link also reads its RF cache without
+  changing modem settings. Each value distinguishes cached/missing/unknown/
+  unsupported and valid zero. A read timestamp does not establish RF measurement
+  age. See [RF evidence, bounds and upgrade order](../architecture/modem-signals.md).
   An independently working IP interface remains usable if modem inspection fails.
   Output keys/one-based list indices follow the upstream
   [ModemManager output implementation](https://raw.githubusercontent.com/linux-mobile-broadband/ModemManager/main/cli/mmcli-output.c).

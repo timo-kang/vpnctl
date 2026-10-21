@@ -110,6 +110,15 @@ func (s *Store) IngestUplink(ctx context.Context, node string, snapshot uplink.S
 			t.ServiceStartedAt, t.ServiceCompletedAt = &started, &completed
 		}
 	}
+	snapshot.Links = append([]uplink.Link(nil), snapshot.Links...)
+	for i := range snapshot.Links {
+		l := &snapshot.Links[i]
+		if l.ModemSignals != nil {
+			signal := *l.ModemSignals
+			signal.ReadAt = signal.ReadAt.UTC().Truncate(time.Microsecond)
+			l.ModemSignals = &signal
+		}
+	}
 	if err := snapshot.Validate(now); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalid, err)
 	}

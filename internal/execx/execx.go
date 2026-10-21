@@ -39,6 +39,7 @@ type OSRunner struct {
 	Stdout  io.Writer
 	Stderr  io.Writer
 	Timeout time.Duration
+	Env     []string // optional overrides appended to the inherited environment
 }
 
 func NewOSRunner(stdout, stderr io.Writer) *OSRunner {
@@ -109,6 +110,9 @@ func (r *OSRunner) execute(parent context.Context, stdout, stderr io.Writer, nam
 		}
 	}()
 	cmd := exec.CommandContext(ctx, name, args...)
+	if len(r.Env) > 0 {
+		cmd.Env = append(os.Environ(), r.Env...)
+	}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Kill the command's whole process group so shell helpers cannot keep pipes
