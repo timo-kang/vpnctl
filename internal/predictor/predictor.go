@@ -1,15 +1,12 @@
 // Copyright 2025 Jonghyeok Kang
 // SPDX-License-Identifier: Apache-2.0
 
-// Package predictor implements the 5-D network-quality forecaster q̂(t+Δ)
-// that the autonomy state machine consumes as its trigger input.
-//
-// See docs/research/predictor-design.md for the full design specification.
-// The package defines a pluggable Predictor interface with multiple
-// implementations spanning the range from Persistence (no prediction) to
-// per-signal learned models. The interface is intentionally minimal so
-// that mock predictors can be substituted in tests and integration
-// harnesses.
+// Package predictor implements optional network-quality forecasts. It does not
+// change routes or control robot motion. Measured inputs carry explicit Known
+// dimensions; see docs/architecture/predictor-input.md for the input contract.
+// Legacy synthetic observations and experimental model implementations remain
+// available for offline evaluation. Production runtime and forecast publication
+// are separate integration work.
 package predictor
 
 import (

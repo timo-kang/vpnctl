@@ -57,6 +57,12 @@ func (p *Persistence) Predict(_ context.Context, obs Observation) (Forecast, err
 		return Forecast{}, ErrObservationInvalid
 	}
 
+	if obs.Known != nil && (obs.Known[SignalRTT] && len(obs.RTTHistory) == 0 ||
+		obs.Known[SignalLoss] && len(obs.LossHistory) == 0 ||
+		obs.Known[SignalBandwidth] && obs.BandwidthLast.At.IsZero()) {
+		return Forecast{}, ErrObservationInvalid
+	}
+
 	rtt := lastValue(obs.RTTHistory)
 	loss := lastValue(obs.LossHistory)
 	bw := obs.BandwidthLast.Value
