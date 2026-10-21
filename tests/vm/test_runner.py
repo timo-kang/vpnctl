@@ -44,6 +44,28 @@ class IsolationTests(unittest.TestCase):
     def test_accepts_only_matching_isolated_guest_identity(self):
         self.guard('guest-boot', 'guest-uuid')
 
+class ContainerNetworkTests(unittest.TestCase):
+    def test_sysfs_control_file_is_not_an_interface(self):
+        with mock.patch.object(observer.Path, 'exists', return_value=True), mock.patch.object(observer.socket, 'if_nameindex', return_value=[(1, 'lo')]), mock.patch.object(observer.os, 'listdir', return_value=['lo', 'bonding_masters']):
+            observer.require_container_network()
+
+    def test_extra_or_missing_real_interfaces_are_rejected(self):
+        for names in ([], [(2, 'eth0')], [(1, 'lo'), (2, 'eth0')], [(1, 'lo'), (2, 'bonding_masters')]):
+            with self.subTest(names=names), mock.patch.object(observer.Path, 'exists', return_value=True), mock.patch.object(observer.socket, 'if_nameindex', return_value=names), self.assertRaisesRegex(SystemExit, 'network-none'):
+                observer.require_container_network()
+
+    def test_missing_container_marker_and_enumeration_failure_are_rejected(self):
+        with mock.patch.object(observer.Path, 'exists', return_value=False), self.assertRaises(SystemExit):
+            observer.require_container_network()
+        with mock.patch.object(observer.Path, 'exists', return_value=True), mock.patch.object(observer.socket, 'if_nameindex', side_effect=OSError('unavailable')), self.assertRaises(OSError):
+            observer.require_container_network()
+
+    def test_main_rejects_external_interface_before_launch(self):
+        with mock.patch('sys.argv', ['observer.py', '--case', 'boot']), mock.patch.object(observer.Path, 'exists', return_value=True), mock.patch.object(observer.socket, 'if_nameindex', return_value=[(1, 'lo'), (2, 'eth0')]), mock.patch.object(observer.os, 'listdir', return_value=['lo']), mock.patch.object(observer, 'VM') as vm:
+            with self.assertRaisesRegex(SystemExit, 'network-none'):
+                observer.main()
+            vm.assert_not_called()
+
 class ContainerResourceTests(unittest.TestCase):
     def files(self, root):
         for name, value in [('cpu.max', '50000 100000\n'),

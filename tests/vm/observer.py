@@ -957,6 +957,13 @@ def capacity_vcpus(layout, cases, quota, period):
     raise RuntimeError('shared layout requires <=1 outer CPU; split requires capacity cases and exactly 2 outer CPUs')
 
 
+def require_container_network():
+    # /sys/class/net also contains non-interface attributes (bonding_masters).
+    # Query actual interfaces in this process's network namespace instead.
+    if not Path('/.dockerenv').exists() or {name for _, name in socket.if_nameindex()} != {'lo'}:
+        raise SystemExit('run only inside the dedicated network-none container')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--case', nargs='+', default=['boot'], choices=['direct-2', 'direct-3', 'direct-8', 'direct-32', 'direct-inner-2', 'direct-inner-3', 'direct-inner-8', 'direct-inner-32', 'application-capacity-4', 'application-capacity-8', 'application-capacity-rebuild-4', 'application-capacity-rebuild-8', 'application-mixed', 'application-preparation', 'application-approval', 'manager-install-4', 'manager-install-8', 'manager-auto-4', 'manager-auto-8', 'managers', 'boot', 'lease', 'clock', 'pause', 'pause-fenced', 'pause-expired', 'suspend', 'reboot', 'reset', 'expiry', 'denied', 'namespace', 'enospc', 'rename', 'fsync', 'fsync-dir', 'downgrade', 'legacy-upgrade', 'lease-v1-downgrade', 'lease-v1-upgrade', 'lease-v2-downgrade', 'lease-v2-upgrade', 'delayed-prepare', 'delayed-commit', 'delayed-rearm', 'delayed-child', 'delayed-group', 'delayed-continuation', 'delayed-suspend', 'matrix'])
@@ -966,8 +973,7 @@ def main():
     parser.add_argument('--robot-cpus', default='0.5', choices=['1', '0.5', '0.25'])
     parser.add_argument('--cpu-layout', default='shared', choices=['shared', 'split'])
     args = parser.parse_args()
-    if not Path('/.dockerenv').exists() or set(os.listdir('/sys/class/net')) != {'lo'}:
-        raise SystemExit('run only inside the dedicated network-none container')
+    require_container_network()
     caps = next(s.split()[1] for s in Path('/proc/self/status').read_text().splitlines() if s.startswith('CapEff:'))
     if int(caps, 16) != 0:
         raise SystemExit('outer container must drop all capabilities')
