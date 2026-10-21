@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+
+	"vpnctl/internal/modemsignal"
 )
 
 const (
@@ -32,10 +34,11 @@ type Config struct {
 	Targets     []TargetConfig `yaml:"targets"`
 }
 type LinkConfig struct {
-	ID        string `yaml:"id"`
-	Interface string `yaml:"interface"`
-	Kind      string `yaml:"kind"`            // ethernet, wifi, lte
-	Modem     string `yaml:"modem,omitempty"` // numeric ModemManager index, optional
+	ID           string `yaml:"id"`
+	Interface    string `yaml:"interface"`
+	Kind         string `yaml:"kind"`                    // ethernet, wifi, lte
+	Modem        string `yaml:"modem,omitempty"`         // numeric ModemManager index, optional
+	ModemSignals bool   `yaml:"modem_signals,omitempty"` // opt-in read-only RF cache
 }
 type Endpoint struct {
 	CAFile   string `yaml:"ca_file,omitempty"`
@@ -101,6 +104,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("modem must be an LTE numeric ModemManager index")
 			}
 		}
+		if l.ModemSignals && (l.Kind != "lte" || !modemsignal.ValidIndex(l.Modem)) {
+			return fmt.Errorf("modem_signals requires LTE and a canonical numeric modem index")
+		}
 	}
 	ids = map[string]bool{}
 	for _, t := range c.Targets {
@@ -142,14 +148,15 @@ type Link struct {
 	Interface string `json:"interface"`
 	Kind      string `json:"kind"`
 	Check
-	Present         *bool    `json:"present"`
-	Modem           Check    `json:"modem"`
-	Addresses       []string `json:"addresses,omitempty"`
-	Gateways        []string `json:"gateways,omitempty"`
-	GatewayState    Check    `json:"gateway_state"`
-	DNS             Check    `json:"dns"` // resolver configuration presence, not DNS availability
-	Controller      Check    `json:"controller"`
-	ControllerRoute Route    `json:"controller_route"`
+	Present         *bool                 `json:"present"`
+	Modem           Check                 `json:"modem"`
+	ModemSignals    *modemsignal.Snapshot `json:"modem_signals,omitempty"`
+	Addresses       []string              `json:"addresses,omitempty"`
+	Gateways        []string              `json:"gateways,omitempty"`
+	GatewayState    Check                 `json:"gateway_state"`
+	DNS             Check                 `json:"dns"` // resolver configuration presence, not DNS availability
+	Controller      Check                 `json:"controller"`
+	ControllerRoute Route                 `json:"controller_route"`
 }
 type Route struct {
 	Check
@@ -187,6 +194,13 @@ type Snapshot struct {
 
 func (s Snapshot) Fresh(now time.Time) Snapshot {
 	s.Stale = now.Before(s.At) || now.Sub(s.At) >= time.Duration(s.IntervalSec*3)*time.Second
+	s.Links = append([]Link(nil), s.Links...)
+	for i := range s.Links {
+		if s.Links[i].ModemSignals != nil {
+			v := s.Links[i].ModemSignals.Fresh(now, time.Duration(s.IntervalSec*3)*time.Second)
+			s.Links[i].ModemSignals = &v
+		}
+	}
 	return s
 }
 func (s Snapshot) Validate(now time.Time) error {
@@ -208,6 +222,11 @@ func (s Snapshot) Validate(now time.Time) error {
 			return fmt.Errorf("invalid link")
 		}
 		ids[l.ID] = true
+		if l.ModemSignals != nil {
+			if l.Kind != "lte" || l.ModemSignals.ReadAt.After(s.At) || l.ModemSignals.Validate(now) != nil {
+				return fmt.Errorf("invalid modem signals")
+			}
+		}
 		for _, a := range l.Addresses {
 			if _, _, e := net.ParseCIDR(a); e != nil {
 				return fmt.Errorf("invalid link IP")
