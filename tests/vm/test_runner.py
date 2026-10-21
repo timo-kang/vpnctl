@@ -511,13 +511,14 @@ class ApplicationRobotCapacityEvidenceTests(unittest.TestCase):
 
 
 class SplitCapacityEvidenceTests(unittest.TestCase):
-    def valid(self):
-        status = ApplicationRobotCapacityEvidenceTests().valid(8)
+    def valid(self, paths=8, robot_cpu='0.5'):
+        status = ApplicationRobotCapacityEvidenceTests().valid(paths)
         for item in status['reports']:
             row = item['report']
             for suffix in ('', '_after'):
                 robot = row['resource_profile' + suffix]
-                robot.update(guest_vcpus=2, cpuset_cpus_effective='0')
+                robot.update(guest_vcpus=2, cpuset_cpus_effective='0',
+                             cpu_max=f'{int(float(robot_cpu) * 100000)} 100000')
                 row['server_resource_profile' + suffix] = dict(
                     robot, scope='controller-relays-and-measurement',
                     initial_preparation_limited=True, controller_relay_measurement_limited=True,
@@ -528,7 +529,22 @@ class SplitCapacityEvidenceTests(unittest.TestCase):
         return status
 
     def test_complete_split_profile(self):
-        observer.validate_application_mixed_result(self.valid(), paths=8, robot_cpu='0.5', cpu_layout='split')
+        for paths in (4, 8):
+            for cpu in ('1', '0.5', '0.25'):
+                with self.subTest(paths=paths, cpu=cpu):
+                    observer.validate_application_mixed_result(
+                        self.valid(paths, cpu), paths=paths, robot_cpu=cpu, cpu_layout='split')
+
+    def test_one_cpu_baseline_requires_matching_recorded_quota(self):
+        for paths in (4, 8):
+            for profile in ('resource_profile', 'resource_profile_after'):
+                for quota in ('50000 100000', '25000 100000', 'max 100000'):
+                    with self.subTest(paths=paths, profile=profile, quota=quota):
+                        status = self.valid(paths, '1')
+                        status['reports'][0]['report'][profile]['cpu_max'] = quota
+                        with self.assertRaises(RuntimeError):
+                            observer.validate_application_mixed_result(
+                                status, paths=paths, robot_cpu='1', cpu_layout='split')
 
     def test_cannot_claim_separation_from_labels_or_requested_masks(self):
         changes = [
