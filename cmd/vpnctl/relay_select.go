@@ -126,9 +126,10 @@ func runNodeRelaySelection(args []string, apply bool) error {
 	return nil
 }
 
-func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration, selector *relayselect.Selector, publisher *relayapply.UplinkPublisher) (relayapply.TargetReconcileResult, error) {
+func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration, selector *relayselect.Selector, publisher *relayapply.UplinkPublisher) (out relayapply.TargetReconcileResult, err error) {
 	started := time.Now()
 	parent, recorder := relayobserve.Start(parent)
+	defer func() { out.Diagnostics = recorder.Snapshot() }()
 	ctx, cancel := context.WithTimeout(parent, relayapply.MaxDuration)
 	defer cancel()
 	admission, done := relayobserve.Phase(ctx, "admission")
@@ -138,18 +139,18 @@ func reconcileApplicationTarget(parent context.Context, node *config.NodeConfig,
 		if publisher != nil {
 			publisher.Unavailable()
 		}
-		return relayapply.TargetReconcileResult{SchemaVersion: 1, StartedAt: started, FinishedAt: time.Now(), Diagnostics: recorder.Snapshot(), Selection: relayselect.Decision{SchemaVersion: 1, NodeID: node.Name, TargetID: target, State: "unknown", Reason: nodeAdmissionReason(err), Candidates: []relayselect.Candidate{}}, Application: relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: target, State: "blocked", Reason: nodeAdmissionReason(err)}}, err
+		return relayapply.TargetReconcileResult{SchemaVersion: 1, StartedAt: started, FinishedAt: time.Now(), Selection: relayselect.Decision{SchemaVersion: 1, NodeID: node.Name, TargetID: target, State: "unknown", Reason: nodeAdmissionReason(err), Candidates: []relayselect.Candidate{}}, Application: relayapply.TargetGuardResult{SchemaVersion: 1, TargetID: target, State: "blocked", Reason: nodeAdmissionReason(err)}}, err
 	}
-	defer cache.Close()
-	defer engine.Close()
+	defer closeNodeRelayEngine(ctx, cache, engine)
 	if publisher != nil {
 		return engine.ReconcileTargetObserved(ctx, target, controller, selector, timeout, publisher)
 	}
 	return engine.ReconcileTarget(ctx, target, controller, selector, timeout)
 }
 
-func collectTargetObservation(ctx context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration) relayapply.TargetReport {
+func collectTargetObservation(ctx context.Context, node *config.NodeConfig, dir, target, controller string, timeout time.Duration) (out relayapply.TargetReport) {
 	ctx, recorder := relayobserve.Start(ctx)
+	defer func() { out.Diagnostics = recorder.Snapshot() }()
 	// Release locks between cycles so refresh/prepare can proceed. Busy/corrupt
 	// cache is unknown and immediately withdraws a recommendation, never healthy.
 	unavailable := relayapply.TargetReport{SchemaVersion: 1, NodeID: node.Name, TargetID: target, Reason: "cache_unavailable", Paths: []relayapply.TargetObservation{}}
@@ -157,11 +158,9 @@ func collectTargetObservation(ctx context.Context, node *config.NodeConfig, dir,
 	cache, engine, err := openNodeRelayEngine(admission, node, dir)
 	done()
 	if err != nil {
-		unavailable.Diagnostics = recorder.Snapshot()
 		return unavailable
 	}
-	defer cache.Close()
-	defer engine.Close()
+	defer closeNodeRelayEngine(ctx, cache, engine)
 	report, _ := engine.ObserveTarget(ctx, target, controller, timeout)
 	return report
 }

@@ -1,5 +1,15 @@
 # M3 observation capacity qualification (#162)
 
+As of 2026-10-21, functional capacity CI uses a one-CPU robot quota and a
+separate one-CPU server/measurement quota (two outer CPUs, split guest placement).
+Four/eight-candidate and rebuild profiles must pass on the current change.
+Lower-quota and shared-CPU stress profiles remain available through the manual
+`M3 capacity stress` workflow. This changes the CI resource baseline, not the
+freshness, lease or payload requirements, and does not resolve the lower-quota
+availability failures. See [deployment capacity](m3-deployment-capacity.md) for
+the evidence and remaining hardware qualification. Historical results below
+retain their original resource limits and verdicts.
+
 ## Scope and safety boundaries
 
 This qualification covers local IPv4 application routing with up to eight

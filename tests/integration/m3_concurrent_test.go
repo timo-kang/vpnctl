@@ -202,14 +202,22 @@ func checkM3InterruptedApproval(t *testing.T, r *m3Recipient) map[string]any {
 	if err != nil || json.Unmarshal(b, &status) != nil || status.ApprovalValid || status.BlockedReason != "refresh_interrupted" {
 		t.Fatal("interrupted approval accepted", err, string(b))
 	}
+	cleanupStarted := time.Now()
 	r.start()
 	eventually(t, 10*time.Second, "interrupted approval kernel cleanup", func() error {
-		if netOutput(t, r.ns, "wg", "show", "interfaces") != "" {
-			return fmt.Errorf("peers remain")
+		b, err := os.ReadFile(r.watch.log)
+		if err != nil {
+			return err
 		}
-		return nil
+		return m3InterruptedCleanupComplete(b, cleanupStarted)
 	})
 	r.watch.terminate(t)
+	// wg can return a partial, even empty, successful list during concurrent
+	// link deletion. Wait for the completed cleanup cycle before stopping the
+	// supervisor, then independently check the now-quiescent kernel inventory.
+	if got := netOutput(t, r.ns, "wg", "show", "interfaces"); got != "" {
+		t.Fatal("completed cleanup retained interfaces", got)
+	}
 	netOutput(t, r.ns, "nft", "delete", "table", "inet", "interrupted_outage")
 	r.require("refresh", -1, 0)
 	// A stop can land after the last link deletion but before the guard/journal

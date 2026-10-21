@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# All route mutations stay inside a fresh, network-none NET_ADMIN-only container.
+# All route/lease fixture mutations stay inside a fresh, network-none NET_ADMIN-only container.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 results=${VPNCTL_ARTIFACT_DIR:-$(mktemp -d /tmp/vpnctl-route-results.XXXXXX)}
@@ -42,5 +42,5 @@ docker run --rm --name "$container" --network none --cpus=1 \
     --mount "type=bind,src=$work/route.test,dst=/test/route.test,readonly" \
     -e VPNCTL_ROUTE_QUERY_TEST=1 -e GORACE=atexit_sleep_ms=0 \
     --entrypoint /test/route.test "$image" \
-    -test.run '^TestLiveTargetRoute' -test.v -test.timeout=60s \
+    -test.run '^TestLive(TargetRoute|LeaseRead)' -test.v -test.timeout=60s \
     2>&1 | tee "$results/contract.log"
