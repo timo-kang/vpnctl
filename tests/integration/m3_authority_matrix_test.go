@@ -86,6 +86,7 @@ type m3AuthorityOptions struct {
 	extraTarget           bool
 	robotInGuestRoot      bool
 	startup               *capacityStartup
+	results               string // Optional preallocated capacity evidence directory.
 }
 
 func newM3AuthorityFixture(t *testing.T) *m3AuthorityFixture {
@@ -104,9 +105,13 @@ func newM3AuthorityFixtureWithOptions(t *testing.T, opts m3AuthorityOptions) *m3
 	if err := os.Chmod(private, 0700); err != nil {
 		t.Fatal(err)
 	}
-	results, err := os.MkdirTemp(os.Getenv("VPNCTL_ARTIFACT_DIR"), "m3-authority-")
-	if err != nil {
-		t.Fatal(err)
+	results := opts.results
+	if results == "" {
+		var err error
+		results, err = os.MkdirTemp(os.Getenv("VPNCTL_ARTIFACT_DIR"), "m3-authority-")
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	worker, err := os.Executable()
 	if err != nil {

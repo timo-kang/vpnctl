@@ -12,7 +12,7 @@ import test_runner as fixtures
 
 
 class StartupCapacityEvidenceTests(unittest.TestCase):
-    def valid(self, paths=8):
+    def valid(self, paths=8, cpu='1'):
         status = fixtures.SplitCapacityEvidenceTests().valid()
         ids = [f'p{r}{u}' for r in range(2) for u in range(paths // 2)]
         for item, index in zip(status['reports'], (0, paths // 2 - 1, paths - 1)):
@@ -20,6 +20,7 @@ class StartupCapacityEvidenceTests(unittest.TestCase):
             row.update(paths=paths, healthy_index=index, actuator_modes={'app': 'auto', 'app2': 'auto'})
             for suffix in ('', '_after'):
                 row['resource_profile' + suffix].update(scope='robot-startup-and-runtime', initial_preparation_limited=True)
+                row['resource_profile' + suffix]['cpu_max'] = {'1': '100000 100000', '0.5': '50000 100000', '0.25': '25000 100000'}[cpu]
                 row['server_resource_profile' + suffix]['initial_preparation_limited'] = False
             phases = ['enroll', 'register', 'refresh', 'plan'] + ['prepare/' + p for p in ids] + ['reserve/app', 'reserve/app2']
             row['startup'] = dict(seconds=60, commands=[dict(phase=p, seconds=1, succeeded=True,
@@ -27,12 +28,22 @@ class StartupCapacityEvidenceTests(unittest.TestCase):
                                   ready_candidates=paths)
         return status
 
-    def check(self, status, paths=8):
-        observer.validate_application_mixed_result(status, paths=paths, robot_cpu='0.5', cpu_layout='split', startup=True)
+    def check(self, status, paths=8, cpu='1'):
+        observer.validate_application_mixed_result(status, paths=paths, robot_cpu=cpu, cpu_layout='split', startup=True)
 
     def test_complete_initial_preparation_and_two_auto_apps(self):
         for paths in (4, 8):
-            self.check(self.valid(paths), paths)
+            for cpu in ('1', '0.5', '0.25'):
+                with self.subTest(paths=paths, cpu=cpu):
+                    self.check(self.valid(paths, cpu), paths, cpu)
+
+    def test_requested_cpu_must_match_both_recorded_limits(self):
+        for suffix in ('', '_after'):
+            for wrong in ('50000 100000', 'max 100000'):
+                with self.subTest(suffix=suffix, wrong=wrong), self.assertRaises(RuntimeError):
+                    status = self.valid()
+                    status['reports'][0]['report']['resource_profile' + suffix]['cpu_max'] = wrong
+                    self.check(status)
 
     def test_cannot_qualify_prepared_runtime_or_missing_placement(self):
         changes = [
@@ -76,11 +87,11 @@ class StartupCapacityEvidenceTests(unittest.TestCase):
             self.assertEqual(observer.capacity_vcpus('split', [case], '200000', '100000'), 2)
             vm = mock.Mock()
             vm.call.side_effect = [{}, {'started': True}, self.valid(paths)]
-            observer.exercise(vm, case, 'stopped', 0, {}, robot_cpus='0.5', cpu_layout='split')
-            self.assertIn(mock.call('application-capacity-start', dict(paths=paths, robot_cpus='0.5', cpu_layout='split', rebuild=False, startup=True)), vm.call.call_args_list)
+            observer.exercise(vm, case, 'stopped', 0, {}, robot_cpus='1', cpu_layout='split')
+            self.assertIn(mock.call('application-capacity-start', dict(paths=paths, robot_cpus='1', cpu_layout='split', rebuild=False, startup=True)), vm.call.call_args_list)
             vm.call.side_effect = [{}, {'started': True}, fixtures.SplitCapacityEvidenceTests().valid()]
             with self.assertRaises(RuntimeError):
-                observer.exercise(vm, case, 'stopped', 0, {}, robot_cpus='0.5', cpu_layout='split')
+                observer.exercise(vm, case, 'stopped', 0, {}, robot_cpus='1', cpu_layout='split')
 
     def test_guest_rejects_ambiguous_or_combined_startup_profiles(self):
         for startup, rebuild, layout, valid in (

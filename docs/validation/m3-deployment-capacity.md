@@ -10,13 +10,34 @@ race 사용 여부, 역할 배치, 경로·앱 수, 시험 구간을 함께 기�
 제한하지 않는다. 대표 하드웨어별 실제 시험과 장기 시험이 끝날 때까지
 #185와 M3 배포 용량 판정은 열어 둔다.
 
-CI의 shared 용량 프로파일은 race 빌드에서 로봇 세 서비스의 합산 CPU 사용을
-0.5 CPU로 제한하며, 전체 1 CPU와 guest 1 vCPU를 서버 역할 및 측정기와
-공유하는 스트레스 시험이다. 0.5 CPU는 상한이며 전용 CPU나 실행 시간의
-보장이 아니다. 8경로 조건은 첫 앱의 후보 7개가 TCP blackhole인 경우까지
-포함한다. 이 시험의 실패는 해당 조건에서 기준 미달이라는 뜻이며 일반적인
-배포 성능이나 대표 하드웨어의 CPU 요구량으로 환산하지 않는다. 반대로
-스트레스 조건이라는 이유로 원래 실패나 안전 기준을 삭제하지 않는다.
+2026-10-21부터 PR 및 main의 기능 회귀 CI 기준은 race 빌드, **로봇 합산
+1 CPU / 서버·측정 합산 1 CPU**, 전체 2 CPU quota와 guest 2 vCPU의
+`split` 배치다. 로봇은 guest CPU 0, 서버·측정기는 guest CPU 1에 배치하고
+실제 quota와 스레드 배치를 검증한다. 4·8경로의 일반 용량 및 재구축
+프로파일 네 개가 모두 통과해야 한다. 전체 VM을 1 CPU로 제한한다는 뜻은 아니다.
+
+기준 선택의 근거는 [CI 39217246101](https://github.com/timo-kang/vpnctl/actions/runs/39217246101)의
+동일 runner/image 비교다. 로봇 quota `0.5 → 1 → 1 → 0.5`의 원래 종료값은
+`1, 0, 0, 1`이었고, 두 번의 1 CPU 실행에서 8경로·두 앱·정상 경로 위치
+0/3/7을 모두 통과했다. 이는 일반 용량의 기준 선정 근거이며 재구축까지
+이미 통과했다는 뜻은 아니다. 각 변경의 현재 head에서 네 프로파일과 나머지
+CI를 다시 확인한다. 10초 freshness, 연속 확인 2회, 승인·lease 및 실제
+payload 기준은 완화하지 않는다. 낮은 CPU에서 발생한 실패가 수정되었다는
+판정도 아니며 #185·#186의 배포 성능 검증은 별도로 계속한다.
+
+기존 shared 0.5 CPU 및 split 0.5 CPU 시험은 수동
+`M3 capacity stress` workflow로 유지한다. 0.25 CPU도 명시적으로 선택할
+수 있다. shared는 전체 1 CPU / guest 1 vCPU를 서버·측정기와 공유하며,
+split은 전체 2 CPU / guest 2 vCPU와 서버·측정 1 CPU를 유지한다.
+스트레스 실패는 그대로 실패로 기록하고 산출물을 보존한다. 재시도로 실패를
+지우거나 `continue-on-error`로 성공 처리하지 않는다. 8경로 조건은 첫 앱의
+후보 7개가 TCP blackhole인 경우까지 포함한다. quota는 상한이며 전용 물리
+CPU나 실행 시간의 보장이 아니다. 결과를 일반적인 배포 성능이나 대표
+하드웨어의 최소 CPU 요구량으로 환산하지 않는다.
+
+```sh
+gh workflow run capacity-stress.yml --ref main -f robot_cpus=0.5
+```
 
 각 결과에는 실제 CPU·아키텍처·OS/커널·RAM·저장장치, 실행 역할과 경로·앱 수를
 고정해 기록한다. 지원 범위는 해당 환경에서 관측 지연·복구 시간·자원 사용
@@ -42,7 +63,7 @@ VPNCTL_VM_CPUS=2 VPNCTL_VM_RACE=1 \
   VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-capacity-rebuild-new-run \
   ./scripts/test-vm.sh \
   --case application-capacity-rebuild-4 application-capacity-rebuild-8 \
-  --robot-cpus 0.5 --cpu-layout split
+  --robot-cpus 1 --cpu-layout split
 ```
 
 각 실행에는 새 빈 결과 디렉터리를 사용한다. 과거 실패나 실행 중인 실험은
@@ -84,7 +105,7 @@ VPNCTL_VM_CPUS=2 VPNCTL_VM_RACE=1 \
   VPNCTL_ARTIFACT_DIR=/tmp/vpnctl-capacity-startup-new-run \
   ./scripts/test-vm.sh \
   --case application-capacity-startup-4 application-capacity-startup-8 \
-  --robot-cpus 0.5 --cpu-layout split
+  --robot-cpus 1 --cpu-layout split
 ```
 
 `startup`은 별도의 split 프로필이다. 네트워크 namespace, 사전 공급된

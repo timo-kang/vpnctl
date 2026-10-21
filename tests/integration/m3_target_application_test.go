@@ -28,15 +28,20 @@ func applicationFixtureWithGuestRobot(t *testing.T, separate bool, size int, gue
 
 func applicationFixtureWithGroup(t *testing.T, separate bool, size int, guestRoot bool, group *os.File) *m3AuthorityFixture {
 	t.Helper()
-	return applicationFixtureWithStartup(t, separate, size, guestRoot, group, nil)
+	return applicationFixtureInResults(t, separate, size, guestRoot, group, "")
 }
-func applicationFixtureWithStartup(t *testing.T, separate bool, size int, guestRoot bool, group *os.File, startup *capacityStartup) *m3AuthorityFixture {
+
+func applicationFixtureInResults(t *testing.T, separate bool, size int, guestRoot bool, group *os.File, results string) *m3AuthorityFixture {
+	return applicationFixtureWithStartup(t, separate, size, guestRoot, group, results, nil)
+}
+
+func applicationFixtureWithStartup(t *testing.T, separate bool, size int, guestRoot bool, group *os.File, results string, startup *capacityStartup) *m3AuthorityFixture {
 	t.Helper()
 	underlays := 2
 	if size == 8 {
 		underlays = 4
 	}
-	f := newM3AuthorityFixtureWithOptions(t, m3AuthorityOptions{separateController: separate, independentRecipients: true, underlays: underlays, extraTarget: true, robotInGuestRoot: guestRoot, startup: startup})
+	f := newM3AuthorityFixtureWithOptions(t, m3AuthorityOptions{separateController: separate, independentRecipients: true, underlays: underlays, extraTarget: true, robotInGuestRoot: guestRoot, startup: startup, results: results})
 	f.nodeGroup = group
 	cpuBefore, _ := os.ReadFile("/sys/fs/cgroup/cpu.stat")
 	memoryBefore, _ := os.ReadFile("/sys/fs/cgroup/memory.events")
