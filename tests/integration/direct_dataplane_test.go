@@ -241,15 +241,12 @@ func testDirectDataplane(t *testing.T, size int) {
 		return out
 	}
 	// All pair directions must pass the actual VPN check, not just WG presence.
+	logs := make([]string, size)
+	for i, agent := range agents {
+		logs[i] = agent.log
+	}
 	eventually(t, 60*time.Second, "all direct overlay paths active", func() error {
-		for i := 0; i < size; i++ {
-			for j := 0; j < size; j++ {
-				if i != j && state(i, j) != "active" {
-					return fmt.Errorf("%d -> %d: %s", i, j, state(i, j))
-				}
-			}
-		}
-		return nil
+		return allDirectPathsActive(logs, os.ReadFile)
 	})
 	report["initial_all_pairs_active"] = true
 	report["startup_supervisor_recovered"] = true
