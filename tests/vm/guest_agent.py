@@ -427,10 +427,11 @@ class Handler(BaseHTTPRequestHandler):
                         layout = req.get('cpu_layout', 'shared')
                         rebuild = req.get('rebuild', False)
                         uplink_api = req.get('uplink_api', False)
-                        if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25') or layout not in ('shared', 'split') or type(rebuild) is not bool or type(uplink_api) is not bool:
+                        startup = req.get('startup', False)
+                        if type(paths) is not int or paths not in (4, 8) or cpu not in ('1', '0.5', '0.25') or layout not in ('shared', 'split') or type(rebuild) is not bool or type(uplink_api) is not bool or type(startup) is not bool or startup and (rebuild or layout != 'split' or uplink_api):
                             raise ValueError('explicit bounded robot CPU and path profile required')
                         env.update(VPNCTL_CAPACITY_PATHS=str(paths), VPNCTL_CAPACITY_ROBOT_CPU=cpu, VPNCTL_CAPACITY_CPU_LAYOUT=layout,
-                                   VPNCTL_CAPACITY_REBUILD='1' if rebuild else '0',
+                                   VPNCTL_CAPACITY_REBUILD='1' if rebuild else '0', VPNCTL_CAPACITY_STARTUP='1' if startup else '0',
                                    VPNCTL_CAPACITY_UPLINK_API='load' if uplink_api else 'off')
                     with (ROOT / 'worker.log').open('wb') as log:
                         test = {'application-mixed-start': 'TestNetns_M3TargetApplicationMixedCandidates',

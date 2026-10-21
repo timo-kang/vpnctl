@@ -103,6 +103,7 @@ func TestVMUplinkApplications(t *testing.T) {
 	}
 	server := newCapacityGroup(t, "1", "1")
 	server.scope = "controller-relays-and-measurement"
+	server.preparationLimited = true
 	server.moveWorker(t)
 	robot := newCapacityGroup(t, robotCPU, "0")
 	robot.scope = "robot-supervisor-two-actuators-and-two-apps"
