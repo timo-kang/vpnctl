@@ -32,6 +32,18 @@ func ValidateQuery(window, width time.Duration) error {
 	return nil
 }
 
+func legacyProbeQuery(window time.Duration) string {
+	if window == Retention {
+		// A full-retention read visits nearly every retained row. Scanning the
+		// WITHOUT ROWID primary tree once avoids a second B-tree lookup per
+		// sample through probe_stream_time. Unary + excludes that time index
+		// from filtering/sorting; SQLite still seeks by stream and sorts by
+		// timestamp/ID. Stored timestamps and bound parameters are integers.
+		return "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND +ts>? AND +ts<=? ORDER BY +ts,id"
+	}
+	return "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=? ORDER BY ts,id"
+}
+
 // Query returns complete buckets, including null-valued gaps, for every retained
 // stream in scope. The query is a single SQLite read snapshot. A cancelled or
 // over-budget query returns an error, never a partial successful response.
@@ -87,7 +99,7 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 		for i := range buckets {
 			buckets[i] = Bucket{Stream: st.Stream, Time: start.Add(time.Duration(i) * width).UTC()}
 		}
-		rows, e := tx.QueryContext(ctx, "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=? ORDER BY ts,id", st.id, start.UnixMicro(), end.UnixMicro())
+		rows, e := tx.QueryContext(ctx, legacyProbeQuery(window), st.id, start.UnixMicro(), end.UnixMicro())
 		if e != nil {
 			return nil, e
 		}
