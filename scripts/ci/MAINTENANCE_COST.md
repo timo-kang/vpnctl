@@ -1,8 +1,8 @@
-# Fixed maintenance duration cohort
+# Fixed maintenance process CPU cohort
 
 Diagnostic-only workflow; never merge its replacement of reliability CI.
 
-Compare clean main 092c1d1 with its duration-only diagnostic descendant. Build
+Compare the pinned reviewed main with its maintenance CPU diagnostic descendant. Build
 both CLIs once, Go 1.25.0 with race, and use the unchanged main integration suite,
 Python observer, guest agent, validators and script. Check actual CLI build
 metadata and hashes. Freeze one runtime image for all cells, retain manifests
@@ -22,6 +22,10 @@ qualification interval separately from startup and failure cleanup. Require new
 phase presence only for work actually reached. Keep aggregate command counts at
 their original parent; durations are nested, not additive. In particular guard
 inventory spans both maintenance and candidate/application checks.
+
+Require all historical fixture binary hashes to match across the four cells; both modes use the reviewed trimpath fixture runner. A mismatch invalidates the controlled comparison and is retained explicitly.
+
+The process_cpu fields are present only in maintenance and lease_staged. Check sampled_calls + unavailable_calls against phase calls; incomplete CPU coverage stays unavailable/partial, never zero. Process-self totals include all threads and exclude commands. The two nested phases overlap, so neither their CPU nor their durations may be added.
 
 The omitted time is not known to be CPU, BPF load, fsync or network latency.
 The new measurements are attribution evidence, not an optimization, proof that

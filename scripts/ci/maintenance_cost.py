@@ -1,4 +1,4 @@
-"""Private duration attribution, with unchanged original capacity tests and gates."""
+"""Private maintenance CPU attribution with unchanged capacity tests and gates."""
 import hashlib
 import json
 import os
@@ -9,13 +9,15 @@ from packet_trace import clone_source, require_disposable, write
 from kvm_access import prepare_kvm, kvm_snapshot
 
 REPO = Path(__file__).resolve().parents[2]
-BASELINE = '092c1d10a69c1da1fa610f5df6f448dbc44631e8'
-DIAGNOSTIC = '0a3515db9ae39914ca90c065042ea2d425411544'
+BASELINE = '89e1501e1a3584736ede2b1b56f5a160bc908e46'
+DIAGNOSTIC = '50581d95bc5a0fd9d433fd4b2df583f7c39ca320'
 CELLS = ('baseline', 'diagnostic', 'diagnostic', 'baseline')
 CHANGES = {
     'internal/relayapply/node_lease.go', 'internal/relayapply/deployment_lease_staged.go',
     'internal/relayguard/guard_linux.go', 'internal/relayapply/node_lease_diagnostics_test.go',
     'internal/relayguard/diagnostics_linux_test.go', 'docs/testing/maintenance-cost-diagnostics.md',
+    'internal/relayobserve/diagnostics.go', 'internal/relayobserve/phase_cpu.go',
+    'internal/relayobserve/phase_cpu_test.go',
 }
 
 

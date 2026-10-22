@@ -1,11 +1,11 @@
 # Diagnostic branch only. Never merge this replacement of qualification CI.
-name: Private maintenance duration attribution
+name: Private maintenance CPU attribution
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: private-maintenance-cost-${{ github.ref }}
+  group: private-maintenance-cpu-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   trace:
