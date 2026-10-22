@@ -3,9 +3,11 @@
 package relaycache
 
 import (
+	"context"
 	"time"
 
 	"vpnctl/internal/relaycatalog"
+	"vpnctl/internal/relayobserve"
 )
 
 type PathStatus struct {
@@ -50,6 +52,14 @@ func (s *Store) clockRegressed() bool {
 	return s.now().Add(30 * time.Second).Before(s.state.ObservedAt)
 }
 func (s *Store) Status() (Report, error) {
+	return s.StatusObserved(context.Background())
+}
+
+// StatusObserved adds cost accounting only. Context cancellation does not change
+// Status persistence, approval or error semantics. No stored contents are logged.
+func (s *Store) StatusObserved(ctx context.Context) (Report, error) {
+	ctx, done := relayobserve.Phase(ctx, "cache_status")
+	defer done()
 	if !s.mu.TryLock() {
 		return busyReport(s.nodeID), ErrBusy
 	}
@@ -58,17 +68,23 @@ func (s *Store) Status() (Report, error) {
 		return Report{}, osClosed()
 	}
 	if s.uncertain {
-		return s.report(), ErrUncertain
+		return s.reportObserved(ctx), ErrUncertain
 	}
 	// Persist every clock high-water mark: observing expiry must not be undone
 	// by a later rollback, including after restart. The mutex-owned state was
 	// validated when loaded/changed; only its scalar timestamp changes here.
 	// Do not clone and rederive every private/public key pair on each read.
-	if e := s.checkpointClock(); e != nil {
-		return s.report(), e
+	if e := s.checkpointClock(ctx); e != nil {
+		return s.reportObserved(ctx), e
 	}
-	return s.report(), nil
+	return s.reportObserved(ctx), nil
 }
+func (s *Store) reportObserved(ctx context.Context) Report {
+	_, done := relayobserve.Phase(ctx, "cache_status_report")
+	defer done()
+	return s.report()
+}
+
 func (s *Store) report() Report {
 	r := MissingReport(s.nodeID)
 	r.ControllerID = s.state.ControllerID

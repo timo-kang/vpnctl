@@ -24,6 +24,7 @@ import (
 
 	"vpnctl/internal/atomicfile"
 	"vpnctl/internal/relaycatalog"
+	"vpnctl/internal/relayobserve"
 )
 
 type Options struct {
@@ -327,7 +328,9 @@ func (s *Store) save(next diskState) error {
 // mutable catalog/key references escape Store, and decode/save validate all
 // structural changes before publishing state. A shallow copy is safe because
 // this path changes only ObservedAt; it still commits every read durably.
-func (s *Store) checkpointClock() error {
+func (s *Store) checkpointClock(ctx context.Context) error {
+	_, done := relayobserve.Phase(ctx, "cache_clock_checkpoint")
+	defer done()
 	next := s.state
 	if now := s.now().UTC(); now.After(next.ObservedAt) {
 		next.ObservedAt = now
@@ -335,24 +338,33 @@ func (s *Store) checkpointClock() error {
 	if next.ObservedAt.IsZero() {
 		return ErrCorrupt
 	}
-	return s.commitValidated(next)
+	return s.commitValidatedObserved(ctx, next)
 }
 
 // Caller holds mu and supplies structurally validated state. Clock-only
 // checkpoints and full mutations share identical file safety and durability.
 func (s *Store) commitValidated(next diskState) error {
+	return s.commitValidatedObserved(context.Background(), next)
+}
+func (s *Store) commitValidatedObserved(ctx context.Context, next diskState) error {
 	// Missing an initialized file is never an invitation to reinitialize it.
+	_, openDone := relayobserve.Phase(ctx, "cache_state_open")
 	f, e := s.openFile(stateFile, os.O_RDONLY)
+	openDone()
 	if e != nil {
 		s.uncertain = true
 		return storageError(e)
 	}
 	f.Close()
+	_, encodeDone := relayobserve.Phase(ctx, "cache_state_encode")
 	raw, e := json.Marshal(next)
+	encodeDone()
 	if e != nil {
 		return ErrCorrupt
 	}
+	_, persistDone := relayobserve.Phase(ctx, "cache_state_persist")
 	e = s.writeState(raw)
+	persistDone()
 	if e == nil || atomicfile.Replaced(e) {
 		s.state = next
 	}

@@ -130,7 +130,7 @@ func Phase(ctx context.Context, name string) (context.Context, func()) {
 		return ctx, func() {}
 	}
 	started := time.Now()
-	measureCPU := name == "maintenance" || name == "lease_staged"
+	measureCPU := name == "maintenance" || name == "lease_staged" || name == "cache_state_encode" || name == "cache_state_persist"
 	var before cpuSample
 	if measureCPU {
 		before = readPhaseCPU()

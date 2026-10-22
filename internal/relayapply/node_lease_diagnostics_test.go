@@ -62,6 +62,8 @@ func TestNodeMaintenanceBreakdownPreservesCommandsAndFailures(t *testing.T) {
 				"maintenance": 1, "maintenance_approval_plan": 1,
 				"maintenance_consent": 2, "maintenance_kernel": checks,
 				"maintenance_authority": renewals, "maintenance_renewal": renewals,
+				"cache_status": 1 + renewals, "cache_clock_checkpoint": 1 + renewals,
+				"cache_state_persist": 1 + renewals, "cache_status_report": 1 + renewals,
 			} {
 				p := d.Phases[name]
 				if p.Calls != calls || calls > 0 && p.Duration <= 0 {

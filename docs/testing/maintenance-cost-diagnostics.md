@@ -1,7 +1,7 @@
 # Maintenance cost diagnostic
 
-This experimental branch adds duration-only boundaries to the existing cost
-recorder. It does not change authority, ownership, journal writes, commands,
+This experimental branch adds nested duration boundaries and selected process
+CPU counters to the existing cost recorder. It does not change authority, ownership, journal writes, commands,
 timeouts, rearm windows, the nft conditional continuation or BPF proposals.
 It is a diagnostic, not an adopted optimization or a merge qualification.
 
@@ -40,8 +40,8 @@ establish a fix. Raw and unadopted measurements remain private/encrypted.
 
 ## Process CPU attribution follow-up
 
-The follow-up diagnostic records process-self user/system CPU deltas at the
-`maintenance` and `lease_staged` boundaries only. `sampled_calls` and
+The diagnostic records process-self user/system CPU deltas at `maintenance`,
+`lease_staged`, `cache_state_encode` and `cache_state_persist`. `sampled_calls` and
 `unavailable_calls` describe coverage; failed, regressed or overflowing reads
 never count as successful zero-cost samples. Snapshot values are independent
 copies. No command arguments, output, keys or dynamic identifiers are recorded.
@@ -58,3 +58,22 @@ The baseline includes the independently reviewed historical-fixture `-trimpath`
 fix, so future comparisons must build both modes with that same runner. Prior
 cohort inputs and conclusions stay unchanged. This remains an experiment branch,
 not an adopted performance change or a reason to waive a failed product gate.
+
+## Clock checkpoint follow-up (diagnostic only)
+
+The maintenance CPU cohort localized its slowest complete-window samples to
+`maintenance_authority`. This follows `stillApproved` through `Store.Status`,
+which durably advances the clock high-water mark. `StatusObserved` instruments
+that exact path, including the initial maintenance status read. It records
+`cache_status`, `cache_clock_checkpoint`, `cache_state_open`, `cache_state_encode`,
+`cache_state_persist` and `cache_status_report`. The encode/persist phases also
+sample process-self CPU. All are nested accounting, never authority evidence.
+
+`cache_state_persist` encloses the existing `writeState` call, including its safe
+file checks, replacement and file/directory sync. It is not a measured disk-wait
+or individual-fsync duration. Clock values, raw JSON, paths and errors are not
+added to diagnostics. No write or validation is skipped, including on a cancelled
+accounting context, and pre-/post-rename error semantics remain identical.
+Only maintenance opts into the nested records; other Status/approval callers
+retain their existing calls and semantics. Failed writes still have timed
+records, but incomplete work must not be called successful persistence.

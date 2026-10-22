@@ -138,7 +138,10 @@ func (e *Engine) approval(ctx context.Context, path, controller string) (Entry, 
 	return Entry{}, time.Time{}, errors.New("requested path is not eligible")
 }
 func (e *Engine) stillApproved(entry Entry) error {
-	r, err := e.cache.Status()
+	return e.stillApprovedObserved(context.Background(), entry)
+}
+func (e *Engine) stillApprovedObserved(ctx context.Context, entry Entry) error {
+	r, err := e.cache.StatusObserved(ctx)
 	if err != nil {
 		return err
 	}

@@ -44,7 +44,7 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 	// Duration-only child timers preserve the existing maintenance command
 	// attribution. They overlap the parent; do not add them to its duration.
 	_, planDone := relayobserve.Phase(ctx, "maintenance_approval_plan")
-	r, statusErr := e.cache.Status()
+	r, statusErr := e.cache.StatusObserved(ctx)
 	w, at, boot, approvalErr := e.cache.LeaseApproval()
 	if e.uncertain {
 		statusErr = errors.Join(statusErr, relaycache.ErrUncertain)
@@ -106,7 +106,7 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 				}
 				if err == nil {
 					_, authorityDone := relayobserve.Phase(ctx, "maintenance_authority")
-					err = e.stillApproved(entry)
+					err = e.stillApprovedObserved(ctx, entry)
 					authorityDone()
 				}
 				if err == nil {

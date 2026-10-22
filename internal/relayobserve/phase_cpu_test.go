@@ -53,13 +53,13 @@ func TestPhaseCPUTimevalBounds(t *testing.T) {
 
 func TestPhaseCPUIsNarrowAndSnapshotsAreImmutable(t *testing.T) {
 	ctx, r := Start(context.Background())
-	for _, name := range []string{"maintenance", "lease_staged", "precheck", "lease_guard_load"} {
+	for _, name := range []string{"maintenance", "lease_staged", "cache_state_encode", "cache_state_persist", "precheck", "lease_guard_load"} {
 		_, done := Phase(ctx, name)
 		done()
 	}
 	first := r.Snapshot()
 	for name, p := range first.Phases {
-		want := name == "maintenance" || name == "lease_staged"
+		want := name == "maintenance" || name == "lease_staged" || name == "cache_state_encode" || name == "cache_state_persist"
 		if (p.ProcessCPU != nil) != want {
 			t.Fatal(name, p)
 		}
