@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	"vpnctl/internal/relayobserve"
 )
 
 func (o Owner) valid() bool {
@@ -119,6 +120,8 @@ func filterAttrs(o Owner, parent uint32) netlink.FilterAttrs {
 }
 
 func openMap(ctx context.Context, o Owner, partial bool) (*ebpf.Map, State, error) {
+	_, done := relayobserve.Phase(ctx, "lease_guard_inventory")
+	defer done()
 	state := State{}
 	h, err := handle(ctx)
 	if err != nil {
@@ -342,6 +345,8 @@ func Install(ctx context.Context, o Owner) error {
 // Update is a kernel compare-and-update, not a userspace map overwrite. A
 // stopped process cannot extend an expired lease by replaying a queued syscall.
 func Update(ctx context.Context, o Owner, expectedGeneration, deadline, freshUntil uint64) (State, error) {
+	_, done := relayobserve.Phase(ctx, "lease_guard_update")
+	defer done()
 	m, state, err := openMap(ctx, o, false)
 	if err != nil {
 		return state, err
@@ -350,7 +355,9 @@ func Update(ctx context.Context, o Owner, expectedGeneration, deadline, freshUnt
 	if state.Generation != expectedGeneration {
 		return state, ErrExpired
 	}
+	_, loadDone := relayobserve.Phase(ctx, "lease_guard_load")
 	p, err := ebpf.NewProgram(controlSpec(o, m.FD()))
+	loadDone()
 	if err != nil {
 		return state, fmt.Errorf("load lease update guard: %w", err)
 	}
@@ -358,7 +365,9 @@ func Update(ctx context.Context, o Owner, expectedGeneration, deadline, freshUnt
 	if err = ctx.Err(); err != nil {
 		return state, err
 	}
+	_, testDone := relayobserve.Phase(ctx, "lease_guard_test")
 	ret, _, err := p.Test(proposal(deadline, freshUntil, expectedGeneration))
+	testDone()
 	if err != nil {
 		return state, err
 	}
