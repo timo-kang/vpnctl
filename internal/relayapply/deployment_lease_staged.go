@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"vpnctl/internal/relayguard"
+	"vpnctl/internal/relayobserve"
 )
 
 // Starting a timeout and granting traffic MUST be separate transactions. The
@@ -143,6 +144,8 @@ func (k deploymentKernel) stagedLease(ctx context.Context, e DeploymentEntry, ex
 }
 
 func (k deploymentKernel) stagedLeaseBounded(ctx context.Context, e DeploymentEntry, expiry time.Time, authenticated FreshApproval, boot *relayguard.State, approvalBootNS uint64) (DeploymentLease, error) {
+	_, done := relayobserve.Phase(ctx, "lease_staged")
+	defer done()
 	state, exists, err := k.leaseRead(ctx, e)
 	if err != nil {
 		return state, err

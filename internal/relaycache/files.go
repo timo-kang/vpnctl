@@ -3,6 +3,7 @@
 package relaycache
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 
 	"vpnctl/internal/atomicfile"
+	"vpnctl/internal/relayobserve"
 )
 
 var (
@@ -31,8 +33,16 @@ const maxStateBytes = 2 << 20
 // files is shared by the node key cache and the relay deployment cache. Each
 // caller owns a separate directory and holds cache.lock throughout its lifetime.
 type files struct {
-	root    *os.Root
-	syncDir func() error
+	diagnosticContext context.Context // Store.mu-owned; nil for ordinary writes.
+	root              *os.Root
+	syncDir           func() error
+}
+
+func (s *files) diagnosticScope() context.Context {
+	if s.diagnosticContext == nil {
+		return context.Background()
+	}
+	return s.diagnosticContext
 }
 
 // Root-relative operations retain the opened directory across renames. Reject
@@ -181,6 +191,13 @@ func (s *files) writeFile(name string, data []byte) error {
 	if len(data) > maxStateBytes {
 		return ErrCorrupt
 	}
+	ctx := s.diagnosticScope()
+	_, prepareDone := relayobserve.Phase(ctx, "cache_file_prepare")
+	defer func() {
+		if prepareDone != nil {
+			prepareDone()
+		}
+	}()
 	f, e := s.openFile(name, os.O_RDONLY)
 	if e == nil {
 		f.Close()
@@ -201,24 +218,41 @@ func (s *files) writeFile(name string, data []byte) error {
 		f.Close()
 		return e
 	}
-	if n, err := f.Write(data); err != nil || n != len(data) {
+	prepareDone()
+	prepareDone = nil
+	_, writeDone := relayobserve.Phase(ctx, "cache_file_write")
+	n, err := f.Write(data)
+	writeDone()
+	if err != nil || n != len(data) {
 		f.Close()
 		if err != nil {
 			return err
 		}
 		return io.ErrShortWrite
 	}
-	if e = f.Sync(); e != nil {
+	_, syncDone := relayobserve.Phase(ctx, "cache_file_sync")
+	e = f.Sync()
+	syncDone()
+	if e != nil {
 		f.Close()
 		return e
 	}
-	if e = f.Close(); e != nil {
+	_, closeDone := relayobserve.Phase(ctx, "cache_file_close")
+	e = f.Close()
+	closeDone()
+	if e != nil {
 		return e
 	}
-	if e = s.root.Rename(temp, name); e != nil {
+	_, renameDone := relayobserve.Phase(ctx, "cache_file_rename")
+	e = s.root.Rename(temp, name)
+	renameDone()
+	if e != nil {
 		return e
 	}
-	if e = s.syncDir(); e != nil {
+	_, dirDone := relayobserve.Phase(ctx, "cache_directory_sync")
+	e = s.syncDir()
+	dirDone()
+	if e != nil {
 		return &atomicfile.CommitError{Err: e}
 	}
 	return nil

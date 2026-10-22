@@ -41,7 +41,10 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 	if !ok {
 		return failure("", "lease_backend_unavailable", ErrRecovery)
 	}
-	r, statusErr := e.cache.Status()
+	// Duration-only child timers preserve the existing maintenance command
+	// attribution. They overlap the parent; do not add them to its duration.
+	_, planDone := relayobserve.Phase(ctx, "maintenance_approval_plan")
+	r, statusErr := e.cache.StatusObserved(ctx)
 	w, at, boot, approvalErr := e.cache.LeaseApproval()
 	if e.uncertain {
 		statusErr = errors.Join(statusErr, relaycache.ErrUncertain)
@@ -52,6 +55,7 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 	} else {
 		approvalErr = errors.Join(approvalErr, statusErr, ErrRecovery)
 	}
+	planDone()
 	check := e.backend.Check
 	if k, ok := e.backend.(nodeKernel); ok {
 		k.run = maintenanceInventory(k.run)
@@ -69,7 +73,9 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 		p := PathResult{PathID: old.Candidate.PathID, Phase: old.Phase}
 		entry := old
 		approved := false
+		_, consentDone := relayobserve.Phase(ctx, "maintenance_consent")
 		consent, consentErr := e.preparationAllowed(old.Candidate.PathID)
+		consentDone()
 		if consent && consentErr == nil && !e.uncertain && !e.pendingTargetReferences(old.Candidate.PathID) && approvalErr == nil && old.Phase == "prepared" && old.Controller == w.Controller && old.Node == w.Node && w.Generation >= old.Generation {
 			for _, candidate := range plan.Paths {
 				if reflect.DeepEqual(candidate, old.Candidate) {
@@ -84,20 +90,27 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 			err = errors.Join(ErrRecovery, approvalErr, b.Block(ctx, old))
 		} else {
 			entry.Generation, entry.ApprovalUntil, entry.ApprovalBootNS = w.Generation, w.ExpiresAt, w.UntilBootNS
+			_, checkDone := relayobserve.Phase(ctx, "maintenance_kernel")
 			ready, x := check(ctx, old, false)
+			checkDone()
 			if x != nil || !ready {
 				p.Reason = "kernel_conflict_or_unavailable"
 				err = errors.Join(ErrRecovery, x, b.Block(ctx, old))
 			} else {
 				// Commit the authority change before granting any longer deadline.
 				if entry.Generation != old.Generation || !entry.ApprovalUntil.Equal(old.ApprovalUntil) || entry.ApprovalBootNS != old.ApprovalBootNS {
+					_, persistDone := relayobserve.Phase(ctx, "maintenance_journal")
 					e.journal.Entries[i] = entry
 					err = e.persist()
+					persistDone()
 				}
 				if err == nil {
-					err = e.stillApproved(entry)
+					_, authorityDone := relayobserve.Phase(ctx, "maintenance_authority")
+					err = e.stillApprovedObserved(ctx, entry)
+					authorityDone()
 				}
 				if err == nil {
+					_, renewalDone := relayobserve.Phase(ctx, "maintenance_renewal")
 					var lease DeploymentLease
 					lease, err = b.Lease(ctx, entry, FreshApproval{at, boot})
 					if err == nil && lease.rearmed && lease.Active {
@@ -109,6 +122,7 @@ func (e *Engine) MaintainLeases(parent context.Context) (Result, error) {
 					if err == nil && !lease.Active {
 						err = ErrLeaseExpired
 					}
+					renewalDone()
 				}
 				if err != nil {
 					p.Reason = "lease_renewal_failed"

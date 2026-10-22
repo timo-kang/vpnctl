@@ -3,10 +3,12 @@
 package relaycache
 
 import (
+	"context"
 	"errors"
 	"time"
 
 	"vpnctl/internal/relaycatalog"
+	"vpnctl/internal/relayobserve"
 )
 
 type PathStatus struct {
@@ -51,24 +53,40 @@ func (s *Store) clockRegressed() bool {
 	return s.now().Add(30 * time.Second).Before(s.state.ObservedAt)
 }
 func (s *Store) Status() (Report, error) {
+	return s.StatusObserved(context.Background())
+}
+
+// StatusObserved adds accounting only; cancellation does not alter persistence.
+func (s *Store) StatusObserved(ctx context.Context) (Report, error) {
+	ctx, done := relayobserve.Phase(ctx, "cache_status")
+	defer done()
 	if !s.mu.TryLock() {
 		return busyReport(s.nodeID), ErrBusy
 	}
 	defer s.mu.Unlock()
+	// Owned by the same mutex as the synchronous file operations. Always clear it
+	// before releasing ownership; no context is retained across public calls.
+	s.files.diagnosticContext = ctx
+	defer func() { s.files.diagnosticContext = nil }()
 	if s.closed {
 		return Report{}, osClosed()
 	}
 	if s.uncertain {
-		return s.report(ErrUncertain)
+		return s.reportObserved(ctx, ErrUncertain)
 	}
 	// Persist every clock high-water mark: observing expiry must not be undone
 	// by a later rollback, including after restart. The mutex-owned state was
 	// validated when loaded/changed; only its scalar timestamp changes here.
 	// Do not clone and rederive every private/public key pair on each read.
-	if e := s.checkpointClock(); e != nil {
-		return s.report(e)
+	if e := s.checkpointClock(ctx); e != nil {
+		return s.reportObserved(ctx, e)
 	}
-	return s.report(nil)
+	return s.reportObserved(ctx, nil)
+}
+func (s *Store) reportObserved(ctx context.Context, cause error) (Report, error) {
+	_, done := relayobserve.Phase(ctx, "cache_status_report")
+	defer done()
+	return s.report(cause)
 }
 func (s *Store) report(cause error) (Report, error) {
 	return s.reportAt(s.now(), cause)

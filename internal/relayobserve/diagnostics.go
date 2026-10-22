@@ -19,6 +19,7 @@ type PhaseCost struct {
 	KernelCommands    int           `json:"kernel_commands"`
 	InventoryCommands int           `json:"inventory_commands"`
 	CommandDuration   time.Duration `json:"summed_command_duration_ns"`
+	ProcessCPU        *PhaseCPUCost `json:"process_cpu,omitempty"`
 }
 
 // Checkpoint records an observed execution boundary in the current boot's
@@ -115,6 +116,10 @@ func (r *Recorder) Snapshot() *Diagnostics {
 		d.BootElapsed = boot - r.boot
 	}
 	for k, v := range r.phases {
+		if v.ProcessCPU != nil {
+			cpu := *v.ProcessCPU
+			v.ProcessCPU = &cpu
+		}
 		d.Phases[k] = v
 	}
 	return d
@@ -125,13 +130,25 @@ func Phase(ctx context.Context, name string) (context.Context, func()) {
 		return ctx, func() {}
 	}
 	started := time.Now()
+	measureCPU := sampleProcessUsage(name)
+	var before cpuSample
+	if measureCPU {
+		before = readPhaseCPU()
+	}
 	return context.WithValue(ctx, scopeKey{}, scope{s.recorder, name}), func() {
+		var after cpuSample
+		if measureCPU {
+			after = readPhaseCPU()
+		}
 		r := s.recorder
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		p := r.phases[name]
 		p.Calls++
 		p.Duration += time.Since(started)
+		if measureCPU {
+			p.ProcessCPU = addPhaseCPU(p.ProcessCPU, before, after)
+		}
 		r.phases[name] = p
 	}
 }
@@ -153,5 +170,15 @@ func Command(ctx context.Context, inventory bool) func() {
 		}
 		p.CommandDuration += time.Since(started)
 		r.phases[s.phase] = p
+	}
+}
+
+func sampleProcessUsage(name string) bool {
+	switch name {
+	case "maintenance", "lease_staged", "cache_state_encode", "cache_state_persist",
+		"cache_file_prepare", "cache_file_write", "cache_file_sync", "cache_file_close", "cache_file_rename", "cache_directory_sync":
+		return true
+	default:
+		return false
 	}
 }
