@@ -1,8 +1,8 @@
-# Fixed maintenance process CPU cohort
+# Fixed clock checkpoint cost cohort
 
 Diagnostic-only workflow; never merge its replacement of reliability CI.
 
-Compare the pinned reviewed main with its maintenance CPU diagnostic descendant. Build
+Compare the pinned reviewed main with its clock checkpoint diagnostic descendant. Build
 both CLIs once, Go 1.25.0 with race, and use the unchanged main integration suite,
 Python observer, guest agent, validators and script. Check actual CLI build
 metadata and hashes. Freeze one runtime image for all cells, retain manifests
@@ -25,10 +25,12 @@ inventory spans both maintenance and candidate/application checks.
 
 Require all historical fixture binary hashes to match across the four cells; both modes use the reviewed trimpath fixture runner. A mismatch invalidates the controlled comparison and is retained explicitly.
 
-The process_cpu fields are present only in maintenance and lease_staged. Check sampled_calls + unavailable_calls against phase calls; incomplete CPU coverage stays unavailable/partial, never zero. Process-self totals include all threads and exclude commands. The two nested phases overlap, so neither their CPU nor their durations may be added.
+The process_cpu fields are present in maintenance, lease_staged, cache_state_encode and cache_state_persist. Check sampled_calls + unavailable_calls against phase calls; incomplete CPU coverage stays unavailable/partial, never zero. Process-self totals include all threads and exclude commands. Nested phase CPU/duration must not be added to their parent totals.
 
 The omitted time is not known to be CPU, BPF load, fsync or network latency.
 The new measurements are attribution evidence, not an optimization, proof that
 the original publication failure reproduced, or resolution of the separate TCP
 timeout in PR266. Review measurement effects against both controls. No public raw
 data: use the existing bounded encrypted artifact and off-runner private key.
+
+Clock cost records cover both the initial maintenance status and the immediate approval rechecks. They are nested inside maintenance and must not be attributed exclusively to maintenance_authority. Persistence wraps the unchanged writeState function; its elapsed time includes file checks, replacement, sync and possible scheduling delays. It is not an individual fsync or disk-wait measurement. Keep missing/partial stage counts explicit; counted persistence calls can fail. No storage, expiry or approval change is proposed.

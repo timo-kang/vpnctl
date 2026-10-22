@@ -1,11 +1,11 @@
 # Diagnostic branch only. Never merge this replacement of qualification CI.
-name: Private maintenance CPU attribution
+name: Private clock checkpoint attribution
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: private-maintenance-cpu-${{ github.ref }}
+  group: private-clock-checkpoint-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   trace:
