@@ -33,7 +33,7 @@ func (s *DeploymentStore) Refresh(ctx context.Context, client DeploymentClient) 
 	defer cancel()
 	if s.uncertain {
 		if e := s.repair(); e != nil {
-			return s.report(), e
+			return s.report(e)
 		}
 	}
 	if s.clockRegressed() {
@@ -48,7 +48,7 @@ func (s *DeploymentStore) Refresh(ctx context.Context, client DeploymentClient) 
 	next.Refresh.Result, next.Refresh.Reason = "in_progress", "refresh_interrupted"
 	next.Refresh.AttemptedAt, next.Refresh.CompletedAt = s.now().UTC(), time.Time{}
 	if e := s.save(next); e != nil {
-		return s.report(), e
+		return s.report(e)
 	}
 	if e := ctx.Err(); e != nil {
 		return s.remoteFailure(e)
@@ -62,11 +62,11 @@ func (s *DeploymentStore) Refresh(ctx context.Context, client DeploymentClient) 
 	}
 	if e = s.accept(v); e != nil {
 		if s.uncertain {
-			return s.report(), e
+			return s.report(e)
 		}
 		return s.fail("rejected", "deployment_rejected", true, e)
 	}
-	return s.report(), nil
+	return s.report(nil)
 }
 
 func (s *DeploymentStore) accept(v relaycatalog.DeploymentView) error {
@@ -122,9 +122,9 @@ func (s *DeploymentStore) fail(result, reason string, block bool, cause error) (
 		next.BlockedReason = reason
 	}
 	if e := s.save(next); e != nil {
-		return s.report(), errors.Join(cause, e)
+		return s.report(errors.Join(cause, e))
 	}
-	return s.report(), cause
+	return s.report(cause)
 }
 
 func (s *DeploymentStore) remoteFailure(e error) (DeploymentReport, error) {

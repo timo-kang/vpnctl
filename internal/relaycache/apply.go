@@ -77,9 +77,9 @@ func (s *Store) WithPathKey(controller string, generation uint64, path, public s
 	if s.closed {
 		return osClosed()
 	}
-	r := s.report()
-	if !r.UsableCache || r.Validity != "valid" || r.ControllerID != controller || r.ObservedGeneration != generation {
-		return errors.New("path approval unavailable")
+	r, err := s.report(nil)
+	if err != nil || !r.UsableCache || r.Validity != "valid" || r.ControllerID != controller || r.ObservedGeneration != generation {
+		return errors.Join(errors.New("path approval unavailable"), err)
 	}
 	for _, p := range r.Paths {
 		if p.PathID == path && p.State == "bound" && p.PublicKey == public {
