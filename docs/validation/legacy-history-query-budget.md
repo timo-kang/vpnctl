@@ -11,30 +11,49 @@ samples in SQLite B-tree lookup. The time-range index identifies each sample,
 then SQLite looks up its RTT and outcome in the WITHOUT ROWID primary tree.
 For a full-retention request this repeats a lookup for nearly every row.
 
-The seven-day legacy query now permits a stream-bounded primary-tree scan and
-an explicit timestamp/ID sort. Unary `+` disqualifies the time index for this
-one query shape; stored timestamps and bound parameters are integers. Shorter
-windows retain their selective time-index scan. There is no schema migration,
-extra index, cache, increased storage budget or change to tiered queries.
+The seven-day legacy query uses a stream-bounded primary-tree scan in ID order.
+Unary `+` disqualifies the time index for this query shape; stored timestamps
+and bound parameters are integers. Shorter windows retain the selective time
+index and timestamp ordering. No schema migration, extra index, cache, storage
+budget increase or change to tiered queries is required.
 
-This trades sorting for repeated point lookups. Full-window requests over a
-sparse or historical interval can visit rows outside that interval before
-filtering; only the largest allowed window uses this strategy. The database
-population, query admission and eight-second cancellation budget still bound
-the work. Query results retain the same single read snapshot, `(start,end]`
-boundaries, exact percentiles, unknown/failure distinctions and ordered jitter.
-Cancellation or capacity failure returns an error, never partial success.
+Counts, sums and exact percentiles do not depend on arrival order. Only jitter
+needs a time-ordered population, so the full-window query saves compact pairs
+of timestamp and RTT, using the existing negative sentinel for failed/unknown
+outcomes. Sorting these pairs avoids SQLite sorting complete row records.
+Equal timestamps remain ambiguous barriers regardless of ID order; failures,
+unknowns and measured zero RTT retain their original meanings.
 
-The plan regression protects both the full-retention primary scan and shorter
-time-index scans. Behavioral tests use reverse arrival, non-time-ordered IDs,
-duplicate timestamps, unknowns, failures, a measured zero, bucket boundaries,
-node filtering and cancellation. The existing full-scale test keeps its
-eight-second query, sixty-second cleanup and one-GiB storage gates.
+The sample buffer is reused between streams and checked against the existing
+four-million-row limit before each append. Each pair occupies sixteen bytes;
+unsorted streams may additionally need one equally sized merge buffer. At the
+row limit these two populations occupy 128 million bytes, before slice capacity
+and allocator overhead, in addition to the existing percentile/result buffers.
+Sorted runs are at most 4,096 samples. Merge copying, merging and aggregation
+check cancellation between bounded batches, preventing an entire multi-million
+sample sort from deferring cancellation.
 
-Before/after comparisons use identical retained data and check a SHA-256 of
-the complete serialized buckets. Local measurements establish the contribution
-of the redundant lookups; they are not a latency guarantee for every robot or
-controller. Exact-head CI remains the merge gate.
+Full-window requests over a sparse or historical interval can visit rows outside
+that interval before filtering; only the largest allowed window uses this
+strategy. Query admission, database population and the eight-second deadline
+remain unchanged. Results retain a single read snapshot, `(start,end]` bounds,
+exact percentiles and ordered jitter. Cancellation or capacity failure returns
+an error, never partial success.
+
+The plan regression guards against repeated secondary lookups or a SQLite sort
+for full retention, while protecting shorter time-index scans. Behavioral tests
+cover reverse/random ID order, duplicate timestamps, unknowns, failures, zero
+RTT, bucket boundaries, node filtering, cross-stream isolation and cancellation.
+Full-retention buckets are compared with independently queried indexed daily
+windows. Sort tests preserve the complete value multiset across run boundaries
+and exercise cancellation after work has started.
+
+Before/after comparisons use identical retained data and verify a SHA-256 of the
+complete serialized buckets. The existing full-scale test keeps its eight-second
+query, sixty-second cleanup and one-GiB storage gates. Query-only measurements
+cannot qualify restart, cleanup or the full lifecycle; unchanged full-scale
+remote validation and exact-head CI are required before completing this fix.
+Results are not a latency guarantee for every robot or controller.
 
 SQLite documents [WITHOUT ROWID primary trees](https://www.sqlite.org/withoutrowid.html)
 and the [unary-plus alternative to forcing an index](https://www.sqlite.org/lang_indexedby.html).
