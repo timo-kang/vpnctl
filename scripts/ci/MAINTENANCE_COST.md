@@ -1,0 +1,11 @@
+# Fixed cache storage attribution comparison
+
+Questions: does a reproduced slow cache persist concentrate in safe preparation, write, file sync, close, rename, or directory sync? What filesystem/device backs the actual opened robot cache directory and state file? Which process-wide CPU/context-switch/block-I/O event counts accompany those intervals? These counts cannot classify physical I/O latency versus scheduler wait by subtraction.
+
+Run exactly four fresh isolated VMs in baseline/diagnostic/diagnostic/baseline order on one disposable GitHub runner, attempt1. Baseline/suite d47a1e08dbc3c75a980df5be3da700225d25a3aa; diagnostic9c37204b060a8964e732e90d700f62030a4254a4. Both include PR269 expiry correctness. Capacity8, healthy0/3/7, two apps, robot1CPU guest0/server1CPU guest1, outer2CPU2GiB/no swap, guest768MiB, exact Go1.25 race. Original15s minimum steady/three additional applied records,10s freshness,1s TCP, approval/nft/BOOTTIME gates remain unchanged. No automatic rerun, cancellation or extension until green.
+
+Only one additive fixture hook gathers bounded descriptor mount/device metadata in the robot namespace before activation in BOTH modes. No cache contents are read. Probe failure remains explicit; original workload/test assertions/timing and original agent/observer are unchanged. Require identical complete nonproduct executable inventory, kernel/initrd/image, role/boot/KVM evidence across cells. Require exact hashes of the generated common fixture overlay; a missing provenance sample is not filesystem proof.
+
+Original verdicts and unchanged Go replay precede timing interpretation. Only complete cycles inside original frozen windows enter aggregate timing statistics; retain startup/boundary/cleanup exclusions. Counts describe attempted operations, not independently successful persistence. Report-time expiry can add a second storage sequence and must not be rejected as impossible. Inspect missing/partial coverage. Do not sum nested CPU/durations or infer physical wait by subtracting CPU. Preserve natural failures and raw evidence encrypted/private. No PR266 waiver or product merge is authorized by a green diagnostic.
+
+Diagnostic runner branch only: never merge this replacement of reliability CI. Inherited packet_trace helpers/tests are retained for clone/encryption compatibility but packet capture is not invoked.
