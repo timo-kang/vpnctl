@@ -41,8 +41,8 @@ func TestLegacyQueryPlanBoundsFullRetentionLookupCost(t *testing.T) {
 			t.Fatal(err)
 		}
 		if window == Retention {
-			if !strings.Contains(plan.String(), "SEARCH probes USING PRIMARY KEY (stream=?)") || strings.Contains(plan.String(), "probe_stream_time") {
-				t.Fatal("full-retention scan reintroduced per-row secondary lookups", plan.String())
+			if !strings.Contains(plan.String(), "SEARCH probes USING PRIMARY KEY (stream=?)") || strings.Contains(plan.String(), "probe_stream_time") || strings.Contains(plan.String(), "TEMP B-TREE") {
+				t.Fatal("full-retention scan reintroduced secondary lookups or SQL sorting", plan.String())
 			}
 		} else if !strings.Contains(plan.String(), "probe_stream_time (stream=? AND ts>? AND ts<?)") {
 			t.Fatal("short window lost selective time range", window, plan.String())
