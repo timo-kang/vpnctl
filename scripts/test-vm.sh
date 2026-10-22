@@ -75,18 +75,19 @@ for module in main probe transport vpnctl_uplink echo_server; do
 done
 # Last peer-apply implementation before kernel leases, for real downgrade and
 # upgrade rejection tests. The historical source is a fixture, never main.
+# Trim source paths so fresh temporary directories do not change fixture hashes.
 legacy_commit=6e2da45c89de2d3ad2e4c930f1037472e6440692
 mkdir "$work/legacy-src"
 git archive "$legacy_commit" | tar -x -C "$work/legacy-src"
-GOMAXPROCS=2 go -C "$work/legacy-src" build -p=2 -o "$work/input/vpnctl-legacy" ./cmd/vpnctl
+GOMAXPROCS=2 go -C "$work/legacy-src" build -p=2 -trimpath -o "$work/input/vpnctl-legacy" ./cmd/vpnctl
 v1_commit=fb0ca2e9684af827ac2afc4dd0cb9afcb0ca3e8b
 mkdir "$work/v1-src"
 git archive "$v1_commit" | tar -x -C "$work/v1-src"
-GOMAXPROCS=2 go -C "$work/v1-src" build -p=2 -o "$work/input/vpnctl-lease-v1" ./cmd/vpnctl
+GOMAXPROCS=2 go -C "$work/v1-src" build -p=2 -trimpath -o "$work/input/vpnctl-lease-v1" ./cmd/vpnctl
 v2_commit=b4ba9e7793b123e4b47bd2fc5acfdf9b2698a26b
 mkdir "$work/v2-src"
 git archive "$v2_commit" | tar -x -C "$work/v2-src"
-GOMAXPROCS=2 go -C "$work/v2-src" build -p=2 -o "$work/input/vpnctl-lease-v2" ./cmd/vpnctl
+GOMAXPROCS=2 go -C "$work/v2-src" build -p=2 -trimpath -o "$work/input/vpnctl-lease-v2" ./cmd/vpnctl
 # The legacy builder honors these per-container bounds during apt/kernel setup.
 if [[ -n "${VPNCTL_VM_IMAGE:-}" ]]; then
     image=$(docker image inspect "$VPNCTL_VM_IMAGE" --format '{{.Id}}')
