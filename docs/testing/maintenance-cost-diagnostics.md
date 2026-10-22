@@ -37,3 +37,24 @@ Before interpreting the measurements, run a fixed baseline/diagnostic/diagnostic
 baseline cohort with identical original integration tests and resource gates.
 Keep every natural failure and incomplete run. Timing differences alone do not
 establish a fix. Raw and unadopted measurements remain private/encrypted.
+
+## Process CPU attribution follow-up
+
+The follow-up diagnostic records process-self user/system CPU deltas at the
+`maintenance` and `lease_staged` boundaries only. `sampled_calls` and
+`unavailable_calls` describe coverage; failed, regressed or overflowing reads
+never count as successful zero-cost samples. Snapshot values are independent
+copies. No command arguments, output, keys or dynamic identifiers are recorded.
+
+The reads happen inside each existing duration interval. CPU includes all
+threads of this process and excludes child commands. It is not per-goroutine
+accounting, scheduler wait, or an exact wall-time partition. A background thread
+can contribute, and CPU can exceed wall time. Staged and whole-maintenance
+intervals overlap: do not add their CPU or durations. This diagnostic cannot
+identify CPU versus I/O/scheduler causes without a reproduced slow interval and
+controlled comparison; passing runs alone do not resolve the retained failure.
+
+The baseline includes the independently reviewed historical-fixture `-trimpath`
+fix, so future comparisons must build both modes with that same runner. Prior
+cohort inputs and conclusions stay unchanged. This remains an experiment branch,
+not an adopted performance change or a reason to waive a failed product gate.
