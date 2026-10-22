@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from kvm_access import prepare_kvm, kvm_snapshot
 
 REPO = Path(__file__).resolve().parents[2]
 SOURCE = 'ec44c012b3ffb9629a302600fccbd28b05b591c1'
@@ -131,6 +132,7 @@ def run(root):
     def invoke(index, trace):
         cell = root / 'runs' / f'{index:02}'
         cell.mkdir()
+        prepare_kvm(cell)
         output = cell / 'results'
         args = ['./scripts/test-vm.sh', '--case', 'application-capacity-8', '--robot-cpus', '1', '--cpu-layout', 'split']
         if trace:
@@ -144,6 +146,7 @@ def run(root):
                 preexec_fn=lambda: os.umask(0o022))
         status = {'index': index, 'trace': trace, 'exit': result.returncode}
         write(cell / 'exit.json', status)
+        write(cell / 'kvm-after.json', kvm_snapshot())
         return status
 
     results = schedule(invoke)

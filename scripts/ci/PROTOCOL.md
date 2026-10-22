@@ -48,3 +48,15 @@ with zero socket drops. Keep only connection-control headers to preserve the
 bounded ring. Previous raw artifacts remain unchanged and cannot establish
 robot egress coverage. This correction changes diagnostic coverage, not product
 behavior or the fixed OFF/ON/ON/OFF qualification conditions.
+
+## Per-cell runner readiness
+
+Run39720850708 preserved an actual OFF/healthy7 observation-staleness failure.
+Later cells could not start because the runner no longer allowed /dev/kvm access.
+This is not the original TCP connect-timeout reproduction, and the cohort is
+incomplete. Before the next cohort reuse the existing disposable-runner KVM
+guard from selector-profile-validation: snapshot device identity/ACL and restore
+only this runner user's access before each planned cell when necessary. Record
+post-cell device metadata too. Reject replaced devices and non-disposable hosts.
+Never retry a failed cell or change its verdict. Product code and gates remain
+fixed; all prior failures and unavailable cells remain preserved.
