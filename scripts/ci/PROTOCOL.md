@@ -16,7 +16,8 @@ The script rebuilds identical source binaries for each cell; audit their manifes
 hashes after collection. Go build identity verifies clean exact-source product.
 
 ON starts four header observers in robot, relay0, relay1 and target namespaces,
-inheriting measurement CPU1. AF_PACKET SOCK_DGRAM observes IPv4/TCP port9192;
+inheriting measurement CPU1. AF_PACKET SOCK_DGRAM with ETH_P_ALL observes both
+directions, then retains only IPv4/TCP port9192 SYN/SYN-ACK/RST headers;
 no payload is persisted and promiscuous mode is not enabled. Each role retains
 1024 headers with kernel receive timestamps, explicit overwrite and socket-drop
 counts. Coverage includes teardown; missing records are not proof of packet loss
@@ -30,3 +31,20 @@ key, mutable guest image, build checkout or plaintext artifact is uploaded.
 The final experiment status preserves any cell failure. An interrupted workflow
 is incomplete, not a pass. Regardless of outcome this is diagnostic evidence,
 not a replacement for PR266 qualification, which remains failed/unmerged.
+
+## Capture and preparation corrections before the second cohort
+
+The first diagnostic workflow39720342331 completed four image-preparation
+failures before any VM test ran: the private umask made cloned Python source
+unreadable to the cap-free UID0 builder. Preserve that run. Use normal source
+file modes inside the private parent and check Python readability before trials.
+
+Independent audit found the old ETH_P_IP observer omitted outgoing packets.
+Linux6.8 `net/core/dev.c` routes `dev_queue_xmit_nit` only to ETH_P_ALL taps;
+see https://github.com/torvalds/linux/blob/v6.8/net/core/dev.c#L2117.
+Remote network-none container control compared both subscriptions for eight TCP
+connections: IP-only omitted all eight outgoing SYNs; ALL captured all eight,
+with zero socket drops. Keep only connection-control headers to preserve the
+bounded ring. Previous raw artifacts remain unchanged and cannot establish
+robot egress coverage. This correction changes diagnostic coverage, not product
+behavior or the fixed OFF/ON/ON/OFF qualification conditions.

@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,27 @@ import seal_trace
 
 
 class Contract(unittest.TestCase):
+    def test_clone_readable_inputs_inside_private_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin = root / 'origin'
+            origin.mkdir()
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(origin), *args], stderr=subprocess.DEVNULL, text=True).strip()
+            git('init')
+            (origin / 'module.py').write_text('# source fixture\n')
+            git('add', 'module.py')
+            git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                '-c', 'commit.gpgsign=false', 'commit', '-m', 'fixture')
+            revision = git('rev-parse', 'HEAD')
+            previous = os.umask(0o077)
+            try:
+                runner.clone_source(origin, root / 'source', revision)
+            finally:
+                os.umask(previous)
+            self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((root / 'source/module.py').stat().st_mode & 0o777, 0o644)
+
     def test_failures_do_not_stop_or_extend_schedule(self):
         seen = []
         def invoke(index, trace):

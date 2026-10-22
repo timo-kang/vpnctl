@@ -10,13 +10,20 @@ def header(data):
     a,b,seq,ack=struct.unpack_from('!HHII',data,offset)
     tcp_len=(data[offset+12]>>4)*4
     if 9192 not in (a,b) or tcp_len<20 or total<offset+tcp_len:return None
+    if not data[offset+13]&0x06:return None  # SYN/SYN-ACK/RST, not bulk data/ACK.
     return {'src':socket.inet_ntoa(data[12:16]),'dst':socket.inet_ntoa(data[16:20]),'sport':a,'dport':b,'seq':seq,'ack':ack,'flags':data[offset+13],'length':total,'ip_id':struct.unpack_from('!H',data,4)[0]}
+
+def packet_socket():
+    # Linux dev_queue_xmit_nit delivers outgoing frames only to ETH_P_ALL taps.
+    s=socket.socket(socket.AF_PACKET,socket.SOCK_DGRAM,socket.htons(0x0003))
+    s.setsockopt(socket.SOL_SOCKET,35,1);s.settimeout(.1)
+    return s
 
 def main():
     assert 'vpnctl_vm_test' in Path('/proc/cmdline').read_text()
     records=collections.deque(maxlen=1024);state={'stop':False};seen=0
     signal.signal(signal.SIGTERM,lambda *_:state.update(stop=True))
-    s=socket.socket(socket.AF_PACKET,socket.SOCK_DGRAM,socket.htons(0x0800));s.setsockopt(socket.SOL_SOCKET,35,1);s.settimeout(.1)
+    s=packet_socket()
     print(json.dumps({'event':'ready','wall_ns':time.time_ns(),'monotonic_ns':time.monotonic_ns()}),flush=True)
     while not state['stop']:
         try:data,anc,flags,address=s.recvmsg(128,128)

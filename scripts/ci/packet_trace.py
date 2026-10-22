@@ -82,11 +82,22 @@ def schedule(invoke):
     return results
 
 
+def clone_source(repository, source, revision):
+    # Keep the parent private; child source files must retain normal read modes
+    # when the original script copies Python modules to a cap-free UID0 builder.
+    subprocess.run(['git', 'clone', '--no-hardlinks', '--no-checkout', str(repository), str(source)],
+                   check=True, preexec_fn=lambda: os.umask(0o022))
+    subprocess.run(['git', '-C', str(source), 'checkout', '--detach', revision],
+                   check=True, preexec_fn=lambda: os.umask(0o022))
+
+
 def run(root):
     require_disposable()
     source = root / 'source'
-    subprocess.run(['git', 'clone', '--no-hardlinks', '--no-checkout', str(REPO), str(source)], check=True)
-    subprocess.run(['git', '-C', str(source), 'checkout', '--detach', SOURCE], check=True)
+    clone_source(REPO, source, SOURCE)
+    for module in ('main', 'probe', 'transport', 'vpnctl_uplink', 'echo_server'):
+        if not (source / 'examples/uplink/python' / (module + '.py')).stat().st_mode & 0o004:
+            raise ValueError('cap-free image builder cannot read Python input')
     if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain']).strip():
         raise ValueError('dirty fixed source')
     write(root / 'protocol.json', {'source': SOURCE, 'controller': subprocess.check_output(

@@ -17,4 +17,11 @@ class Header(unittest.TestCase):
    if mode=='length':b[2:4]=b'\x00\x19'
    if mode=='tcplen':b[32]=0x10
    with self.subTest(mode=mode):self.assertIsNone(header(b))
+ def test_only_connection_control_headers(self):
+  for flags in (2,18,4,20):
+   b=self.packet();b[33]=flags
+   with self.subTest(flags=flags):self.assertIsNotNone(header(b))
+  for flags in (16,17,24):
+   b=self.packet();b[33]=flags
+   with self.subTest(flags=flags):self.assertIsNone(header(b))
 if __name__=='__main__':unittest.main()
