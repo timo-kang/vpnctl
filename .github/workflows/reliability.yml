@@ -1,11 +1,11 @@
 # Diagnostic branch only. Never merge this replacement of qualification CI.
-name: Private packet trace on original CI resource profile
+name: Private maintenance duration attribution
 on:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: private-packet-trace-${{ github.ref }}
+  group: private-maintenance-cost-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   trace:
@@ -34,9 +34,9 @@ jobs:
           fi
           install -d -m 700 "$RUNNER_TEMP/vpnctl-trace"
           printf 'VPNCTL_TRACE_ROOT=%s\n' "$RUNNER_TEMP/vpnctl-trace" >> "$GITHUB_ENV"
-      - name: Run OFF ON ON OFF with original race build and capacity gates
+      - name: Run baseline diagnostic diagnostic baseline with original capacity gates
         timeout-minutes: 105
-        run: python3 -B scripts/ci/packet_trace.py > "$VPNCTL_TRACE_ROOT/controller.log" 2>&1
+        run: python3 -B scripts/ci/maintenance_cost.py > "$VPNCTL_TRACE_ROOT/controller.log" 2>&1
       - name: Encrypt evidence for the private off-runner key
         id: seal
         if: always() && env.VPNCTL_TRACE_ROOT != ''
