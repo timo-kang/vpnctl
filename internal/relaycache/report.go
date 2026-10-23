@@ -3,6 +3,7 @@
 package relaycache
 
 import (
+	"errors"
 	"time"
 
 	"vpnctl/internal/relaycatalog"
@@ -58,18 +59,33 @@ func (s *Store) Status() (Report, error) {
 		return Report{}, osClosed()
 	}
 	if s.uncertain {
-		return s.report(), ErrUncertain
+		return s.report(ErrUncertain)
 	}
 	// Persist every clock high-water mark: observing expiry must not be undone
 	// by a later rollback, including after restart. The mutex-owned state was
 	// validated when loaded/changed; only its scalar timestamp changes here.
 	// Do not clone and rederive every private/public key pair on each read.
 	if e := s.checkpointClock(); e != nil {
-		return s.report(), e
+		return s.report(e)
 	}
-	return s.report(), nil
+	return s.report(nil)
 }
-func (s *Store) report() Report {
+func (s *Store) report(cause error) (Report, error) {
+	return s.reportAt(s.now(), cause)
+}
+
+// Caller holds mu. Use one clock sample for the decision and its durable
+// watermark: storage may cross expiry, or the clock may move while writing.
+// Only the first observation beyond expiry needs this additional checkpoint.
+func (s *Store) reportAt(now time.Time, cause error) (Report, error) {
+	if v := s.state.Catalog; !s.uncertain && v != nil && !now.Before(v.ExpiresAt) && s.state.ObservedAt.Before(v.ExpiresAt) {
+		next := s.state
+		next.ObservedAt = now.UTC()
+		if err := s.commitValidated(next); err != nil {
+			s.uncertain = true
+			cause = errors.Join(cause, err)
+		}
+	}
 	r := MissingReport(s.nodeID)
 	r.ControllerID = s.state.ControllerID
 	r.ObservedGeneration = s.state.Generation
@@ -85,9 +101,9 @@ func (s *Store) report() Report {
 		v := cloneView(*s.state.Catalog)
 		r.Catalog = &v
 		r.Validity = "valid"
-		if s.clockRegressed() || v.IssuedAt.After(s.now().Add(30*time.Second)) {
+		if now.Add(30*time.Second).Before(s.state.ObservedAt) || v.IssuedAt.After(now.Add(30*time.Second)) {
 			r.Validity = "clock_skew"
-		} else if !s.currentTime().Before(v.ExpiresAt) {
+		} else if !now.Before(v.ExpiresAt) || !s.state.ObservedAt.Before(v.ExpiresAt) {
 			r.Validity = "expired"
 		}
 		wanted, prepared := 0, 0
@@ -136,7 +152,7 @@ func (s *Store) report() Report {
 		r.Preparation = "blocked"
 		r.UsableCache = false
 	}
-	return r
+	return r, cause
 }
 
 func busyReport(node string) Report {

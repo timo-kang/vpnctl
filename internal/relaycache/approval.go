@@ -111,11 +111,15 @@ func (s *Store) LeaseApproval() (ApprovalWitness, time.Time, uint64, error) {
 		return ApprovalWitness{}, time.Time{}, 0, ErrBusy
 	}
 	defer s.mu.Unlock()
-	if s.closed || s.uncertain || !s.report().UsableCache || s.state.Approval == nil {
+	if s.closed || s.uncertain || s.state.Approval == nil {
 		return ApprovalWitness{}, time.Time{}, 0, errors.New("node lease approval unavailable")
 	}
-	w := *s.state.Approval
 	stamp := s.stamp()
+	r, err := s.reportAt(stamp.at, nil)
+	if err != nil || !r.UsableCache {
+		return ApprovalWitness{}, time.Time{}, 0, errors.Join(errors.New("node lease approval unavailable"), err)
+	}
+	w := *s.state.Approval
 	if stamp.domain != w.Domain || stamp.boot < w.RequestBootNS || stamp.boot >= w.UntilBootNS || !stamp.at.Before(w.ExpiresAt) {
 		return ApprovalWitness{}, time.Time{}, 0, errors.New("node approval domain changed or expired")
 	}

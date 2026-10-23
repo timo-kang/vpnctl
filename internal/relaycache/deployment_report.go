@@ -3,7 +3,9 @@
 package relaycache
 
 import (
+	"errors"
 	"time"
+
 	"vpnctl/internal/relaycatalog"
 )
 
@@ -44,19 +46,30 @@ func (s *DeploymentStore) Status() (DeploymentReport, error) {
 		return DeploymentReport{}, osClosed()
 	}
 	if s.uncertain {
-		return s.report(), ErrUncertain
+		return s.report(ErrUncertain)
 	}
 	if e := s.save(s.state); e != nil {
-		return s.report(), e
+		return s.report(e)
 	}
-	return s.report(), nil
+	return s.report(nil)
 }
 func (s *DeploymentStore) busyReport() DeploymentReport {
 	r := MissingDeploymentReport(s.principal, s.relay)
 	r.Validity = "busy"
 	return r
 }
-func (s *DeploymentStore) report() DeploymentReport {
+func (s *DeploymentStore) report(cause error) (DeploymentReport, error) {
+	// A save can finish after expiry even though its watermark predates it.
+	// Persist the clock sample used for this decision before publishing expiry.
+	now := s.now()
+	if d := s.state.Deployment; !s.uncertain && d != nil && !now.Before(d.ExpiresAt) && s.state.ObservedAt.Before(d.ExpiresAt) {
+		next := s.state
+		next.ObservedAt = now.UTC()
+		if err := s.save(next); err != nil {
+			s.uncertain = true
+			cause = errors.Join(cause, err)
+		}
+	}
 	r := MissingDeploymentReport(s.principal, s.relay)
 	r.ControllerID, r.ObservedGeneration = s.state.ControllerID, s.state.Generation
 	r.Refresh, r.BlockedReason = s.state.Refresh, s.state.BlockedReason
@@ -64,9 +77,9 @@ func (s *DeploymentStore) report() DeploymentReport {
 		copy := copyDeployment(*d)
 		r.Deployment = &copy
 		r.Validity = "valid"
-		if s.clockRegressed() || d.IssuedAt.After(s.now().Add(30*time.Second)) {
+		if now.Add(30*time.Second).Before(s.state.ObservedAt) || d.IssuedAt.After(now.Add(30*time.Second)) {
 			r.Validity = "clock_skew"
-		} else if !s.currentTime().Before(d.ExpiresAt) {
+		} else if !now.Before(d.ExpiresAt) || !s.state.ObservedAt.Before(d.ExpiresAt) {
 			r.Validity = "expired"
 		}
 	}
@@ -77,5 +90,5 @@ func (s *DeploymentStore) report() DeploymentReport {
 		r.Validity = "uncertain"
 	}
 	r.ApprovalValid = r.Validity == "valid" && r.BlockedReason == ""
-	return r
+	return r, cause
 }
