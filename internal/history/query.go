@@ -32,6 +32,19 @@ func ValidateQuery(window, width time.Duration) error {
 	return nil
 }
 
+func legacyProbeQuery(window time.Duration) string {
+	if window == Retention {
+		// A full-retention read visits nearly every retained row. Scanning the
+		// WITHOUT ROWID primary tree once avoids a second B-tree lookup per
+		// sample through probe_stream_time. Unary + excludes that time index;
+		// primary ID order needs no SQLite sort. Only jitter requires time
+		// order, restored below from compact samples. Ties are ambiguous.
+		// Stored timestamps and bound parameters are integers.
+		return "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND +ts>? AND +ts<=? ORDER BY id"
+	}
+	return "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=? ORDER BY ts,id"
+}
+
 // Query returns complete buckets, including null-valued gaps, for every retained
 // stream in scope. The query is a single SQLite read snapshot. A cancelled or
 // over-budget query returns an error, never a partial successful response.
@@ -78,8 +91,10 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 	start := end.Add(-window)
 	n := int(math.Ceil(float64(window) / float64(width)))
 	out := make([]Bucket, 0, len(streams)*n)
+	var jitterSamples []legacyJitterSample
 	seen := 0
 	for _, st := range streams {
+		jitterSamples = jitterSamples[:0]
 		buckets := make([]Bucket, n)
 		rtts := make([][]int64, n)
 		sums := make([]int64, n)
@@ -87,7 +102,7 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 		for i := range buckets {
 			buckets[i] = Bucket{Stream: st.Stream, Time: start.Add(time.Duration(i) * width).UTC()}
 		}
-		rows, e := tx.QueryContext(ctx, "SELECT ts,rtt,unknown FROM probes WHERE stream=? AND ts>? AND ts<=? ORDER BY ts,id", st.id, start.UnixMicro(), end.UnixMicro())
+		rows, e := tx.QueryContext(ctx, legacyProbeQuery(window), st.id, start.UnixMicro(), end.UnixMicro())
 		if e != nil {
 			return nil, e
 		}
@@ -106,7 +121,15 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 			}
 			i := int((ts - start.UnixMicro() - 1) / width.Microseconds())
 			b := &buckets[i]
-			jitters[i].Add(ts, rtt.Int64, rtt.Valid && !unknown)
+			if window == Retention {
+				us := int64(-1)
+				if rtt.Valid && !unknown {
+					us = rtt.Int64
+				}
+				jitterSamples = append(jitterSamples, legacyJitterSample{ts, us})
+			} else {
+				jitters[i].Add(ts, rtt.Int64, rtt.Valid && !unknown)
+			}
 			if unknown {
 				b.UnknownCount++
 				continue
@@ -122,6 +145,23 @@ func (s *Store) Query(ctx context.Context, node string, end time.Time, window, w
 		rows.Close()
 		if e != nil {
 			return nil, e
+		}
+		if window == Retention {
+			if err = ctx.Err(); err != nil {
+				return nil, err
+			}
+			if err = sortLegacyJitter(ctx, jitterSamples); err != nil {
+				return nil, err
+			}
+			for j, sample := range jitterSamples {
+				if j%1024 == 0 {
+					if err = ctx.Err(); err != nil {
+						return nil, err
+					}
+				}
+				i := int((sample.at - start.UnixMicro() - 1) / width.Microseconds())
+				jitters[i].Add(sample.at, sample.rttUS, sample.rttUS >= 0)
+			}
 		}
 		for i := range buckets {
 			if err = ctx.Err(); err != nil {
