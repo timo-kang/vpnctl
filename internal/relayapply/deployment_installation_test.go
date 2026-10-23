@@ -211,46 +211,10 @@ func TestRelayInstallationCrashAtEveryKernelStep(t *testing.T) {
 }
 
 func TestRelayInstallationStorageFailureAtEveryBoundary(t *testing.T) {
-	// Enrollment (journal then independent consent) followed by each creation
-	// cursor, ownership write, in-flight marker and completion write.
 	for point := 1; point <= 23; point++ {
 		for _, after := range []bool{false, true} {
 			t.Run(fmt.Sprintf("write%d/after%v", point, after), func(t *testing.T) {
-				e, k, c, _, o, dir := deploymentFixture(t, 1)
-				fault := &failingDeploymentCache{deploymentCache: e.cache, failAt: point, after: after}
-				e.cache = fault
-				_, err := e.RequestInstallation(context.Background(), o)
-				for n := 0; n < 12 && err == nil; n++ {
-					_, err = e.RebuildInstallations(context.Background(), installationWitness(t))
-				}
-				if !errors.Is(err, errDeploymentStorageInjected) || fault.calls != point {
-					t.Fatalf("wrong storage boundary failure: point=%d calls=%d err=%v", point, fault.calls, err)
-				}
-				for _, v := range k.objects {
-					if v.lease.Active {
-						t.Fatal("failed persistence granted traffic")
-					}
-				}
-				e, c = reopenDeployment(t, e, c, dir)
-				if err := validateInstallations(e.journal); err != nil {
-					t.Fatal(err)
-				}
-				// Enrollment interrupted before consent cannot install; otherwise reopen
-				// cleans an uncertain add and resumes with a new authenticated witness.
-				if len(e.journal.Installations) == 0 {
-					return
-				}
-				allowed, err := c.InstallationConsent(o.EndpointID, e.journal.Installations[0].Revision)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !allowed {
-					if _, err := e.RebuildInstallations(context.Background(), installationWitness(t)); err != nil || len(k.objects) != 0 {
-						t.Fatal(err)
-					}
-					return
-				}
-				installationReady(t, e)
+				checkInstallationStorageBoundary(t, point, after, false)
 			})
 		}
 	}
