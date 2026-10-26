@@ -569,6 +569,15 @@ AUTO_MANAGER_STEPS = {
     'watch-restart', 'controller-offline-valid',
     'approval-expired-offline', 'fresh-approval-awaiting-relay-apply', 'fresh-approval-recovery',
 }
+AUTO_MANAGER_SLO_REPEAT_STEPS = (
+    {f'flap-down-{i}' for i in range(2, 19)}
+    | {f'flap-up-{i}' for i in range(2, 19)}
+    | {f'relay-down-repeat-{i}' for i in range(1, 20)}
+    | {f'relay-recovery-repeat-{i}' for i in range(1, 20)}
+    | {f'all-relays-down-repeat-{i}' for i in range(1, 20)}
+    | {f'alternate-recovery-repeat-{i}' for i in range(1, 20)}
+    | {'preferred-recovery-after-slo'}
+)
 INSTALL_MANAGER_STEPS = {'intent-enrolled', 'intent-controller-offline-valid', 'intent-expired-offline',
                          'intent-offline-relay-restart', 'intent-fresh-approval-recovery'}
 AUTO_PACKET_KINDS = {'tcp-new', 'tcp-existing', 'udp', 'independent-app', 'rf-lan', 'gimbal-lan'}
@@ -580,7 +589,7 @@ def validate_manager_auto_result(status, paths, installation=False):
             or report.get('mode') != 'automatic' or report.get('trace_error') != ''):
         raise RuntimeError('automatic manager test failed or omitted complete evidence')
     steps = report.get('steps', [])
-    expected = AUTO_MANAGER_STEPS | (INSTALL_MANAGER_STEPS if installation else set())
+    expected = AUTO_MANAGER_STEPS | AUTO_MANAGER_SLO_REPEAT_STEPS | (INSTALL_MANAGER_STEPS if installation else set())
     if report.get('installation_mode', False) is not installation:
         raise RuntimeError('incorrect installation test mode')
     if (len(steps) != len(expected) or {s.get('name') for s in steps} != expected
@@ -640,7 +649,7 @@ def validate_manager_auto_result(status, paths, installation=False):
             if not last <= at <= end:
                 raise RuntimeError('unordered execution checkpoint')
             last = at
-    samples = []
+    samples = {'underlay-failover': [], 'relay-failover': [], 'no-uplink': []}
     for step in steps:
         if not 0 < step.get('begin_monotonic_ns', 0) <= step.get('action_completed_monotonic_ns', 0) <= step.get('ready_observed_monotonic_ns', 0) <= step.get('end_monotonic_ns', 0):
             raise RuntimeError('invalid scenario clock evidence')
@@ -664,7 +673,7 @@ def validate_manager_auto_result(status, paths, installation=False):
             if (failures != lan['failed_samples']
                     or failures != sum(step['traffic'][kind].get('failed', 0) for kind in ('rf-lan', 'gimbal-lan'))):
                 raise RuntimeError('LAN interruption count mismatch')
-        if step.get('metric') not in ('failover', 'no-uplink'):
+        if step.get('metric') not in samples:
             continue
         slo = step.get('slo', {})
         state = slo.get('status')
@@ -673,7 +682,7 @@ def validate_manager_auto_result(status, paths, installation=False):
         if state != 'unmeasured' and (state == 'pass') != (0 <= slo.get('elapsed_ms', -1) <= 10000):
             raise RuntimeError('false SLO classification')
         if state != 'unmeasured':
-            failover = step['metric'] == 'failover'
+            failover = step['metric'] != 'no-uplink'
             timeline = step.get('failover_timeline' if failover else 'no_uplink_timeline', {})
             begin = step['begin_monotonic_ns']
             finish = timeline.get('first_success' if failover else 'decision_complete', 0)
@@ -685,13 +694,39 @@ def validate_manager_auto_result(status, paths, installation=False):
                     or (not failover and step.get('no_uplink_evidence_state') != 'no_verified_path')
                     or abs(slo['elapsed_ms'] - (finish - begin) / 1e6) > 1e-6):
                 raise RuntimeError('SLO does not match measured restoration timeline')
-        samples.append(slo)
+        samples[step['metric']].append(slo)
     summary = report.get('slo_summary', {})
-    if (len(samples) != 5 or summary.get('samples') != len(samples)
-            or summary.get('misses') != sum(s['status'] == 'fail' for s in samples)
-            or summary.get('unmeasured') != sum(s['status'] == 'unmeasured' for s in samples)
-            or summary.get('p95_status') != 'unqualified_insufficient_samples'
-            or summary.get('required_samples_per_class') != 20):
+    required = summary.get('required_samples_per_class')
+    if required != 20 or set(summary.get('by_class', {})) != set(samples):
+        raise RuntimeError('incomplete or misleading SLO summary')
+    class_statuses = []
+    all_samples = [sample for group in samples.values() for sample in group]
+    if (summary.get('samples') != len(all_samples)
+            or summary.get('misses') != sum(s['status'] == 'fail' for s in all_samples)
+            or summary.get('unmeasured') != sum(s['status'] == 'unmeasured' for s in all_samples)):
+        raise RuntimeError('incomplete or misleading SLO summary')
+    for metric, measured in samples.items():
+        actual = summary['by_class'][metric]
+        values = sorted(s['elapsed_ms'] for s in measured if s['status'] != 'unmeasured')
+        misses = sum(s['status'] == 'fail' for s in measured)
+        unmeasured = sum(s['status'] == 'unmeasured' for s in measured)
+        p95 = values[math.ceil(0.95 * len(values)) - 1] if values else None
+        if len(measured) < required:
+            p95_status = 'unqualified_insufficient_samples'
+        elif unmeasured:
+            p95_status = 'unqualified_unmeasured'
+        else:
+            p95_status = 'fail' if p95 > 10000 else 'pass'
+        if (actual.get('samples') != len(measured) or actual.get('misses') != misses
+                or actual.get('unmeasured') != unmeasured or actual.get('p95_status') != p95_status
+                or (p95 is None) != (actual.get('p95_ms') is None)
+                or p95 is not None and (type(actual.get('p95_ms')) not in (int, float)
+                                        or not math.isfinite(actual['p95_ms'])
+                                        or abs(actual['p95_ms'] - p95) > 1e-6)):
+            raise RuntimeError('incomplete or misleading SLO class summary')
+        class_statuses.append(p95_status)
+    overall = 'fail' if 'fail' in class_statuses else 'pass' if all(s == 'pass' for s in class_statuses) else 'unqualified'
+    if summary.get('p95_status') != overall:
         raise RuntimeError('incomplete or misleading SLO summary')
 
 def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared', uplink_api=False):

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -20,13 +21,111 @@ import (
 // reservations, after the fixture fallback rule at 32760 and before main.
 const managerForeignRulePriority = "32761"
 
+const managerAutoSLOSamplesPerClass = 20
+
+func managerAutoSLOSummary(steps []map[string]any) map[string]any {
+	byClass := map[string]map[string]any{}
+	overall := "pass"
+	totalSamples, totalMisses, totalUnmeasured := 0, 0, 0
+	for _, metric := range []string{"underlay-failover", "relay-failover", "no-uplink"} {
+		values := []float64{}
+		misses, unmeasured, samples := 0, 0, 0
+		for _, step := range steps {
+			if step["metric"] != metric {
+				continue
+			}
+			slo, ok := step["slo"].(map[string]any)
+			if !ok {
+				continue
+			}
+			samples++
+			switch slo["status"] {
+			case "pass", "fail":
+				if elapsed, ok := slo["elapsed_ms"].(float64); ok {
+					values = append(values, elapsed)
+				}
+				if slo["status"] == "fail" {
+					misses++
+				}
+			case "unmeasured":
+				unmeasured++
+			}
+		}
+		totalSamples += samples
+		totalMisses += misses
+		totalUnmeasured += unmeasured
+		sort.Float64s(values)
+		var p95 any
+		status := "unqualified_insufficient_samples"
+		if len(values) > 0 {
+			// Nearest-rank p95 is ceil(0.95*N), indexed from one.
+			rank := (95*len(values) + 99) / 100
+			value := values[rank-1]
+			p95 = value
+		}
+		if samples >= managerAutoSLOSamplesPerClass {
+			if unmeasured > 0 || len(values) != samples {
+				status = "unqualified_unmeasured"
+			} else if p95.(float64) > 10000 {
+				status = "fail"
+			} else {
+				status = "pass"
+			}
+		}
+		if status != "pass" {
+			if status == "fail" {
+				overall = "fail"
+			} else if overall != "fail" {
+				overall = "unqualified"
+			}
+		}
+		byClass[metric] = map[string]any{"samples": samples, "misses": misses, "unmeasured": unmeasured,
+			"p95_ms": p95, "p95_status": status}
+	}
+	return map[string]any{"samples": totalSamples, "misses": totalMisses, "unmeasured": totalUnmeasured,
+		"p95_status": overall, "required_samples_per_class": managerAutoSLOSamplesPerClass, "by_class": byClass}
+}
+
+func TestManagerAutoSLOSummaryUsesNearestRankPerClass(t *testing.T) {
+	steps := make([]map[string]any, 0, 60)
+	for i := 1; i <= managerAutoSLOSamplesPerClass; i++ {
+		steps = append(steps,
+			map[string]any{"metric": "underlay-failover", "slo": map[string]any{"status": "pass", "elapsed_ms": float64(i * 100)}},
+			map[string]any{"metric": "relay-failover", "slo": map[string]any{"status": "pass", "elapsed_ms": float64(i * 150)}},
+			map[string]any{"metric": "no-uplink", "slo": map[string]any{"status": "pass", "elapsed_ms": float64(i * 200)}},
+		)
+	}
+	summary := managerAutoSLOSummary(steps)
+	byClass := summary["by_class"].(map[string]map[string]any)
+	if summary["samples"] != 60 || summary["p95_status"] != "pass" ||
+		byClass["underlay-failover"]["p95_ms"] != float64(1900) ||
+		byClass["relay-failover"]["p95_ms"] != float64(2850) ||
+		byClass["no-uplink"]["p95_ms"] != float64(3800) {
+		t.Fatalf("unexpected per-class nearest-rank p95: %#v", summary)
+	}
+	steps = steps[:len(steps)-2]
+	summary = managerAutoSLOSummary(steps)
+	if summary["p95_status"] != "unqualified" || summary["samples"] != 58 {
+		t.Fatalf("incomplete class population qualified: %#v", summary)
+	}
+	unmeasured := make([]map[string]any, managerAutoSLOSamplesPerClass)
+	for i := range unmeasured {
+		unmeasured[i] = map[string]any{"metric": "no-uplink", "slo": map[string]any{"status": "unmeasured"}}
+	}
+	summary = managerAutoSLOSummary(unmeasured)
+	byClass = summary["by_class"].(map[string]map[string]any)
+	if summary["p95_status"] != "unqualified" || byClass["no-uplink"]["p95_status"] != "unqualified_unmeasured" {
+		t.Fatalf("unmeasured class incorrectly qualified: %#v", summary)
+	}
+}
+
 func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[string]any, logs map[string]string, watchers map[string]*networkProcess, startWatch func(string) *networkProcess, configDigests map[string]string, snapshot func() map[string]any, size int, lanNS map[string]string) {
 	t.Helper()
 	report["clock"] = "CLOCK_MONOTONIC; same guest boot; excludes suspend; not authorization evidence"
 	report["mode"] = "automatic"
 	report["policy"] = map[string]any{"successes": 2, "hold_down_ms": 10000, "minimum_dwell_ms": 15000, "interval_ms": 500, "probe_timeout_ms": 1000}
 	report["existing_tcp_contract"] = "fresh socket before each applicable fault, no reconnect within that phase; explicit session IDs; nonce framing survives partial reads/timeouts; server idle limit 30 minutes"
-	report["slo_contract"] = "individual failover/no-uplink limit 10s; nearest-rank p95 requires at least 20 measured transitions per class/profile; incomplete samples never qualify"
+	report["slo_contract"] = "underlay failover, relay failover, and no-uplink each have a 10s limit; nearest-rank p95 requires at least 20 measured transitions per class/profile; incomplete samples never qualify"
 	report["no_uplink_scope"] = "all permitted candidates failed for this server target (no_verified_path); guarded unknown/blocked state is not conclusive no-uplink evidence or physical-link diagnosis"
 	trace := startManagerCycleTrace(logs)
 	t.Cleanup(func() {
@@ -282,7 +381,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		// Selection/route command completion are separate from verified payload.
 		timeline := managerTimeline(packets, cycles, before.Selection.DesiredPathID, desired, sourceFor(desired), begin)
 		row["timeline"] = timeline
-		if metric == "failover" {
+		if metric == "underlay-failover" || metric == "relay-failover" {
 			// Any freshly applied approved alternative can restore service.
 			// Returning to the fixture's preferred path may happen much later
 			// after minimum dwell/hold-down; keep that convergence separately.
@@ -298,7 +397,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			}
 		}
 		firstSuccess, decided, applied := timeline["first_success"], timeline["decision_complete"], timeline["routes_completed"]
-		if metric == "failover" || metric == "no-uplink" {
+		if metric == "underlay-failover" || metric == "relay-failover" || metric == "no-uplink" {
 			finish := firstSuccess
 			if metric == "no-uplink" {
 				finish = decided
@@ -328,8 +427,8 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	}
 	phase("baseline", "none", "p00", "baseline", true, func() { time.Sleep(time.Second) })
 	initial := latestApplicationResult(logs["app"])
-	phase("nm-down", "NetworkManager", "p01", "failover", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "down", "vpnctl-wan") })
-	phase("relay0-down", "kernel fault", "p11", "failover", true, func() { netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down") })
+	phase("nm-down", "NetworkManager", "p01", "underlay-failover", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "down", "vpnctl-wan") })
+	phase("relay0-down", "kernel fault", "p11", "relay-failover", true, func() { netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down") })
 	phase("all-relays-down", "kernel fault", "", "no-uplink", false, func() { netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "down") })
 	alternate := phase("alternate-recovery", "kernel fault", "p11", "recovery", false, func() { netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "up") })
 	preferred := phase("preferred-recovery", "NetworkManager and kernel fault", "p00", "recovery", true, func() {
@@ -393,10 +492,31 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		managerCommand(t, "nft", "add", "chain", "inet", "manager_foreign", "input", "{ type filter hook input priority 10; policy accept; }")
 		managerCommand(t, "nft", "flush", "chain", "inet", "manager_foreign", "input")
 	})
-	for i := 0; i < 2; i++ {
-		phase(fmt.Sprintf("flap-down-%d", i), "NetworkManager", "p01", "failover", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "down", "vpnctl-wan") })
+	for i := 0; i < managerAutoSLOSamplesPerClass-1; i++ {
+		phase(fmt.Sprintf("flap-down-%d", i), "NetworkManager", "p01", "underlay-failover", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "down", "vpnctl-wan") })
 		phase(fmt.Sprintf("flap-up-%d", i), "NetworkManager", "p00", "recovery", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "up", "vpnctl-wan") })
 	}
+	for i := 1; i < managerAutoSLOSamplesPerClass; i++ {
+		phase(fmt.Sprintf("relay-down-repeat-%d", i), "kernel fault", "p11", "relay-failover", true, func() {
+			netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down")
+		})
+		phase(fmt.Sprintf("relay-recovery-repeat-%d", i), "kernel fault", "p00", "recovery", true, func() {
+			netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "up")
+		})
+	}
+	for i := 1; i < managerAutoSLOSamplesPerClass; i++ {
+		phase(fmt.Sprintf("all-relays-down-repeat-%d", i), "kernel fault", "", "no-uplink", false, func() {
+			netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down")
+			netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "down")
+		})
+		phase(fmt.Sprintf("alternate-recovery-repeat-%d", i), "kernel fault", "p11", "recovery", false, func() {
+			netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "up")
+		})
+	}
+	phase("preferred-recovery-after-slo", "NetworkManager and kernel fault", "p00", "recovery", true, func() {
+		netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "up")
+		managerCommand(t, "nmcli", "--wait", "15", "connection", "up", "vpnctl-wan")
+	})
 	phase("nm-shared-up", "NetworkManager DHCP/NAT", "p00", "maintenance", true, func() { managerSharedUp(t, f, lanNS["shared0"], report, snapshot) })
 	phase("nm-shared-down", "NetworkManager DHCP/NAT", "p00", "maintenance", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "down", "vpnctl-shared") })
 	_, foreignPeer := wgKeyPair(t)
@@ -561,23 +681,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	}
 	report["final"] = snapshot()
 	report["foreign_policy_preserved"] = true
-	// Sample count is deliberately explicit: this functional matrix alone does
-	// not establish a fleet p95, even when every individual observation is fast.
-	samples := 0
-	misses := 0
-	unmeasured := 0
-	for _, raw := range report["steps"].([]map[string]any) {
-		if slo, ok := raw["slo"].(map[string]any); ok {
-			samples++
-			if slo["status"] == "fail" {
-				misses++
-			}
-			if slo["status"] == "unmeasured" {
-				unmeasured++
-			}
-		}
-	}
-	report["slo_summary"] = map[string]any{"samples": samples, "misses": misses, "unmeasured": unmeasured, "p95_status": "unqualified_insufficient_samples", "required_samples_per_class": 20}
+	report["slo_summary"] = managerAutoSLOSummary(report["steps"].([]map[string]any))
 	managerFinalInventory(t, f, report, size)
 	trace.close()
 	watchers["app"].terminate(t)
