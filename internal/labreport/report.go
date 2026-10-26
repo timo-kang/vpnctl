@@ -21,6 +21,7 @@ import (
 
 var phases = []string{"controller_restart", "underlay_loss", "target_restart", "monitor_restart", "node_remove_rejoin", "ca_rotation", "ca_rollback"}
 var operations = []string{"local_monitor", "fleet_status", "storage", "wireguard", "uplink", "events", "alerts"}
+var optionalOperations = []string{"node_probe_delivery_metrics", "monitor_probe_delivery_metrics"}
 
 // This bounded read is emitted only on a peer-population mismatch. Its latency
 // is evidence, not a required observation or a network readiness condition.
@@ -488,14 +489,14 @@ func (a *analyzer) sample(v observation) error {
 			}
 		}
 	}
-	if len(v.Latency) > len(operations)+1 {
+	if len(v.Latency) > len(operations)+len(optionalOperations)+1 {
 		return fmt.Errorf("unexpected operation count")
 	}
 	if a.lat[v.Phase] == nil {
 		a.lat[v.Phase] = map[string][]float64{}
 	}
 	for op, n := range v.Latency {
-		if (!contains(operations, op) && op != peerDiagnosticOperation) || n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
+		if (!contains(operations, op) && !contains(optionalOperations, op) && op != peerDiagnosticOperation) || n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
 			return fmt.Errorf("invalid request latency")
 		}
 		a.lat[v.Phase][op] = append(a.lat[v.Phase][op], n)
