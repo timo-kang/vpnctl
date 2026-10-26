@@ -281,6 +281,10 @@ vpnctl_probe_history_delivery_total{result="quota_dropped"} 2
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("empty counter family = %v, err = %v; want empty counters without error", empty, err)
 	}
+	empty, err = parseProbeHistoryDeliveryMetrics(strings.NewReader("# HELP unrelated_metric unrelated\n# TYPE unrelated_metric counter\nunrelated_metric 1\n"))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("uninitialized counter vector = %v, err = %v; want empty counters without error", empty, err)
+	}
 	for name, malformed := range map[string]string{
 		"missing type": `vpnctl_probe_history_delivery_total{result="queued"} 1`,
 		"extra label":  "# TYPE vpnctl_probe_history_delivery_total counter\nvpnctl_probe_history_delivery_total{result=\"queued\",node=\"n1\"} 1",
@@ -344,7 +348,7 @@ func parseProbeHistoryDeliveryMetrics(r io.Reader) (map[string]uint64, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if !typeSeen {
+	if len(result) > 0 && !typeSeen {
 		return nil, fmt.Errorf("probe history delivery counter missing")
 	}
 	return result, nil
