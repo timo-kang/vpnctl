@@ -176,7 +176,7 @@ func runM2Soak(t *testing.T, rejoinOnly bool) {
 	agents := make([]*networkProcess, size)
 	monitors := make([]*networkProcess, size)
 	startAgent := func(n int) *networkProcess {
-		return startNetworkProcess(t, ns[n+1], filepath.Join(dir, fmt.Sprintf("node-%d.log", n)), nil, bin, "node", "serve", "--config", paths[n], "--retry-delay", "100ms", "--retry-max-delay", "1s")
+		return startNetworkProcess(t, ns[n+1], filepath.Join(dir, fmt.Sprintf("node-%d.log", n)), nil, bin, "node", "serve", "--config", paths[n], "--retry-delay", "100ms", "--retry-max-delay", "1s", "--metrics-port", "19101")
 	}
 	startMonitor := func(n int) *networkProcess {
 		return startNetworkProcess(t, ns[n+1], filepath.Join(dir, fmt.Sprintf("monitor-%d.log", n)), nil, bin, "monitor", "--interface", "wg0", "--watch", "--history-config", paths[n], "--data", filepath.Join(dir, fmt.Sprintf("monitor-%d.db", n)), "--metrics-port", "19100", "--interval", fmt.Sprintf("%ds", cadence))
