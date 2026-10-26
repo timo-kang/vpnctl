@@ -489,7 +489,10 @@ class Handler(BaseHTTPRequestHandler):
                         if installation:
                             env['VPNCTL_VM_RELAY_INSTALL'] = '1'
                     test = 'TestVMNetworkManagerAuto' if automatic else 'TestVMNetworkManagers'
-                    timeout = '20m' if automatic else '12m'
+                    # The automatic fixture now performs 20 independent samples
+                    # per failover class; its complete matrix exceeds Go's old
+                    # 20-minute test deadline on the hosted VM.
+                    timeout = '45m' if automatic else '12m'
                     with (ROOT / 'worker.log').open('wb') as log:
                         WORKER = subprocess.Popen(['/opt/vpnctl-vm/integration.test', '-test.run=^' + test + '$', '-test.v', '-test.timeout=' + timeout],
                                                   env=env, stdout=log, stderr=log, start_new_session=True)
