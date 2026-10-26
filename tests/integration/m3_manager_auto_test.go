@@ -23,6 +23,17 @@ const managerForeignRulePriority = "32761"
 
 const managerAutoSLOSamplesPerClass = 20
 
+// The relay1 selector accepts any of that relay's underlay paths. Failover
+// evidence must not force one specific underlay when several are healthy.
+const managerRelay1Selector = "relay1"
+
+func managerPathMatches(expected, actual string) bool {
+	if expected == managerRelay1Selector {
+		return strings.HasPrefix(actual, "p1")
+	}
+	return expected == actual
+}
+
 func managerAutoSLOSummary(steps []map[string]any) map[string]any {
 	byClass := map[string]map[string]any{}
 	overall := "pass"
@@ -116,6 +127,22 @@ func TestManagerAutoSLOSummaryUsesNearestRankPerClass(t *testing.T) {
 	byClass = summary["by_class"].(map[string]map[string]any)
 	if summary["p95_status"] != "unqualified" || byClass["no-uplink"]["p95_status"] != "unqualified_unmeasured" {
 		t.Fatalf("unmeasured class incorrectly qualified: %#v", summary)
+	}
+}
+
+func TestManagerRelaySelectorAcceptsAnyUnderlayOnThatRelay(t *testing.T) {
+	for _, path := range []string{"p10", "p11", "p12", "p13"} {
+		if !managerPathMatches(managerRelay1Selector, path) {
+			t.Fatalf("valid relay1 underlay rejected: %s", path)
+		}
+	}
+	for _, path := range []string{"p00", "p01", "p20", ""} {
+		if managerPathMatches(managerRelay1Selector, path) {
+			t.Fatalf("path outside relay1 accepted: %s", path)
+		}
+	}
+	if !managerPathMatches("p00", "p00") || managerPathMatches("p00", "p01") {
+		t.Fatal("exact path matching regressed")
 	}
 }
 
@@ -268,22 +295,24 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			lanRecovered = lan["recovered_monotonic_ns"].(int64)
 		}
 		var out relayapply.TargetReconcileResult
+		selectedDesired := desired
 		eventually(t, 120*time.Second, "automatic manager convergence "+name, func() error {
 			_, err := trace.position()
 			if err != "" {
 				t.Fatal(err)
 			}
 			out = latestApplicationResult(logs["app"])
-			if out.Diagnostics == nil || int64(out.Diagnostics.StartedMono) <= begin || out.Selection.DesiredPathID != desired || out.Applied != (desired != "") || desired == "" && !out.Application.Guarded {
+			if out.Diagnostics == nil || int64(out.Diagnostics.StartedMono) <= begin || !managerPathMatches(desired, out.Selection.DesiredPathID) || out.Applied != (desired != "") || desired == "" && !out.Application.Guarded {
 				return fmt.Errorf("desired=%s applied=%v reason=%s application=%s", out.Selection.DesiredPathID, out.Applied, out.Selection.Reason, out.Application.Reason)
 			}
+			selectedDesired = out.Selection.DesiredPathID
 			if desired != "" {
 				source, err := managerAutoTCP(m3Target)
-				if err != nil || source != sourceFor(desired) {
+				if err != nil || source != sourceFor(selectedDesired) {
 					return fmt.Errorf("TCP path source %s: %v", source, err)
 				}
 				source, err = managerAutoUDP()
-				if err != nil || source != sourceFor(desired) {
+				if err != nil || source != sourceFor(selectedDesired) {
 					return fmt.Errorf("UDP path source %s: %v", source, err)
 				}
 			}
@@ -291,8 +320,9 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		})
 		ready := managerMono()
 		row["ready_observed_monotonic_ns"] = ready
+		row["selected_path_id"] = selectedDesired
 		row["result"] = out
-		if desired != "" {
+		if selectedDesired != "" {
 			row["kernel"] = evidence(out)
 		}
 		// Complete fresh, independent packet samples after convergence. Negative
@@ -322,7 +352,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			if !p.OK && (p.Kind == "rf-lan" || p.Kind == "gimbal-lan" || independent && p.Kind == "independent-app") && !managerLANReconfigurationSample(name, p, begin, lanRecovered) {
 				t.Fatal("unaffected communication interrupted", name, p)
 			}
-			if desired != "" && p.Begin >= ready && p.OK && (p.Kind == "tcp-new" || p.Kind == "udp") && p.Source != sourceFor(desired) {
+			if selectedDesired != "" && p.Begin >= ready && p.OK && (p.Kind == "tcp-new" || p.Kind == "udp") && p.Source != sourceFor(selectedDesired) {
 				t.Fatal("post-convergence payload used another relay", name, p)
 			}
 			if desired == "" && p.Begin >= ready && (p.Kind == "tcp-new" || p.Kind == "udp" || p.Kind == "tcp-existing" && p.Sent >= ready) && p.OK {
@@ -379,7 +409,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		row["existing_tcp_outcome"] = streamStatus
 		// Internal checkpoints and the packet sampler share CLOCK_MONOTONIC.
 		// Selection/route command completion are separate from verified payload.
-		timeline := managerTimeline(packets, cycles, before.Selection.DesiredPathID, desired, sourceFor(desired), begin)
+		timeline := managerTimeline(packets, cycles, before.Selection.DesiredPathID, selectedDesired, sourceFor(selectedDesired), begin)
 		row["timeline"] = timeline
 		if metric == "underlay-failover" || metric == "relay-failover" {
 			// Any freshly applied approved alternative can restore service.
@@ -428,9 +458,9 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	phase("baseline", "none", "p00", "baseline", true, func() { time.Sleep(time.Second) })
 	initial := latestApplicationResult(logs["app"])
 	phase("nm-down", "NetworkManager", "p01", "underlay-failover", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "down", "vpnctl-wan") })
-	phase("relay0-down", "kernel fault", "p11", "relay-failover", true, func() { netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down") })
+	phase("relay0-down", "kernel fault", managerRelay1Selector, "relay-failover", true, func() { netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down") })
 	phase("all-relays-down", "kernel fault", "", "no-uplink", false, func() { netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "down") })
-	alternate := phase("alternate-recovery", "kernel fault", "p11", "recovery", false, func() { netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "up") })
+	alternate := phase("alternate-recovery", "kernel fault", managerRelay1Selector, "recovery", false, func() { netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "up") })
 	preferred := phase("preferred-recovery", "NetworkManager and kernel fault", "p00", "recovery", true, func() {
 		netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "up")
 		managerCommand(t, "nmcli", "--wait", "15", "connection", "up", "vpnctl-wan")
@@ -497,7 +527,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		phase(fmt.Sprintf("flap-up-%d", i), "NetworkManager", "p00", "recovery", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "up", "vpnctl-wan") })
 	}
 	for i := 1; i < managerAutoSLOSamplesPerClass; i++ {
-		phase(fmt.Sprintf("relay-down-repeat-%d", i), "kernel fault", "p11", "relay-failover", true, func() {
+		phase(fmt.Sprintf("relay-down-repeat-%d", i), "kernel fault", managerRelay1Selector, "relay-failover", true, func() {
 			netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down")
 		})
 		phase(fmt.Sprintf("relay-recovery-repeat-%d", i), "kernel fault", "p00", "recovery", true, func() {
@@ -509,7 +539,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 			netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down")
 			netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "down")
 		})
-		phase(fmt.Sprintf("alternate-recovery-repeat-%d", i), "kernel fault", "p11", "recovery", false, func() {
+		phase(fmt.Sprintf("alternate-recovery-repeat-%d", i), "kernel fault", managerRelay1Selector, "recovery", false, func() {
 			netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "up")
 		})
 	}
