@@ -504,7 +504,8 @@ class Handler(BaseHTTPRequestHandler):
                 automatic = action == 'manager-auto-result'
                 report = ROOT / ('manager-auto.json' if automatic else 'managers.json')
                 if result['exit'] is not None and report.exists():
-                    if report.stat().st_size > (32 if automatic else 1) * 1024 * 1024:
+                    # Retain full 45-minute packet traces for independent host analysis.
+                    if report.stat().st_size > (64 if automatic else 1) * 1024 * 1024:
                         raise RuntimeError('manager report too large')
                     result['report'] = json.loads(report.read_text())
             elif action == 'start':

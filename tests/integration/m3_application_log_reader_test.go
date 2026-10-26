@@ -110,10 +110,10 @@ func TestLatestApplicationResultReadCostBoundedByTail(t *testing.T) {
 	}
 }
 
-func TestManagerPacketTraceCoversWholeFixture(t *testing.T) {
+func TestManagerPacketTraceCoversWorkerDeadline(t *testing.T) {
 	r := &managerAutoTrace{}
-	// Six 5 Hz samplers, 20 minutes, plus their initial samples.
-	for n := 0; n < 6*(20*60*5+1); n++ {
+	// Six 5 Hz samplers, the 45-minute worker deadline, and their initial samples.
+	for n := 0; n < 6*(45*60*5+1); n++ {
 		r.add(managerAutoEvent{Kind: "rf-lan", OK: true})
 	}
 	if _, failure := r.position(); failure != "" {
