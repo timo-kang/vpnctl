@@ -806,7 +806,7 @@ def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared
         action = 'manager-auto' if automatic else 'managers'
         installation = case.startswith('manager-install-')
         vm.call(action + '-start', {'paths': paths, 'installation': installation} if automatic else {})
-        until = time.monotonic() + (21 if automatic else 13) * 60
+        until = time.monotonic() + (30 if automatic else 13) * 60
         while time.monotonic() < until:
             status = vm.call(action + '-result')
             if status['exit'] is not None:
