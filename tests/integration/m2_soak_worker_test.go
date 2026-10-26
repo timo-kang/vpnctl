@@ -5,12 +5,18 @@
 package integration
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
 	"time"
 	"vpnctl/internal/api"
 	"vpnctl/internal/config"
@@ -21,34 +27,36 @@ import (
 )
 
 type soakObservation struct {
-	PeerDiagnostic         *soakPeerDiagnostic   `json:"peer_diagnostic,omitempty"`
-	WGPeerNodes            []string              `json:"wireguard_peer_nodes"`
-	HeartbeatUnknown       int                   `json:"heartbeat_unknown"`
-	RecentEvents           []history.Event       `json:"recent_events"`
-	CompletedAt            time.Time             `json:"observation_completed_at"`
-	At                     time.Time             `json:"at"`
-	Phase                  string                `json:"phase"`
-	Node                   string                `json:"node"`
-	Error                  string                `json:"error,omitempty"`
-	RegisteredNodes        int                   `json:"registered_nodes"`
-	HeartbeatMaxAgeSeconds float64               `json:"heartbeat_max_age_seconds"`
-	Storage                history.StorageHealth `json:"storage"`
-	Delivery               monitor.HistoryStatus `json:"delivery"`
-	ProbeSamples           int                   `json:"probe_samples"`
-	Sources                map[string]int        `json:"probe_sources"`
-	WGReports              int                   `json:"wireguard_reports_in_page"`
-	UplinkObservedAt       *time.Time            `json:"uplink_observed_at"`
-	WGObservedAt           *time.Time            `json:"wireguard_observed_at"`
-	WGPeers                int                   `json:"wireguard_peers"`
-	UplinkSamples          int                   `json:"uplink_samples"`
-	UplinkFailures         int                   `json:"uplink_failures"`
-	LatestUplinkStage      string                `json:"latest_uplink_failure_stage"`
-	EventCount             int                   `json:"event_count_in_page"`
-	EventsTruncated        bool                  `json:"events_truncated"`
-	Alerts                 []history.Alert       `json:"alerts"`
-	LatencyMS              map[string]float64    `json:"api_latency_ms"`
-	CertificateFingerprint string                `json:"certificate_fingerprint"`
-	CertificateNotAfter    time.Time             `json:"certificate_not_after"`
+	PeerDiagnostic          *soakPeerDiagnostic   `json:"peer_diagnostic,omitempty"`
+	WGPeerNodes             []string              `json:"wireguard_peer_nodes"`
+	HeartbeatUnknown        int                   `json:"heartbeat_unknown"`
+	RecentEvents            []history.Event       `json:"recent_events"`
+	CompletedAt             time.Time             `json:"observation_completed_at"`
+	At                      time.Time             `json:"at"`
+	Phase                   string                `json:"phase"`
+	Node                    string                `json:"node"`
+	Error                   string                `json:"error,omitempty"`
+	RegisteredNodes         int                   `json:"registered_nodes"`
+	HeartbeatMaxAgeSeconds  float64               `json:"heartbeat_max_age_seconds"`
+	Storage                 history.StorageHealth `json:"storage"`
+	Delivery                monitor.HistoryStatus `json:"delivery"`
+	ProbeDeliveryCounters   map[string]uint64     `json:"probe_history_delivery_counters"`
+	MonitorDeliveryCounters map[string]uint64     `json:"monitor_probe_history_delivery_counters"`
+	ProbeSamples            int                   `json:"probe_samples"`
+	Sources                 map[string]int        `json:"probe_sources"`
+	WGReports               int                   `json:"wireguard_reports_in_page"`
+	UplinkObservedAt        *time.Time            `json:"uplink_observed_at"`
+	WGObservedAt            *time.Time            `json:"wireguard_observed_at"`
+	WGPeers                 int                   `json:"wireguard_peers"`
+	UplinkSamples           int                   `json:"uplink_samples"`
+	UplinkFailures          int                   `json:"uplink_failures"`
+	LatestUplinkStage       string                `json:"latest_uplink_failure_stage"`
+	EventCount              int                   `json:"event_count_in_page"`
+	EventsTruncated         bool                  `json:"events_truncated"`
+	Alerts                  []history.Alert       `json:"alerts"`
+	LatencyMS               map[string]float64    `json:"api_latency_ms"`
+	CertificateFingerprint  string                `json:"certificate_fingerprint"`
+	CertificateNotAfter     time.Time             `json:"certificate_not_after"`
 }
 
 func readSoakObservation() error {
@@ -95,6 +103,35 @@ func readSoakObservation() error {
 				v.Delivery = q.History
 			}
 			return e
+		}); e != nil {
+			return e
+		}
+		scrapeDelivery := func(ctx context.Context, endpoint string) (map[string]uint64, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+			if err != nil {
+				return nil, err
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+			}
+			return parseProbeHistoryDeliveryMetrics(io.LimitReader(resp.Body, 1<<20))
+		}
+		if e = request("node_probe_delivery_metrics", func(ctx context.Context) error {
+			var err error
+			v.ProbeDeliveryCounters, err = scrapeDelivery(ctx, "http://127.0.0.1:19101/metrics")
+			return err
+		}); e != nil {
+			return e
+		}
+		if e = request("monitor_probe_delivery_metrics", func(ctx context.Context) error {
+			var err error
+			v.MonitorDeliveryCounters, err = scrapeDelivery(ctx, "http://127.0.0.1:19100/metrics")
+			return err
 		}); e != nil {
 			return e
 		}
@@ -222,4 +259,97 @@ func checkSoakReady(v soakObservation, size int, peers []string, after, now time
 		return fmt.Errorf("current WG peer identities missing: %v", expected)
 	}
 	return nil
+}
+
+func TestParseProbeHistoryDeliveryMetrics(t *testing.T) {
+	input := `# HELP vpnctl_probe_history_delivery_total delivery result
+# TYPE vpnctl_probe_history_delivery_total counter
+vpnctl_probe_history_delivery_total{result="queued"} 17
+vpnctl_probe_history_delivery_total{result="delivered"} 14
+vpnctl_probe_history_delivery_total{result="retry"} 5
+vpnctl_probe_history_delivery_total{result="quota_dropped"} 2
+`
+	got, err := parseProbeHistoryDeliveryMetrics(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]uint64{"queued": 17, "delivered": 14, "retry": 5, "quota_dropped": 2}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parsed counters = %v, want %v", got, want)
+	}
+	empty, err := parseProbeHistoryDeliveryMetrics(strings.NewReader("# HELP vpnctl_probe_history_delivery_total delivery result\n# TYPE vpnctl_probe_history_delivery_total counter\n"))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty counter family = %v, err = %v; want empty counters without error", empty, err)
+	}
+	empty, err = parseProbeHistoryDeliveryMetrics(strings.NewReader("# HELP unrelated_metric unrelated\n# TYPE unrelated_metric counter\nunrelated_metric 1\n"))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("uninitialized counter vector = %v, err = %v; want empty counters without error", empty, err)
+	}
+	for name, malformed := range map[string]string{
+		"missing type": `vpnctl_probe_history_delivery_total{result="queued"} 1`,
+		"extra label":  "# TYPE vpnctl_probe_history_delivery_total counter\nvpnctl_probe_history_delivery_total{result=\"queued\",node=\"n1\"} 1",
+		"fraction":     "# TYPE vpnctl_probe_history_delivery_total counter\nvpnctl_probe_history_delivery_total{result=\"queued\"} 1.5",
+		"duplicate":    "# TYPE vpnctl_probe_history_delivery_total counter\nvpnctl_probe_history_delivery_total{result=\"queued\"} 1\nvpnctl_probe_history_delivery_total{result=\"queued\"} 2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseProbeHistoryDeliveryMetrics(strings.NewReader(malformed)); err == nil {
+				t.Fatal("expected malformed exposition to be rejected")
+			}
+		})
+	}
+}
+
+func parseProbeHistoryDeliveryMetrics(r io.Reader) (map[string]uint64, error) {
+	allowed := map[string]bool{
+		"queued": true, "delivered": true, "retry": true,
+		"overflow_dropped": true, "exhausted_dropped": true,
+		"rejected_dropped": true, "quota_dropped": true,
+		"shutdown_dropped": true, "stopped_dropped": true,
+	}
+	result := make(map[string]uint64)
+	scanner := bufio.NewScanner(r)
+	typeSeen := false
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "# TYPE vpnctl_probe_history_delivery_total ") {
+			if line != "# TYPE vpnctl_probe_history_delivery_total counter" || typeSeen {
+				return nil, fmt.Errorf("invalid probe history delivery metric type")
+			}
+			typeSeen = true
+			continue
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.HasPrefix(fields[0], "vpnctl_probe_history_delivery_total") {
+			continue
+		}
+		if len(fields) != 2 || (fields[0] != "vpnctl_probe_history_delivery_total" && !strings.HasPrefix(fields[0], "vpnctl_probe_history_delivery_total{")) {
+			return nil, fmt.Errorf("malformed probe history delivery metric")
+		}
+		const prefix = `vpnctl_probe_history_delivery_total{result=`
+		if !strings.HasPrefix(fields[0], prefix) || !strings.HasSuffix(fields[0], "}") {
+			return nil, fmt.Errorf("unexpected probe history delivery metric labels")
+		}
+		name, err := strconv.Unquote(strings.TrimSuffix(strings.TrimPrefix(fields[0], prefix), "}"))
+		if err != nil || !allowed[name] {
+			return nil, fmt.Errorf("unknown probe history delivery result")
+		}
+		value, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil || value < 0 || value != math.Trunc(value) || value >= 1<<64 {
+			return nil, fmt.Errorf("invalid probe history delivery counter")
+		}
+		if _, exists := result[name]; exists {
+			return nil, fmt.Errorf("duplicate probe history delivery result %q", name)
+		}
+		result[name] = uint64(value)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(result) > 0 && !typeSeen {
+		return nil, fmt.Errorf("probe history delivery counter missing")
+	}
+	return result, nil
 }

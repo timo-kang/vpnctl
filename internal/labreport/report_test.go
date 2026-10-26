@@ -159,6 +159,24 @@ func TestAnalyzeOptionalPeerDiagnosticLatency(t *testing.T) {
 	}
 }
 
+func TestAnalyzeOptionalDeliveryMetricScrapeLatency(t *testing.T) {
+	f := newFixture(t)
+	for _, row := range f.trace {
+		if row["phase"] == "final" && row["node"] == "node-0" {
+			latency := row["api_latency_ms"].(map[string]float64)
+			latency["node_probe_delivery_metrics"] = 0.4
+			latency["monitor_probe_delivery_metrics"] = 0.6
+			break
+		}
+	}
+	f.save(t)
+	zero := 0
+	r := Analyze(f.dir, f.manifest, &zero)
+	if r.Status != "complete" || finding(r, "trace.jsonl_invalid_record") || r.LatencyMS["final"]["node_probe_delivery_metrics"].Count != 1 || r.LatencyMS["final"]["monitor_probe_delivery_metrics"].Count != 1 {
+		t.Fatalf("delivery metric scrape latencies were not accepted and summarized: %+v", r)
+	}
+}
+
 func TestAnalyzeRejectsMissingAndContradictoryEvidence(t *testing.T) {
 	tests := []struct {
 		name, code, status string
