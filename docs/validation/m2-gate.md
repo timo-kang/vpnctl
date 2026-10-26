@@ -20,6 +20,44 @@ LTE/Wi-Fi/Ethernet 전환 제어는 M3 #21/#22/#24다. WG handshake/counter 증�
 | 장애와 수집 실패의 dashboard/alert 구분 | fleet status, alerts, Prometheus 및 cached 저장 상태 | 실제 alert 평가와 복구 기록, exporter 자체 부재 확인 |
 | 지원 backend의 E2E | 관리/기존 Linux kernel WG, 1/3/8/32 node suite | 선택한 실제 배포 저장장치·CPU·노드 수에서 장기 결과 확인 |
 
+## 2026-10-26 현재 상태 동기화
+
+현재 `main`은 `e11131e`다. 마지막 승인된 24시간 개발 baseline은 `56fbf92` 소스에서
+2026-10-01에 완료한 8노드·86,400.130초 실행이다. 이 baseline은 당시 runner의 실제
+종료·복구 근거로 유지하지만 이후 main 변경을 포함하지 않으며, M2 전체 판정도 아니다.
+해당 trace의 전체 producer population은 `not_reconcilable_from_soak_trace`다.
+
+최신 main workflow [39936035082](https://github.com/timo-kang/vpnctl/actions/runs/39936035082)
+는 성공했다. 직전 [39928869994](https://github.com/timo-kang/vpnctl/actions/runs/39928869994)
+에서는 M3 candidate lifecycle race regression이 실패했다. 최신 성공은 그 실패 기록을
+지우지 않으며, 어느 쪽도 M2 장기·혼합 압력 gate의 증거로 계산하지 않는다.
+
+관련 M2 이슈와 현재 한계:
+
+- [#91](https://github.com/timo-kang/vpnctl/issues/91)은 24시간 baseline 이후 최종 판정
+  대기 상태다. 현재 확인한 issue 기록에는 baseline과 별도로 승인된 압력 포함 24시간 run이 없다.
+- [#115](https://github.com/timo-kang/vpnctl/issues/115)의 PR #113은 짧은 raw/tiered 혼합
+  WAL fixture에서 제어 작업 384건과 HTTP trace를 보존했다. 압력 중 갱신/설치/ACK 지연을
+  측정한 근거지만, 앞서 관측한 2초 초과의 원인이나 같은 24시간 실행의 동작을 설명하지 않는다.
+- [#101](https://github.com/timo-kang/vpnctl/issues/101)의 수정 helper는 로컬 32노드
+  시험 두 번을 통과했고 후속 [CI 37263353158](https://github.com/timo-kang/vpnctl/actions/runs/37263353158)
+  도 성공 종료했다. 원래 실패 실행은 17/18이며 실패 원인이 재현·설명된 것은 아니므로
+  이슈를 원인 해결로 닫지 않는다.
+- [#102](https://github.com/timo-kang/vpnctl/issues/102)의 fuzz 종료 실패는 Go 1.25에서
+  비교 반복으로 재현되지 않았다. 이는 이전 CI 실패 원인이나 종료 경계 결함의 해결 증거가 아니다.
+- [#70](https://github.com/timo-kang/vpnctl/issues/70),
+  [#71](https://github.com/timo-kang/vpnctl/issues/71),
+  [#74](https://github.com/timo-kang/vpnctl/issues/74)는 의도적으로 열려 있다. 최근
+  전체 보존 조회 비용 보강도 실제 생산자의 장기 경로 churn·저장 압력 중 전체 승인/보존/
+  회수/expiry/drop 회계를 대체하지 않는다.
+
+따라서 다음 M2 qualifying run 전에는 장기 soak와 같은 실제 history DB/producer 모집단에서
+압력 입력 및 누적 ID 원장을 대조할 수 있어야 한다. 결과 입력은 bounded하게 유지하고
+기존 `population_reconciliation`의 unknown을 성공으로 바꾸지 않는다. 동일 profile의
+rehearsal에서 trace·누적 수량·제어 지연·압력 회복·종료 코드를 검증한 뒤, 현재 고정 소스와
+대표 배포 profile을 manifest에 기록한 별도 24시간 실행을 시작한다. 기존 baseline과 모든
+실패 자료는 그대로 보존한다.
+
 #70은 관측 생산자 통합, #71은 규모/관계/제어 기능 보호, #74는 영속 집계/조회/부하,
 #17은 이벤트·운영 제품을 담당한다. 해당 결과를 검토한 뒤 #19를 닫는다. 짧은 CI,
 20M 시간 압축 용량 결과 또는 아래 실행기의 `completed=true`만으로 자동 종료하지 않는다.
