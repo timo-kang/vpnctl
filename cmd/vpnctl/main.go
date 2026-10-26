@@ -645,7 +645,11 @@ func nodeServe(args []string) {
 	configPath := fs.String("config", "", "path to YAML config")
 	retryDelay := fs.Duration("retry-delay", 2*time.Second, "initial retry delay")
 	retryMaxDelay := fs.Duration("retry-max-delay", 30*time.Second, "max retry delay")
+	metricsPort := fs.Int("metrics-port", 0, "loopback-only probe-history metrics port (0 = disabled)")
 	_ = fs.Parse(args)
+	if *metricsPort < 0 || *metricsPort > 65535 {
+		fatal(errors.New("--metrics-port must be 0..65535"))
+	}
 
 	if *configPath == "" {
 		fatal(errors.New("--config is required"))
@@ -665,6 +669,14 @@ func nodeServe(args []string) {
 
 	ctx, cancel := signalContext()
 	defer cancel()
+	if *metricsPort > 0 {
+		stopMetrics, address, err := startNodeMetricsHTTP(*metricsPort, cancel)
+		if err != nil {
+			fatal(err)
+		}
+		defer stopMetrics()
+		slog.Info("node metrics listening", "addr", address)
+	}
 
 	var probes agent.ProbeSupervisor
 	defer probes.Close()
