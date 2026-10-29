@@ -25,9 +25,9 @@ import (
 	"vpnctl/internal/relayselect"
 )
 
-// Six samplers emit at most one event per 200ms each. A 20-minute fixture
-// needs up to 36,006 events including initial samples; retain bounded headroom.
-const managerPacketTraceLimit = 40000
+// Six samplers emit at most one event per 200ms each. Keep a 45-minute worker
+// trace plus headroom bounded; 40,000 only covered the former 20-minute run.
+const managerPacketTraceLimit = 100000
 
 var errManagerProtocol = errors.New("invalid manager probe reply")
 
@@ -87,6 +87,8 @@ type managerAutoTrace struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 }
+
+type managerAutoWatchStarter func(target string, holdDown, minimumDwell time.Duration) *networkProcess
 
 func (r *managerAutoTrace) fail(s string) {
 	r.mu.Lock()

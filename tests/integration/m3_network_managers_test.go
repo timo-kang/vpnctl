@@ -212,7 +212,7 @@ func managerTrafficStart(t *testing.T) map[string]*managerTraffic {
 	return result
 }
 
-func TestVMNetworkManagers(t *testing.T) { runManagerVM(t, 4, false) }
+func TestVMNetworkManagers(t *testing.T) { runManagerVM(t, 4, false, false) }
 func TestVMNetworkManagerAuto(t *testing.T) {
 	if os.Getenv("VPNCTL_VM_MANAGER_AUTO") != "1" {
 		t.Skip("requires automatic manager VM runner")
@@ -221,9 +221,9 @@ func TestVMNetworkManagerAuto(t *testing.T) {
 	if err != nil || size != 4 && size != 8 {
 		t.Fatal("manager path count must be 4 or 8")
 	}
-	runManagerVM(t, size, true)
+	runManagerVM(t, size, true, os.Getenv("VPNCTL_VM_RELAY_INSTALL") == "1")
 }
-func runManagerVM(t *testing.T, size int, automatic bool) {
+func runManagerVM(t *testing.T, size int, automatic, installation bool) {
 	if os.Getenv("VPNCTL_VM_MANAGERS") != "1" {
 		t.Skip("requires manager VM runner")
 	}
@@ -325,13 +325,13 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 		pins["app2"] = "p11"
 		app2Source = "198.18.0.12"
 	}
-	startWatch := func(target string) *networkProcess {
+	startWatch := func(target string, holdDown, minimumDwell time.Duration) *networkProcess {
 		args := []string{integrationBinary(t), "node", "relay", "target", "reconcile", "--config", f.node, "--target-id", target, "--watch", "--interval", "500ms"}
 		if pins[target] != "" {
 			args = append(args, "--mode", "manual", "--path-id", pins[target])
 		}
 		if automatic {
-			args = append(args, "--probe-timeout", "1s", "--hold-down", "10s", "--minimum-dwell", "15s")
+			args = append(args, "--probe-timeout", "1s", "--hold-down", holdDown.String(), "--minimum-dwell", minimumDwell.String())
 		}
 		return startNetworkProcess(t, f.robot, logs[target], nil, args...)
 	}
@@ -402,7 +402,7 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 	})
 	report["manager_bootstrap_ready_monotonic_ns"] = managerMono()
 	for target := range pins {
-		watchers[target] = startWatch(target)
+		watchers[target] = startWatch(target, 10*time.Second, 15*time.Second)
 	}
 	ready := func() error {
 		for _, log := range logs {
@@ -436,7 +436,7 @@ func runManagerVM(t *testing.T, size int, automatic bool) {
 	// Raw inventories contain public kernel metadata only, never WG private keys.
 	report["baseline"] = snapshot()
 	if automatic {
-		runManagerAutoScenarios(t, f, report, logs, watchers, startWatch, configDigests, snapshot, size, lanNS)
+		runManagerAutoScenarios(t, f, report, logs, watchers, startWatch, configDigests, snapshot, size, lanNS, installation)
 		return
 	}
 	steps := []struct {

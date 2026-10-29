@@ -280,10 +280,13 @@ class ManagerEvidenceTests(unittest.TestCase):
 
 class AutoManagerEvidenceTests(unittest.TestCase):
     def valid(self):
-        metrics = {'nm-down': 'failover', 'relay0-down': 'failover', 'flap-down-0': 'failover',
-                   'flap-down-1': 'failover', 'all-relays-down': 'no-uplink'}
+        metrics = {'nm-down': 'underlay-failover', 'relay0-down': 'relay-failover', 'flap-down-0': 'underlay-failover',
+                   'flap-down-1': 'underlay-failover', 'all-relays-down': 'quarantine-smoke'}
+        metrics.update({f'flap-down-{i}': 'underlay-failover' for i in range(2, 19)})
+        metrics.update({f'relay-down-repeat-{i}': 'relay-failover' for i in range(1, 20)})
+        metrics.update({f'all-relays-down-repeat-{i}': 'no-uplink' for i in range(1, 21)})
         steps = []
-        for name in observer.AUTO_MANAGER_STEPS:
+        for name in observer.AUTO_MANAGER_STEPS | observer.AUTO_MANAGER_SLO_REPEAT_STEPS:
             row = dict(name=name, passed=True, begin_monotonic_ns=1, action_completed_monotonic_ns=2,
                        ready_observed_monotonic_ns=3, end_monotonic_ns=4,
                        traffic={k: {'ok': 1} for k in observer.AUTO_PACKET_KINDS}, metric=metrics.get(name, 'other'))
@@ -302,15 +305,20 @@ class AutoManagerEvidenceTests(unittest.TestCase):
                       fresh_generation_confirmed=True, recovery_hysteresis_observed=True, foreign_policy_preserved=True,
                       foreign_peer_preserved=True, fallback_positive_control=True,
                       committed_dwell_monotonic_ns=15_000_000_000, health_hold_down_monotonic_ns=10_000_000_000,
+                      slo_measurement_policy=dict(successes=2, hold_down_ms=0, minimum_dwell_ms=0,
+                                                  interval_ms=500, probe_timeout_ms=1000),
                       packets=[dict(sequence=i, kind=k, begin_monotonic_ns=1, end_monotonic_ns=2)
                                for i, k in enumerate(observer.AUTO_PACKET_KINDS, 1)],
                       cycles=[dict(observed_monotonic_ns=3, diagnostics=dict(monotonic_available=True,
                               started_monotonic_ns=1, finished_monotonic_ns=2,
                               checkpoints=[dict(name='decision_complete', monotonic_ns=2)]))],
-                      slo_summary=dict(samples=5, misses=0, unmeasured=0, p95_status='unqualified_insufficient_samples', required_samples_per_class=20))
+                      slo_summary=dict(samples=60, misses=0, unmeasured=0, p95_status='pass', required_samples_per_class=20,
+                                       by_class={kind: dict(samples=20, misses=0, unmeasured=0,
+                                                            p95_ms=0.000002, p95_status='pass')
+                                                 for kind in ('underlay-failover', 'relay-failover', 'no-uplink')}))
         return dict(exit=0, report=report)
 
-    def test_complete_functional_matrix_does_not_claim_p95(self):
+    def test_repeated_transition_samples_qualify_each_p95_class(self):
         observer.validate_manager_auto_result(self.valid(), 4)
 
     def test_lan_reconfiguration_records_losses_without_hiding_late_failure(self):
@@ -347,7 +355,8 @@ class AutoManagerEvidenceTests(unittest.TestCase):
                      lambda r: r['cycles'][0]['diagnostics'].update(monotonic_available=False),
                      lambda r: r['cycles'][0]['diagnostics']['checkpoints'][0].update(monotonic_ns=4),
                      lambda r: r['steps'][0].update(action_completed_monotonic_ns=5),
-                     lambda r: r['slo_summary'].update(p95_status='pass'),
+                     lambda r: r['slo_summary'].update(p95_status='fail'),
+                     lambda r: r['slo_summary']['by_class']['relay-failover'].update(p95_ms=10001),
                      lambda r: r['steps'][0].update(traffic={}),
                      lambda r: r.update(committed_dwell_monotonic_ns=1),
                      lambda r: r.update(health_hold_down_monotonic_ns=1)]
@@ -359,23 +368,34 @@ class AutoManagerEvidenceTests(unittest.TestCase):
 
     def test_miss_is_recorded_but_never_disguised_as_slo_pass(self):
         status = self.valid()
-        row = next(s for s in status['report']['steps'] if 'slo' in s)
-        row['slo'].update(status='fail', elapsed_ms=51000)
-        finish = row['begin_monotonic_ns'] + 51_000_000_000
-        key = 'failover_timeline' if row['metric'] == 'failover' else 'no_uplink_timeline'
-        row[key]['first_success' if row['metric'] == 'failover' else 'decision_complete'] = finish
-        row['ready_observed_monotonic_ns'], row['end_monotonic_ns'] = finish, finish + 1
-        status['report']['slo_summary']['misses'] = 1
-        observer.validate_manager_auto_result(status, 4)
+        rows = [s for s in status['report']['steps'] if s['metric'] == 'underlay-failover'][:2]
+        for row in rows:
+            row['slo'].update(status='fail', elapsed_ms=51000)
+            finish = row['begin_monotonic_ns'] + 51_000_000_000
+            key = 'failover_timeline'
+            row[key]['first_success'] = finish
+            row['ready_observed_monotonic_ns'], row['end_monotonic_ns'] = finish, finish + 1
+        status['report']['slo_summary']['misses'] = 2
+        status['report']['slo_summary']['by_class']['underlay-failover']['misses'] = 2
+        status['report']['slo_summary']['by_class']['underlay-failover']['p95_ms'] = 51000
+        status['report']['slo_summary']['by_class']['underlay-failover']['p95_status'] = 'fail'
+        status['report']['slo_summary']['p95_status'] = 'fail'
+        with self.assertRaisesRegex(RuntimeError, 'SLO qualification'):
+            observer.validate_manager_auto_result(status, 4)
         row['slo']['status'] = 'pass'
         with self.assertRaisesRegex(RuntimeError, 'false SLO'):
             observer.validate_manager_auto_result(status, 4)
 
     def test_unmeasured_is_counted_and_never_qualifies_p95(self):
         status = self.valid()
-        next(s for s in status['report']['steps'] if 'slo' in s)['slo'].update(status='unmeasured')
+        row = next(s for s in status['report']['steps'] if 'slo' in s)
+        row['slo'].update(status='unmeasured')
         status['report']['slo_summary']['unmeasured'] = 1
-        observer.validate_manager_auto_result(status, 4)
+        status['report']['slo_summary']['by_class'][row['metric']].update(
+            unmeasured=1, p95_status='unqualified_unmeasured')
+        status['report']['slo_summary']['p95_status'] = 'unqualified'
+        with self.assertRaisesRegex(RuntimeError, 'SLO qualification'):
+            observer.validate_manager_auto_result(status, 4)
         status['report']['slo_summary']['unmeasured'] = 0
         with self.assertRaisesRegex(RuntimeError, 'SLO summary'):
             observer.validate_manager_auto_result(status, 4)
@@ -386,7 +406,7 @@ class AutoManagerEvidenceTests(unittest.TestCase):
                        lambda s: s['slo'].update(elapsed_ms=1),
                        lambda s: s['failover_timeline'].update(routes_completed=0)):
             status = self.valid()
-            row = next(s for s in status['report']['steps'] if s['metric'] == 'failover')
+            row = next(s for s in status['report']['steps'] if s['metric'] == 'relay-failover')
             change(row)
             with self.assertRaisesRegex(RuntimeError, 'restoration timeline'):
                 observer.validate_manager_auto_result(status, 4)
@@ -399,13 +419,29 @@ class AutoManagerEvidenceTests(unittest.TestCase):
             observer.validate_manager_auto_result(status, 4)
         row['slo']['status'] = 'unmeasured'
         status['report']['slo_summary']['unmeasured'] = 1
-        observer.validate_manager_auto_result(status, 4)
+        status['report']['slo_summary']['by_class']['no-uplink'].update(
+            unmeasured=1, p95_status='unqualified_unmeasured')
+        status['report']['slo_summary']['p95_status'] = 'unqualified'
+        with self.assertRaisesRegex(RuntimeError, 'SLO qualification'):
+            observer.validate_manager_auto_result(status, 4)
 
 class InstallationEvidenceTests(unittest.TestCase):
     def valid(self):
         status = AutoManagerEvidenceTests().valid()
         report = status['report']
         report['installation_mode'] = True
+        report['steps'] = [step for step in report['steps']
+                           if step['name'] not in observer.AUTO_MANAGER_SLO_REPEAT_STEPS]
+        report['slo_summary'] = dict(samples=4, misses=0, unmeasured=0, p95_status='unqualified',
+                                     required_samples_per_class=20,
+                                     by_class={
+                                         'underlay-failover': dict(samples=3, misses=0, unmeasured=0,
+                                                                   p95_ms=0.000002, p95_status='unqualified_insufficient_samples'),
+                                         'relay-failover': dict(samples=1, misses=0, unmeasured=0,
+                                                                p95_ms=0.000002, p95_status='unqualified_insufficient_samples'),
+                                         'no-uplink': dict(samples=0, misses=0, unmeasured=0,
+                                                           p95_ms=None, p95_status='unqualified_insufficient_samples'),
+                                     })
         report['steps'] += [dict(name=name, passed=True, begin_monotonic_ns=1, action_completed_monotonic_ns=2,
                             ready_observed_monotonic_ns=3, end_monotonic_ns=4, metric='authority',
                             traffic={k: {'ok': 1} for k in observer.AUTO_PACKET_KINDS})
@@ -421,6 +457,9 @@ class InstallationEvidenceTests(unittest.TestCase):
 
     def test_complete_installation_matrix(self):
         observer.validate_manager_auto_result(self.valid(), 4, True)
+
+    def test_installation_fixture_does_not_claim_slo_qualification(self):
+        self.assertEqual(self.valid()['report']['slo_summary']['p95_status'], 'unqualified')
 
     def test_manual_or_incomplete_evidence_does_not_qualify(self):
         mutations = [lambda r: r.pop('installation_mode'), lambda r: r['steps'].pop(),
