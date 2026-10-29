@@ -146,7 +146,7 @@ func TestManagerRelaySelectorAcceptsAnyUnderlayOnThatRelay(t *testing.T) {
 	}
 }
 
-func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[string]any, logs map[string]string, watchers map[string]*networkProcess, startWatch func(string) *networkProcess, configDigests map[string]string, snapshot func() map[string]any, size int, lanNS map[string]string) {
+func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[string]any, logs map[string]string, watchers map[string]*networkProcess, startWatch managerAutoWatchStarter, configDigests map[string]string, snapshot func() map[string]any, size int, lanNS map[string]string, installation bool) {
 	t.Helper()
 	report["clock"] = "CLOCK_MONOTONIC; same guest boot; excludes suspend; not authorization evidence"
 	report["mode"] = "automatic"
@@ -459,7 +459,7 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	initial := latestApplicationResult(logs["app"])
 	phase("nm-down", "NetworkManager", "p01", "underlay-failover", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "down", "vpnctl-wan") })
 	phase("relay0-down", "kernel fault", managerRelay1Selector, "relay-failover", true, func() { netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down") })
-	phase("all-relays-down", "kernel fault", "", "no-uplink", false, func() { netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "down") })
+	phase("all-relays-down", "kernel fault", "", "quarantine-smoke", false, func() { netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "down") })
 	alternate := phase("alternate-recovery", "kernel fault", managerRelay1Selector, "recovery", false, func() { netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "up") })
 	preferred := phase("preferred-recovery", "NetworkManager and kernel fault", "p00", "recovery", true, func() {
 		netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "up")
@@ -522,27 +522,65 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 		managerCommand(t, "nft", "add", "chain", "inet", "manager_foreign", "input", "{ type filter hook input priority 10; policy accept; }")
 		managerCommand(t, "nft", "flush", "chain", "inet", "manager_foreign", "input")
 	})
-	for i := 0; i < managerAutoSLOSamplesPerClass-1; i++ {
+	flapCycles := 2 // retain underlay smoke cycles in relay-installation coverage
+	if !installation {
+		flapCycles = managerAutoSLOSamplesPerClass - 1
+	}
+	for i := 0; i < flapCycles; i++ {
 		phase(fmt.Sprintf("flap-down-%d", i), "NetworkManager", "p01", "underlay-failover", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "down", "vpnctl-wan") })
 		phase(fmt.Sprintf("flap-up-%d", i), "NetworkManager", "p00", "recovery", true, func() { managerCommand(t, "nmcli", "--wait", "15", "connection", "up", "vpnctl-wan") })
 	}
-	for i := 1; i < managerAutoSLOSamplesPerClass; i++ {
-		phase(fmt.Sprintf("relay-down-repeat-%d", i), "kernel fault", managerRelay1Selector, "relay-failover", true, func() {
-			netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down")
+	if !installation {
+		// The production 10s hold-down/15s minimum dwell were qualified above.
+		// SLO samples measure failure-to-alternate restoration, so use zero
+		// return delays between independent trials to avoid spending 15s on
+		// every recovery transition. Probe cadence and success confirmations
+		// remain identical to the production-policy qualification.
+		for _, target := range []string{"app", "app2"} {
+			watchers[target].terminate(t)
+			watchers[target] = startWatch(target, 0, 0)
+		}
+		policyRestarted := managerMono()
+		eventually(t, 30*time.Second, "fast SLO watchers ready", func() error {
+			app, independent := latestApplicationResult(logs["app"]), latestApplicationResult(logs["app2"])
+			if app.Diagnostics == nil || independent.Diagnostics == nil || int64(app.Diagnostics.StartedMono) <= policyRestarted || int64(independent.Diagnostics.StartedMono) <= policyRestarted || !app.Applied || !independent.Applied || !managerApprovalReady(app.Selection.Generation, app, independent) {
+				return fmt.Errorf("waiting for both SLO watchers after policy restart")
+			}
+			return nil
 		})
-		phase(fmt.Sprintf("relay-recovery-repeat-%d", i), "kernel fault", "p00", "recovery", true, func() {
-			netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "up")
-		})
+		report["slo_measurement_policy"] = map[string]any{"successes": 2, "hold_down_ms": 0, "minimum_dwell_ms": 0, "interval_ms": 500, "probe_timeout_ms": 1000, "return_delays_excluded": "production hold-down and minimum dwell independently verified before SLO sampling"}
+		for i := 1; i < managerAutoSLOSamplesPerClass; i++ {
+			phase(fmt.Sprintf("relay-down-repeat-%d", i), "kernel fault", managerRelay1Selector, "relay-failover", true, func() {
+				netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down")
+			})
+			phase(fmt.Sprintf("relay-recovery-repeat-%d", i), "kernel fault", "p00", "recovery", true, func() {
+				netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "up")
+			})
+		}
+		for i := 1; i <= managerAutoSLOSamplesPerClass; i++ {
+			phase(fmt.Sprintf("all-relays-down-repeat-%d", i), "kernel fault", "", "no-uplink", false, func() {
+				netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down")
+				netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "down")
+			})
+			phase(fmt.Sprintf("alternate-recovery-repeat-%d", i), "kernel fault", managerRelay1Selector, "recovery", false, func() {
+				netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "up")
+			})
+		}
 	}
-	for i := 1; i < managerAutoSLOSamplesPerClass; i++ {
-		phase(fmt.Sprintf("all-relays-down-repeat-%d", i), "kernel fault", "", "no-uplink", false, func() {
-			netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "down")
-			netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "down")
-		})
-		phase(fmt.Sprintf("alternate-recovery-repeat-%d", i), "kernel fault", managerRelay1Selector, "recovery", false, func() {
-			netOutput(t, f.recipients[1].ns, "ip", "link", "set", "uplink0", "up")
-		})
+	// Restore the deployment hysteresis policy before the remaining manager,
+	// controller-loss, and relay-installation scenarios.
+	for _, target := range []string{"app", "app2"} {
+		watchers[target].terminate(t)
+		watchers[target] = startWatch(target, 10*time.Second, 15*time.Second)
 	}
+	productionPolicyRestarted := managerMono()
+	eventually(t, 30*time.Second, "production-policy watchers ready", func() error {
+		app, independent := latestApplicationResult(logs["app"]), latestApplicationResult(logs["app2"])
+		if app.Diagnostics == nil || independent.Diagnostics == nil || int64(app.Diagnostics.StartedMono) <= productionPolicyRestarted || int64(independent.Diagnostics.StartedMono) <= productionPolicyRestarted || !app.Applied || !independent.Applied {
+			return fmt.Errorf("waiting for both production-policy watchers")
+		}
+		return nil
+	})
 	phase("preferred-recovery-after-slo", "NetworkManager and kernel fault", "p00", "recovery", true, func() {
 		netOutput(t, f.recipients[0].ns, "ip", "link", "set", "uplink0", "up")
 		managerCommand(t, "nmcli", "--wait", "15", "connection", "up", "vpnctl-wan")
@@ -561,7 +599,10 @@ func runManagerAutoScenarios(t *testing.T, f *m3AuthorityFixture, report map[str
 	phase("foreign-peer-removed", "foreign owner cleanup", "p00", "recovery", true, func() {
 		managerCommand(t, "wg", "set", foreignInterface, "peer", foreignPeer, "remove")
 	})
-	phase("watch-restart", "process restart", "p00", "recovery", true, func() { watchers["app"].terminate(t); watchers["app"] = startWatch("app") })
+	phase("watch-restart", "process restart", "p00", "recovery", true, func() {
+		watchers["app"].terminate(t)
+		watchers["app"] = startWatch("app", 10*time.Second, 15*time.Second)
+	})
 	// Controller loss must preserve still-valid approval; record a fresh cycle
 	// before waiting for the actual, shortened approval expiry (no clock changes).
 	approval := f.controller.apply(f.spec, 60)

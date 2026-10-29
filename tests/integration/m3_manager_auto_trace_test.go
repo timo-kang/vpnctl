@@ -88,6 +88,8 @@ type managerAutoTrace struct {
 	wg            sync.WaitGroup
 }
 
+type managerAutoWatchStarter func(target string, holdDown, minimumDwell time.Duration) *networkProcess
+
 func (r *managerAutoTrace) fail(s string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

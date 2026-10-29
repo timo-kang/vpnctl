@@ -568,15 +568,15 @@ AUTO_MANAGER_STEPS = {
     'nm-shared-up', 'nm-shared-down', 'foreign-peer-conflict', 'foreign-peer-removed',
     'watch-restart', 'controller-offline-valid',
     'approval-expired-offline', 'fresh-approval-awaiting-relay-apply', 'fresh-approval-recovery',
+    'preferred-recovery-after-slo',
 }
 AUTO_MANAGER_SLO_REPEAT_STEPS = (
     {f'flap-down-{i}' for i in range(2, 19)}
     | {f'flap-up-{i}' for i in range(2, 19)}
     | {f'relay-down-repeat-{i}' for i in range(1, 20)}
     | {f'relay-recovery-repeat-{i}' for i in range(1, 20)}
-    | {f'all-relays-down-repeat-{i}' for i in range(1, 20)}
-    | {f'alternate-recovery-repeat-{i}' for i in range(1, 20)}
-    | {'preferred-recovery-after-slo'}
+    | {f'all-relays-down-repeat-{i}' for i in range(1, 21)}
+    | {f'alternate-recovery-repeat-{i}' for i in range(1, 21)}
 )
 INSTALL_MANAGER_STEPS = {'intent-enrolled', 'intent-controller-offline-valid', 'intent-expired-offline',
                          'intent-offline-relay-restart', 'intent-fresh-approval-recovery'}
@@ -589,7 +589,7 @@ def validate_manager_auto_result(status, paths, installation=False):
             or report.get('mode') != 'automatic' or report.get('trace_error') != ''):
         raise RuntimeError('automatic manager test failed or omitted complete evidence')
     steps = report.get('steps', [])
-    expected = AUTO_MANAGER_STEPS | AUTO_MANAGER_SLO_REPEAT_STEPS | (INSTALL_MANAGER_STEPS if installation else set())
+    expected = AUTO_MANAGER_STEPS | (set() if installation else AUTO_MANAGER_SLO_REPEAT_STEPS) | (INSTALL_MANAGER_STEPS if installation else set())
     if report.get('installation_mode', False) is not installation:
         raise RuntimeError('incorrect installation test mode')
     if (len(steps) != len(expected) or {s.get('name') for s in steps} != expected
@@ -728,6 +728,12 @@ def validate_manager_auto_result(status, paths, installation=False):
     overall = 'fail' if 'fail' in class_statuses else 'pass' if all(s == 'pass' for s in class_statuses) else 'unqualified'
     if summary.get('p95_status') != overall:
         raise RuntimeError('incomplete or misleading SLO summary')
+    if not installation:
+        policy = report.get('slo_measurement_policy', {})
+        if (policy.get('successes') != 2 or policy.get('hold_down_ms') != 0
+                or policy.get('minimum_dwell_ms') != 0 or policy.get('interval_ms') != 500
+                or policy.get('probe_timeout_ms') != 1000 or overall != 'pass'):
+            raise RuntimeError('SLO qualification incomplete or unqualified')
 
 def exercise(vm, case, mode, delta, result, robot_cpus='0.5', cpu_layout='shared', uplink_api=False):
     vm.launch()
